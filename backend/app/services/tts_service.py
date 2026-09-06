@@ -164,9 +164,9 @@ def generate_stream(
 def _display_filename(output_name: str | None, fmt: str) -> str:
     """Sanitize a client-provided name into a safe download filename.
 
-    Strips directories, falls back to ``output`` when empty, and forces the
+    Strips directories, falls back to `output` when empty, and forces the
     extension to match the generated format so the name never lies about the
-    container (e.g. ``chapter.mp3`` + ``fmt="wav"`` becomes ``chapter.wav``).
+    container (e.g. `chapter.mp3` + `fmt="wav"` becomes `chapter.wav`).
     """
     stem = Path(output_name).stem.strip() if output_name else ""
     return f"{stem or 'output'}.{fmt}"

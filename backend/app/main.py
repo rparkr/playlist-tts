@@ -50,8 +50,8 @@ async def health() -> JSONResponse:
 async def serve_index() -> HTMLResponse:
     """Serve frontend entry point.
 
-    Prefers ``frontend/build/index.html`` (SvelteKit static output), then
-    ``frontend/static/index.html``, then ``static/index.html``.
+    Prefers `frontend/build/index.html` (SvelteKit static output), then
+    `frontend/static/index.html`, then `static/index.html`.
     """
     candidates = [
         Path("frontend/build/index.html"),
@@ -70,10 +70,10 @@ async def serve_index() -> HTMLResponse:
 def _mount_static() -> None:
     """Mount frontend build (SvelteKit) if present.
 
-    SvelteKit static adapter emits ``_app/`` at the site root
-    (``/_app/immutable/...``), so ``frontend/build/_app`` must be at ``/_app``
-    and the rest of ``frontend/build`` at ``/``. Mounts are added after API
-    routers so ``/api/*`` takes precedence over the catch-all ``/``.
+    SvelteKit static adapter emits `_app/` at the site root
+    (`/_app/immutable/...`), so `frontend/build/_app` must be at `/_app`
+    and the rest of `frontend/build` at `/`. Mounts are added after API
+    routers so `/api/*` takes precedence over the catch-all `/`.
     """
     frontend_build = Path("frontend/build")
     if frontend_build.exists():
@@ -109,10 +109,14 @@ def get_local_ip() -> str:
         s.close()
 
 
-if __name__ == "__main__":
+def main():
+    """Application entry point for running the web app in development mode"""
     ip = get_local_ip()
     port = 8000
     console.print("\n[bold green]🚀 OCR-TTS Reader Running![/bold green]")
     console.print(f"[bold cyan]Local:[/bold cyan] http://localhost:{port}")
     console.print(f"[bold gold1]📱 Mobile:[/bold gold1] http://{ip}:{port}\n")
     uvicorn.run("backend.app.main:app", host="0.0.0.0", port=port, reload=True)
+
+if __name__ == "__main__":
+    main()

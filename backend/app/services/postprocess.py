@@ -35,8 +35,8 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 def _strip_image_artifacts(markdown: str) -> str:
     """Remove Docling image placeholders and HTML comments.
 
-    Docling emits ``<!-- image -->`` and often a stray ``Other`` on the next
-    line as an artifact; both are removed. Inline ``<!-- ... -->`` comments
+    Docling emits `<!-- image -->` and often a stray `Other` on the next
+    line as an artifact; both are removed. Inline `<!-- ... -->` comments
     are stripped but surrounding text is kept.
     """
     lines = markdown.split("\n")
@@ -309,14 +309,14 @@ def ensure_punctuation(markdown: str) -> str:
 def insert_page_markers(markdown: str, page_map: list[PageMapItem]) -> str:
     """Insert 'Page N.' markers at page boundaries after sentence completion.
 
-    Assumes ``page_map`` is sorted ascending. Each marker is inserted as a
+    Assumes `page_map` is sorted ascending. Each marker is inserted as a
     standalone paragraph **after** the sentence that straddles the page
     boundary.
 
     If a boundary offset lands mid-sentence, the insertion is deferred
-    forward to the next sentence terminal (``.!?…`` plus optional closing
+    forward to the next sentence terminal (`.!?…` plus optional closing
     quotes/brackets). If already at a sentence boundary the marker is kept
-    at that boundary. This ensures ``Page N`` never splits a sentence.
+    at that boundary. This ensures `Page N` never splits a sentence.
     """
     if not page_map or len(page_map) <= 1:
         return markdown
