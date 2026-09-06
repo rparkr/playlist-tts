@@ -1,0 +1,67 @@
+[project]
+name = "ocr-tts"
+version = "0.1.0"
+description = "OCR to audiobook application — FastAPI backend with granite-docling and pocket-tts"
+readme = "README.md"
+authors = [{ name = "Ryan Parker" }]
+requires-python = ">=3.12"
+dependencies = [
+    "docling>=2.120.1",
+    "fastapi>=0.141.1",
+    "httpx2>=2.12.0",
+    "pocket-tts>=2.1.0",
+    "pydantic>=2.0.0",
+    "pypdf>=5.0.0",
+    # python-multipart is required for file upload in FastAPI
+    "python-multipart>=0.0.9",
+    "rich>=15.0.0",
+    "typer>=0.26.8",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+# PyAV is used for FFMPEG bindings, enabling I/O for compressed
+# audio formats like webm and mp3.
+av = ["av>=14.0.0"]
+
+[project.scripts]
+ocr = "backend.app.cli.ocr:main"
+tts = "backend.app.cli.tts:main"
+
+[dependency-groups]
+dev = [
+    # Starlette 1.6+ TestClient prefers httpx2 (the httpx path is deprecated).
+    "httpx2>=2.12.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.12.0",
+    "ty>=0.0.13",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "backend"
+module-root = ""
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+
+# B008 (function call in default argument) is idiomatic for FastAPI's
+# File(...)/Form(...) and Typer's Argument(...)/Option(...) declarations,
+# which require these calls in parameter defaults.
+[tool.ruff.lint.per-file-ignores]
+"backend/app/api/*.py" = ["B008"]
+"backend/app/cli/*.py" = ["B008"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ty.environment]
+python-version = "3.12"

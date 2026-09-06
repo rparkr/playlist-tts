@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# App storage (generated audio)
+storage/
+frontend/build/
+frontend/.svelte-kit/
+frontend/node_modules/
+.pytest_cache/
+.ruff_cache/
+.agent-task.md
+
+# Frontend artifacts, dependencies, and build
+**/node_modules/
+
+# Older files
+archive/
+
+# IDE settings
+**/.vscode
