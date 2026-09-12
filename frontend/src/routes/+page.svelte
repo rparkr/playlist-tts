@@ -4,6 +4,9 @@
 		createDoc,
 		getAllDocs,
 		getDoc,
+		getDocBySlugOrId,
+		ensureAllDocSlugs,
+		renameDoc as renameDocStore,
 		deleteDoc,
 		saveDoc,
 		getVoices as getCustomVoices,
@@ -35,9 +38,9 @@
 	let builtinVoices: { name: string }[] = $state([]);
 	let activeDoc: Doc | null = $state(null);
 	let markdownDraft: string = $state('');
-	let pdfFile: File | null = $state(null);
+	let pdfFile: File | null = $state.raw(null);
 	let pdfUrl: string | null = $state(null);
-	let pdfDoc: any = $state(null);
+	let pdfDoc: any = $state.raw(null);
 	let pdfPageNum: number = $state(1);
 	let pdfTotalPages: number = $state(0);
 	let isOcrRunning: boolean = $state(false);
@@ -48,7 +51,7 @@
 	let isPlaying: boolean = $state(false);
 	let useBackendTTS: boolean = $state(false);
 	let backendAudioUrl: string | null = $state(null);
-	let backendAudioEl: HTMLAudioElement | null = $state(null);
+	let backendAudioEl: HTMLAudioElement | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
@@ -83,6 +86,7 @@
 	}
 
 	async function refreshDocs() {
+		await ensureAllDocSlugs();
 		docs = await getAllDocs();
 		customVoices = await getCustomVoices();
 	}
@@ -108,14 +112,14 @@
 			window.speechSynthesis.getVoices();
 		}
 		const url = new URL(window.location.href);
-		const docId = url.searchParams.get('doc');
+		const docParam = url.searchParams.get('doc');
 		const s = url.searchParams.get('s');
 		const rate = url.searchParams.get('rate');
 		const voice = url.searchParams.get('voice');
 		if (rate) synthRate = parseFloat(rate) || 1.0;
 		if (voice) selectedVoiceId = voice;
-		if (docId) {
-			const d = await getDoc(docId);
+		if (docParam) {
+			const d = await getDocBySlugOrId(docParam);
 			if (d) {
 				activeDoc = d;
 				markdownDraft = d.markdown;
@@ -123,18 +127,18 @@
 					const g = parseInt(s, 10);
 					if (!isNaN(g)) globalIdx = g;
 				} else {
-					const saved = localStorage.getItem(`progress_${docId}`);
+					const saved = localStorage.getItem(`progress_${d.id}`);
 					if (saved) globalIdx = parseInt(saved, 10) || 0;
 				}
 			}
 		} else {
 			const last = localStorage.getItem('tts_active_doc_id');
 			if (last) {
-				const d = await getDoc(last);
+				const d = await getDocBySlugOrId(last);
 				if (d) {
 					activeDoc = d;
 					markdownDraft = d.markdown;
-					const saved = localStorage.getItem(`progress_${last}`);
+					const saved = localStorage.getItem(`progress_${d.id}`);
 					if (saved) globalIdx = parseInt(saved, 10) || 0;
 				}
 			}
@@ -154,7 +158,7 @@
 		localStorage.setItem('tts_voice', selectedVoiceId);
 		if (typeof window !== 'undefined' && activeDoc) {
 			const url = new URL(window.location.href);
-			url.searchParams.set('doc', activeDoc.id);
+			url.searchParams.set('doc', activeDoc.slug ?? activeDoc.id);
 			url.searchParams.set('s', String(globalIdx));
 			url.searchParams.set('rate', String(synthRate));
 			url.searchParams.set('voice', selectedVoiceId);
@@ -163,7 +167,13 @@
 	});
 
 	// Derived
-	let sections: Section[] = $derived.by(() => activeDoc?.sections ?? parseMarkdownStructure(markdownDraft));
+	let sections: Section[] = $derived.by(() => {
+		const stored = activeDoc?.sections;
+		// Re-parse docs stored before headings/paragraphs existed.
+		if (stored && stored.length > 0 && stored[0].paragraphs) return stored;
+		if (stored && stored.length > 0) return parseMarkdownStructure(activeDoc?.markdown ?? markdownDraft);
+		return parseMarkdownStructure(markdownDraft);
+	});
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
 	let currentSectionIdx: number = $derived(globalToSectionChunk(sections, globalIdx).sectionIdx);
 	let currentSection: Section | null = $derived(sections[currentSectionIdx] ?? null);
@@ -279,17 +289,30 @@
 	}
 
 	// OCR
+	async function parseErrorResponse(resp: Response): Promise<string> {
+		const text = await resp.text();
+		try {
+			const data = JSON.parse(text);
+			if (typeof data?.detail === 'string') return data.detail;
+			if (Array.isArray(data?.detail)) return data.detail.map((d: any) => d.msg ?? JSON.stringify(d)).join('; ');
+		} catch {}
+		return text;
+	}
+
 	async function runOcr() {
 		if (!pdfFile) {
 			showToast('Select a PDF first');
 			return;
 		}
+		const fileToUpload = pdfFile;
 		isOcrRunning = true;
 		ocrProgress = { done: 0, total: 0 };
 		ocrStartAt = Date.now();
 		try {
 			const fd = new FormData();
-			fd.append('file', pdfFile);
+			// Pass filename explicitly so the backend always sees it,
+			// even if the File object was wrapped/proxied by state.
+			fd.append('file', fileToUpload, fileToUpload.name || 'upload.pdf');
 			fd.append(
 				'postprocess',
 				JSON.stringify({
@@ -300,7 +323,7 @@
 				})
 			);
 			const resp = await fetch(`${API_BASE}/api/ocr/jobs`, { method: 'POST', body: fd });
-			if (!resp.ok) throw new Error(await resp.text());
+			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 			const { job_id } = await resp.json();
 			const es = new EventSource(`${API_BASE}/api/ocr/jobs/${job_id}/events`);
 			await new Promise<any>((resolve, reject) => {
@@ -335,7 +358,7 @@
 			const job = await r.json();
 			if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
 			const result = job.result;
-			const title = pdfFile.name.replace(/\.pdf$/i, '') || 'Untitled';
+			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
 			const doc = await createDoc(title, result.markdown, result.page_map);
 			docs = await getAllDocs();
 			activeDoc = doc;
@@ -383,12 +406,10 @@
 		}
 	}
 	async function renameDoc(id: string, newTitle: string) {
-		const d = await getDoc(id);
+		const d = await renameDocStore(id, newTitle);
 		if (!d) return;
-		d.title = newTitle;
-		await saveDoc(d);
 		docs = await getAllDocs();
-		if (activeDoc?.id === id) activeDoc.title = newTitle;
+		if (activeDoc?.id === id) activeDoc = d;
 	}
 
 	let saveDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -462,10 +483,10 @@
 			return;
 		}
 		const fd = new FormData();
-		fd.append('voice_wav', file);
+		fd.append('voice_wav', file, file.name || 'voice.wav');
 		try {
 			const resp = await fetch(`${API_BASE}/api/tts/voices/convert`, { method: 'POST', body: fd });
-			if (!resp.ok) throw new Error(await resp.text());
+			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 			const blob = await resp.blob();
 			const base = file.name.replace(/\.[^.]+$/, '') || 'voice';
 			let name = prompt('Name this voice:', base) ?? base;
