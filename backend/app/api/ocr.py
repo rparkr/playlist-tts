@@ -18,6 +18,30 @@ from backend.app.services.ocr_service import create_ocr_job, get_job, sse_events
 router = APIRouter(prefix="/api/ocr", tags=["ocr"])
 
 
+def _is_pdf_upload(filename: str | None, content_type: str | None, pdf_bytes: bytes) -> bool:
+    """Check whether an upload looks like a PDF.
+
+    Accept if *any* signal matches, so valid PDFs with missing/odd
+    filenames (e.g. `blob`, extensionless mobile shares) are not rejected:
+    - `.pdf` filename extension, or
+    - `application/pdf` content type, or
+    - `%PDF-` magic bytes at the start of the file.
+    """
+    if filename and filename.lower().endswith(".pdf"):
+        return True
+    if content_type and content_type.lower().split(";")[0].strip() == "application/pdf":
+        return True
+    # Strip leading whitespace/BOM — PDFs must start with %PDF-
+    stripped = pdf_bytes.lstrip(b"\x00 \t\r\n\xef\xbb\xbf")
+    return bool(stripped.startswith(b"%PDF-"))
+
+
+def _validate_pdf_upload(file: UploadFile, pdf_bytes: bytes) -> None:
+    """Raise 400 unless the upload is recognizably a PDF."""
+    if not _is_pdf_upload(file.filename, file.content_type, pdf_bytes):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+
 def _parse_postprocess(raw: str | None) -> PostprocessOptions:
     """Parse postprocess JSON string from multipart form."""
     if not raw:
@@ -35,11 +59,10 @@ async def create_job(
     postprocess: str | None = Form(None),
 ) -> OCRJobCreateResponse:
     """Create OCR job from uploaded PDF."""
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
     opts = _parse_postprocess(postprocess)
     pdf_bytes = await file.read()
+
+    _validate_pdf_upload(file, pdf_bytes)
 
     # Enforce size limit (100 MB)
     from backend.app.core.config import settings
@@ -48,7 +71,7 @@ async def create_job(
     if len(pdf_bytes) > max_bytes:
         raise HTTPException(status_code=413, detail=f"PDF exceeds {settings.max_pdf_mb} MB limit.")
 
-    job_id = create_ocr_job(file.filename, pdf_bytes, opts)
+    job_id = create_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts)
     return OCRJobCreateResponse(job_id=job_id)
 
 
@@ -112,11 +135,10 @@ async def ocr_sync(
     postprocess: str | None = Form(None),
 ) -> OCRDirectResponse:
     """Synchronous OCR alias — creates job and polls until done (timeout 300s)."""
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
     opts = _parse_postprocess(postprocess)
     pdf_bytes = await file.read()
+
+    _validate_pdf_upload(file, pdf_bytes)
 
     from backend.app.core.config import settings
 
@@ -124,7 +146,7 @@ async def ocr_sync(
     if len(pdf_bytes) > max_bytes:
         raise HTTPException(status_code=413, detail=f"PDF exceeds {settings.max_pdf_mb} MB limit.")
 
-    job_id = create_ocr_job(file.filename, pdf_bytes, opts)
+    job_id = create_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts)
 
     # Poll until done
     for _ in range(300):

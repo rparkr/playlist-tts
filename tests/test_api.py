@@ -59,6 +59,28 @@ def test_ocr_job_create_shape():
     assert "job_id" in resp.json()
 
 
+def test_ocr_jobs_accepts_pdf_without_extension():
+    """Valid PDF bytes are accepted even without a .pdf filename.
+
+    Regression test: mobile shares / drive downloads often arrive as
+    `blob` or extensionless names with application/pdf content type.
+    """
+    resp = client.post(
+        "/api/ocr/jobs", files={"file": ("blob", b"%PDF-1.4 fake", "application/pdf")}
+    )
+    assert resp.status_code == 202
+    assert "job_id" in resp.json()
+
+
+def test_ocr_jobs_accepts_pdf_magic_bytes():
+    """Valid PDF magic bytes are accepted regardless of name/type."""
+    resp = client.post(
+        "/api/ocr/jobs",
+        files={"file": ("scan", b"%PDF-1.7 content", "application/octet-stream")},
+    )
+    assert resp.status_code == 202
+
+
 def test_tts_job_create_shape():
     """TTS job creation returns a job id payload."""
     resp = client.post("/api/tts/jobs", data={"text": "Hello world.", "fmt": "wav"})
