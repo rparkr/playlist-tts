@@ -28,19 +28,36 @@ def test_reflow_merges_continuation():
     assert "and continues here." in out
 
 
-def test_normalize_uppercase_title():
-    """Consecutive uppercase words → Titlecase."""
-    md = "THIS IS A TITLE and normal"
-    out = normalize_uppercase(md, "title")
-    assert "This Is A Title" in out or "This Is" in out
+def test_normalize_uppercase_single_long_word():
+    """Single uppercase word >=5 chars → Title Case."""
+    assert normalize_uppercase("WATER") == "Water"
+    assert "Exampleof" in normalize_uppercase("This is an EXAMPLEOF word")
 
 
-def test_normalize_lower_long():
-    """Uppercase word >5 chars → lower."""
-    md = "This is an EXAMPLEOF uppercase and NASA"
-    out = normalize_uppercase(md, "lower_long")
-    assert "exampleof" in out.lower()
-    assert "NASA" in out  # ≤5 stays
+def test_normalize_uppercase_preserves_short_acronym():
+    """Isolated short uppercase words stay as-is."""
+    out = normalize_uppercase("This is NASA here")
+    assert "NASA" in out
+
+
+def test_normalize_uppercase_runs():
+    """Two or more consecutive uppercase words → Title Case."""
+    out = normalize_uppercase("SAIL BOAT and normal")
+    assert "Sail Boat" in out
+
+
+def test_normalize_uppercase_skips_code_fences():
+    """Code fences are left untouched."""
+    md = "```\nTHIS IS CODE\n```\nSAIL BOAT"
+    out = normalize_uppercase(md)
+    assert "THIS IS CODE" in out
+    assert "Sail Boat" in out
+
+
+def test_postprocess_options_uppercase_back_compat():
+    """Legacy string modes coerce to bool."""
+    assert PostprocessOptions(normalize_uppercase="off").normalize_uppercase is False  # type: ignore[arg-type]
+    assert PostprocessOptions(normalize_uppercase="title").normalize_uppercase is True  # type: ignore[arg-type]
 
 
 def test_ensure_punctuation_header():
@@ -77,7 +94,7 @@ def test_apply_postprocessing_integration():
     md = "# Title\n\nTHIS IS A SECTION\n\nContent without punctuation\n\nand continuation."
     opts = PostprocessOptions(
         combine_columns=True,
-        normalize_uppercase="title",
+        normalize_uppercase=True,
         ensure_punctuation=True,
         insert_page_markers=False,
     )

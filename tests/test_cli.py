@@ -29,7 +29,7 @@ def test_ocr_missing_file():
 
 
 def test_ocr_rejects_bad_normalize_mode(tmp_path: Path):
-    """OCR CLI validates --normalize-uppercase choices without running OCR."""
+    """OCR CLI rejects unexpected extra args without running OCR."""
     from pypdf import PdfWriter
 
     pdf = tmp_path / "in.pdf"
@@ -38,7 +38,7 @@ def test_ocr_rejects_bad_normalize_mode(tmp_path: Path):
     with open(pdf, "wb") as f:
         writer.write(f)
 
-    result = runner.invoke(ocr_app, [str(pdf), "--normalize-uppercase", "bogus"])
+    result = runner.invoke(ocr_app, [str(pdf), "fake"])
     assert result.exit_code != 0
 
 

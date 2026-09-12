@@ -1,7 +1,7 @@
 """Post-processing pipeline for OCR Markdown — TTS readiness."""
 
 import re
-from typing import Literal
+from collections.abc import Callable
 
 from backend.app.models.schemas import PageMapItem, PostprocessOptions, Section
 
@@ -193,20 +193,11 @@ def reflow_columns(markdown: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def normalize_uppercase(markdown: str, mode: Literal["off", "title", "lower_long"] = "off") -> str:
-    """Normalize uppercase words per mode.
-
-    - off: no-op
-    - title: consecutive sequence of ≥2 uppercase words → Title Case
-    - lower_long: any all-upper word >5 chars → lower
-    """
-    if mode == "off":
-        return markdown
-
+def _map_lines_outside_fences(markdown: str, func: Callable[[str], str]) -> str:
+    """Apply func to each line outside fenced code blocks."""
     lines = markdown.split("\n")
     out_lines: list[str] = []
     in_fence = False
-
     for line in lines:
         if _CODE_FENCE_RE.match(line):
             in_fence = not in_fence
@@ -215,54 +206,57 @@ def normalize_uppercase(markdown: str, mode: Literal["off", "title", "lower_long
         if in_fence:
             out_lines.append(line)
             continue
-
-        if mode == "lower_long":
-
-            def _repl_lower(m: re.Match[str]) -> str:
-                word = m.group(0)
-                if len(word) > 5:
-                    return word.lower()
-                return word
-
-            out_lines.append(_UPPER_WORD_RE.sub(_repl_lower, line))
-        elif mode == "title":
-            # Find consecutive runs of uppercase words.
-            # Tokenize preserving separators.
-            tokens = re.split(r"(\W+)", line)
-            # Identify indices of uppercase words
-            is_upper = [bool(_UPPER_WORD_RE.fullmatch(t)) for t in tokens]
-            # Walk runs
-            i = 0
-            while i < len(tokens):
-                if is_upper[i]:
-                    j = i
-                    while j < len(tokens) and (
-                        is_upper[j]
-                        or (tokens[j].strip() == "" and j + 1 < len(tokens) and is_upper[j + 1])
-                    ):
-                        # Skip spaces between uppers — include them in run
-                        j += 1
-                        if j < len(tokens) and tokens[j].strip() == "":
-                            # include single space
-                            if j + 1 < len(tokens) and is_upper[j + 1]:
-                                j += 1
-                                continue
-                            else:
-                                break
-                    # Count actual upper words in run
-                    run_uppers = sum(1 for k in range(i, j) if is_upper[k])
-                    if run_uppers >= 2:
-                        for k in range(i, j):
-                            if is_upper[k]:
-                                tokens[k] = tokens[k].title()
-                    i = j
-                else:
-                    i += 1
-            out_lines.append("".join(tokens))
-        else:
-            out_lines.append(line)
-
+        out_lines.append(func(line))
     return "\n".join(out_lines)
+
+
+def normalize_uppercase(markdown: str) -> str:
+    """Normalize uppercase spans to Title Case for TTS.
+
+    - Any isolated all-uppercase word with length >= 5 → Title Case
+      (e.g. `WATER` → `Water`); shorter words stay as-is so acronyms
+      like `NASA` are preserved.
+    - Any run of ≥2 consecutive all-uppercase words → Title Case
+      (e.g. `SAIL BOAT` → `Sail Boat`), regardless of word length.
+    """
+
+    def _normalize_line(line: str) -> str:
+        # Tokenize preserving separators.
+        tokens = re.split(r"(\W+)", line)
+        is_upper = [bool(_UPPER_WORD_RE.fullmatch(t)) for t in tokens]
+        i = 0
+        while i < len(tokens):
+            if is_upper[i]:
+                j = i
+                while j < len(tokens) and (
+                    is_upper[j]
+                    or (tokens[j].strip() == "" and j + 1 < len(tokens) and is_upper[j + 1])
+                ):
+                    # Skip spaces between uppers — include them in run
+                    j += 1
+                    if j < len(tokens) and tokens[j].strip() == "":
+                        # include single space
+                        if j + 1 < len(tokens) and is_upper[j + 1]:
+                            j += 1
+                            continue
+                        else:
+                            break
+                # Count actual upper words in run
+                run_uppers = sum(1 for k in range(i, j) if is_upper[k])
+                if run_uppers >= 2:
+                    for k in range(i, j):
+                        if is_upper[k]:
+                            tokens[k] = tokens[k].title()
+                elif run_uppers == 1:
+                    for k in range(i, j):
+                        if is_upper[k] and len(tokens[k]) >= 5:
+                            tokens[k] = tokens[k].title()
+                i = j
+            else:
+                i += 1
+        return "".join(tokens)
+
+    return _map_lines_outside_fences(markdown, _normalize_line)
 
 
 # ---------------------------------------------------------------------------
@@ -591,8 +585,8 @@ def apply_postprocessing(
     if opts.combine_columns:
         md = reflow_columns(md)
 
-    if opts.normalize_uppercase != "off":
-        md = normalize_uppercase(md, opts.normalize_uppercase)
+    if opts.normalize_uppercase:
+        md = normalize_uppercase(md)
 
     if opts.ensure_punctuation:
         md = ensure_punctuation(md)

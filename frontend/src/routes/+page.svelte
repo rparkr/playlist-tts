@@ -57,7 +57,7 @@
 	let toast: string | null = $state(null);
 
 	let optCombine: boolean = $state(true);
-	let optUppercase: string = $state('title');
+	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
 

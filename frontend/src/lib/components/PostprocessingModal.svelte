@@ -7,11 +7,11 @@
 		optCombine: boolean;
 		optPunct: boolean;
 		optPageMarkers: boolean;
-		optUppercase: string;
+		optUppercase: boolean;
 		onCombineChange: (v: boolean) => void;
 		onPunctChange: (v: boolean) => void;
 		onPageMarkersChange: (v: boolean) => void;
-		onUppercaseChange: (v: string) => void;
+		onUppercaseChange: (v: boolean) => void;
 		hasDirtyEdits: boolean;
 		onApply: () => void;
 	}
@@ -179,47 +179,46 @@
 					</span>
 				</label>
 
-				<div class="flex flex-col gap-1.5">
-					<span class="text-sm text-slate-200 flex items-center gap-1">
-						Uppercase normalization
-						<span class="relative inline-flex">
-							<button
-								type="button"
-								class="text-slate-400 hover:text-slate-200"
-								aria-label="Info about uppercase normalization"
-								aria-describedby={tooltip === 'upper' ? 'tooltip-upper' : undefined}
-								onmouseenter={() => (tooltip = 'upper')}
-								onmouseleave={() => (tooltip = null)}
-								onfocus={() => (tooltip = 'upper')}
-								onblur={() => (tooltip = null)}
-								onclick={(e) => {
-									e.preventDefault();
-									e.stopPropagation();
-									tooltip = tooltip === 'upper' ? null : 'upper';
-								}}
-							>
-								<Info size={14} />
-							</button>
-							{#if tooltip === 'upper'}
-								<span
-									id="tooltip-upper"
-									role="tooltip"
-									class="pointer-events-none absolute top-full left-1/2 z-20 mt-2 w-56 -translate-x-1/2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs font-normal text-slate-300 shadow-xl"
-									>Normalize uppercase runs for TTS (off, titlecase, or lower long words >5 chars).</span
+				<label class="flex items-start gap-3 cursor-pointer">
+					<input
+						type="checkbox"
+						checked={optUppercase}
+						onchange={(e) => onUppercaseChange((e.target as HTMLInputElement).checked)}
+						class="mt-0.5 accent-sky-500"
+					/>
+					<span class="flex-1">
+						<span class="text-sm text-slate-200 flex items-center gap-1">
+							Normalize uppercase
+							<span class="relative inline-flex">
+								<button
+									type="button"
+									class="text-slate-400 hover:text-slate-200"
+									aria-label="Info about uppercase normalization"
+									aria-describedby={tooltip === 'upper' ? 'tooltip-upper' : undefined}
+									onmouseenter={() => (tooltip = 'upper')}
+									onmouseleave={() => (tooltip = null)}
+									onfocus={() => (tooltip = 'upper')}
+									onblur={() => (tooltip = null)}
+									onclick={(e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										tooltip = tooltip === 'upper' ? null : 'upper';
+									}}
 								>
-							{/if}
+									<Info size={14} />
+								</button>
+								{#if tooltip === 'upper'}
+									<span
+										id="tooltip-upper"
+										role="tooltip"
+										class="pointer-events-none absolute top-full left-1/2 z-20 mt-2 w-56 -translate-x-1/2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs font-normal text-slate-300 shadow-xl"
+										>Convert long uppercase words and uppercase runs to Title Case so TTS does not spell them as acronyms.</span
+									>
+								{/if}
+							</span>
 						</span>
 					</span>
-					<select
-						value={optUppercase}
-						onchange={(e) => onUppercaseChange((e.target as HTMLSelectElement).value)}
-						class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
-					>
-						<option value="off">Off</option>
-						<option value="title">Titlecase runs</option>
-						<option value="lower_long">Lower long words</option>
-					</select>
-				</div>
+				</label>
 
 				<button
 					onclick={onApply}
