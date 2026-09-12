@@ -27,6 +27,7 @@ av = ["av>=14.0.0"]
 [project.scripts]
 ocr = "backend.app.cli.ocr:main"
 tts = "backend.app.cli.tts:main"
+app = "backend.app.main:main"
 
 [dependency-groups]
 dev = [
