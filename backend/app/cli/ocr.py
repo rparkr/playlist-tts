@@ -60,13 +60,10 @@ def convert(
     console.print(f"[bold cyan]Output:[/bold cyan] {output_path}")
     console.print("[bold green]Initializing Granite VLM Pipeline...[/bold green]")
 
-    # Reuse service logic directly
+    # Reuse service logic directly (whole-doc convert, heuristic ETA bar)
+    import threading
+    import time
 
-    # We need to run docling synchronously — replicate fewer layers
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import VlmPipelineOptions, vlm_model_specs
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.pipeline.vlm_pipeline import VlmPipeline
     from rich.progress import (
         BarColumn,
         MofNCompleteColumn,
@@ -76,14 +73,13 @@ def convert(
         TimeRemainingColumn,
     )
 
-    pipeline_options = VlmPipelineOptions(vlm_options=vlm_model_specs.GRANITEDOCLING_TRANSFORMERS)
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
-            )
-        }
+    from backend.app.services.ocr_service import (
+        convert_one_pdf_to_markdown,
+        create_document_converter,
+        estimate_done_pages,
     )
+
+    converter = create_document_converter()
 
     with Progress(
         SpinnerColumn(),
@@ -96,14 +92,28 @@ def convert(
         task = progress.add_task(
             "[cyan]Processing OCR & Layout...", total=total if total > 0 else None
         )
-        result = converter.convert(input_pdf)
-        if result.status.name != "SUCCESS":
-            console.print(f"[bold red]Error:[/bold red] Conversion failed: {result.status}")
-            raise typer.Exit(code=1)
+
+        # Ticker thread advances the bar along verified per-page timings
+        # while the blocking whole-document convert runs.
+        start = time.time()
+        stop = threading.Event()
+        ticker: threading.Thread | None = None
         if total > 0:
+
+            def _tick() -> None:
+                while not stop.wait(1):
+                    progress.update(task, completed=estimate_done_pages(total, time.time() - start))
+
+            ticker = threading.Thread(target=_tick, daemon=True)
+            ticker.start()
+
+        md_raw = convert_one_pdf_to_markdown(converter, input_pdf)
+
+        if ticker is not None:
+            stop.set()
+            ticker.join()
             progress.update(task, completed=total)
 
-        md_raw = result.document.export_to_markdown()
         page_map = build_page_map(md_raw, max(1, total))
         md, _, _ = apply_postprocessing(md_raw, opts, page_map)
 

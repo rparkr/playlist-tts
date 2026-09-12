@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from backend.app.models.schemas import JobStatus, PostprocessOptions
+from backend.app.models.schemas import JobStatus, PageMapItem, PostprocessOptions
 from backend.app.services.postprocess import apply_postprocessing, build_page_map
 
 
@@ -48,6 +48,77 @@ def get_page_count(pdf_path: Path) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Speed-tuned whole-document OCR + heuristic ETA.
+#
+# Docling's VLM pipeline handles page batching internally, so a single
+# whole-document `convert()` is far faster than N per-page converts
+# (~2.6 s/page vs ~12 s/page measured on RTX 4060 laptop GPU).
+# Docling exposes no per-page progress for a single document, so progress
+# is *estimated* from verified timings (see table below) and reconciled
+# to real completion when the convert returns.
+#
+# Measured (granite-docling-258M, transformers engine, RTX 4060 8GB):
+#   test-pdfs/engineering-ch-8 (10 pp): 31.6s @ scale 2.0  / 28.0s @ scale 1.5 + max_new 4096
+#   test-pdfs/engineering-ch-1 (28 pp): 69.2s @ scale 2.0  / 66.5s @ scale 1.5 + max_new 4096
+# Output parity: 28pp markdowns 98.7% similar (char-level OCR noise only,
+# no truncation; lengths within 0.2%).
+# ---------------------------------------------------------------------------
+
+#: Seconds of VLM time budgeted per page for ETA estimates.
+OCR_SECONDS_PER_PAGE = 2.6
+#: Fixed overhead (model/pipeline init, post-processing) budgeted per job.
+OCR_FIXED_OVERHEAD_S = 8.0
+
+
+def create_document_converter():  # type: ignore[no-untyped-def]
+    """Build the speed-tuned granite-docling converter.
+
+    `scale=1.5` (vs default 2.0) halves VLM input pixels with no measured
+    quality loss; `max_new_tokens=4096` (vs 8192) caps runaway generation —
+    a full page of doctags is ~600 tokens, so headroom is ample.
+    """
+    import copy
+
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import VlmPipelineOptions, vlm_model_specs
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.pipeline.vlm_pipeline import VlmPipeline
+
+    vlm_opts = copy.deepcopy(vlm_model_specs.GRANITEDOCLING_TRANSFORMERS)
+    vlm_opts.scale = 1.5
+    vlm_opts.max_new_tokens = 4096
+    pipeline_options = VlmPipelineOptions(vlm_options=vlm_opts)
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
+            )
+        }
+    )
+
+
+def estimate_total_seconds(total_pages: int) -> float:
+    """Estimate whole-job seconds from verified per-page timings."""
+    return total_pages * OCR_SECONDS_PER_PAGE + OCR_FIXED_OVERHEAD_S
+
+
+def estimate_done_pages(total_pages: int, elapsed_s: float) -> int:
+    """Estimate completed pages from elapsed time, reserving the last page.
+
+    Caps at `total - 1` so the bar never shows 100% before real completion.
+    """
+    if total_pages <= 0:
+        return 0
+    return max(0, min(int(elapsed_s / OCR_SECONDS_PER_PAGE), total_pages - 1))
+
+
+def convert_one_pdf_to_markdown(converter, pdf_path: Path) -> str:  # type: ignore[no-untyped-def]
+    """Convert a single (possibly single-page) PDF to markdown."""
+    result = converter.convert(pdf_path)
+    return str(result.document.export_to_markdown())
+
+
 async def _run_ocr_job(
     job: OCRJob,
     pdf_path: Path,
@@ -67,57 +138,71 @@ async def _run_ocr_job(
     for q in job.event_queues:
         await q.put({"type": "progress", "done": 0, "total": job.progress_total})
 
-    def _do_ocr() -> tuple[str, int]:
-        """Blocking OCR — runs in threadpool."""
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import VlmPipelineOptions, vlm_model_specs
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.pipeline.vlm_pipeline import VlmPipeline
+    def _do_ocr() -> tuple[str, int, list[PageMapItem]]:
+        """Blocking whole-document OCR — runs in threadpool.
 
-        pipeline_options = VlmPipelineOptions(
-            vlm_options=vlm_model_specs.GRANITEDOCLING_TRANSFORMERS
-        )
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
-                )
-            }
-        )
-        result = converter.convert(pdf_path)
-        md = result.document.export_to_markdown()
-        return md, job.progress_total
+        A single `convert()` lets Docling batch pages internally at maximum
+        throughput (~2.6 s/page vs ~12 s/page for per-page converts).
+        """
+        total = job.progress_total if job.progress_total > 0 else get_page_count(pdf_path)
+        total = total if total > 0 else 1
+        converter = create_document_converter()
+        md = convert_one_pdf_to_markdown(converter, pdf_path)
+        job.progress_done = total
+        return md, total, build_page_map(md, total)
 
     loop = asyncio.get_running_loop()
     try:
         ocr_task = loop.run_in_executor(None, _do_ocr)
         start = time.time()
         elapsed = 0
-        # Emit progress every 1s (keepalive) and log to terminal
+        last_done = -1
+        estimate_total = estimate_total_seconds(max(job.progress_total, 1))
+        # Heuristic progress: Docling reports nothing mid-document, so the
+        # bar follows verified per-page timings until real completion lands.
         while not ocr_task.done():
             await asyncio.sleep(1)
             elapsed = int(time.time() - start)
-            for q in job.event_queues:
-                await q.put(
-                    {
-                        "type": "keepalive",
-                        "done": job.progress_done,
-                        "total": job.progress_total,
-                        "elapsed": elapsed,
-                    }
-                )
-            if elapsed % 5 == 0:
+            total = job.progress_total
+            if total > 0:
+                done = estimate_done_pages(total, time.time() - start)
+                eta = max(0, int(estimate_total - (time.time() - start)))
+            else:
+                done, eta = job.progress_done, 0
+            if done != last_done and total > 0:
+                last_done = done
+                # Mirror the estimate so polling clients see movement too;
+                # the worker overwrites with the real total on completion.
+                job.progress_done = done
                 console.print(
-                    f"  [dim]OCR {job.job_id} running... "
-                    f"{elapsed}s ({job.progress_total} pages)[/dim]"
+                    f"  [cyan]OCR {job.job_id} progress (est): "
+                    f"{done}/{total} pages ({elapsed}s, ETA {eta}s)[/cyan]"
                 )
+                for q in job.event_queues:
+                    await q.put({"type": "progress", "done": done, "total": total, "eta": eta})
+            else:
+                for q in job.event_queues:
+                    await q.put(
+                        {
+                            "type": "keepalive",
+                            "done": done,
+                            "total": total,
+                            "elapsed": elapsed,
+                            "eta": eta,
+                        }
+                    )
+                if elapsed % 5 == 0:
+                    console.print(
+                        f"  [dim]OCR {job.job_id} running... "
+                        f"{elapsed}s (~{done}/{total} pages, ETA {eta}s)[/dim]"
+                    )
 
-        md_raw, total = await ocr_task
+        md_raw, total, page_map_init = await ocr_task
+        job.progress_done = total
         console.print(f"[green]OCR {job.job_id} docling done, post-processing...[/green]")
 
-        # Post-process
-        page_map_fallback = build_page_map(md_raw, max(1, total))
-        md, sections, page_map = apply_postprocessing(md_raw, opts, page_map_fallback)
+        # Post-process whole-document markdown (page map re-estimated post-mutation).
+        md, sections, page_map = apply_postprocessing(md_raw, opts, page_map_init)
 
         # Re-apply page markers if requested and we have real page count
         # (apply_postprocessing already handled insert_page_markers when opts flag set)

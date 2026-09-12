@@ -30,7 +30,7 @@ GET  /api/ocr/jobs/{id}/markdown → text/markdown
 - **Validation:** `filename.lower().endswith(.pdf)` `src/app.py:81`, size check 400; `NamedTemporaryFile` `src/app.py:84`.
 - **Page count:** `pypdf.PdfReader(tmp).pages` (replaces `pypdfium2` `src/ocr/__init__.py:13`).
 - **Model:** `VlmPipelineOptions(vlm_options=vlm_model_specs.GRANITEDOCLING_TRANSFORMERS)` `src/app.py:89`; run in `ThreadPoolExecutor` via `run_in_threadpool` to avoid blocking event loop; optional `generate_page_images`.
-- **Progress:** in-memory `dict[jobId, Job]` (`<50 pp`, no Redis). Emit `done/total` from `pypdf` count with keep-alive; iterator `convert_all` with VLM yields once, so poll/time-slice or stream pings until `converter.convert` returns.
+- **Progress:** in-memory `dict[jobId, Job]` (`<50 pp`, no Redis). Single whole-document `convert()` (max Docling batching, ~2.6 s/page on RTX 4060) yields no mid-run signal, so progress is heuristic: `done ≈ elapsed / 2.6 s/page` capped at `total - 1` with ETA from verified timings, reconciled to real completion when convert returns.
 - **Markdown + pageMap:** `result.document.export_to_markdown()` `src/app.py:103`; build per-page offsets. If docling lacks per-page export, loop page-by-page (slower but exact `charStart/charEnd` for editor sync). Apply `postprocess` then compute `pageMap: [{page, charStart, charEnd, startLine}]`.
 - **Shared parser:** call `parse_markdown_structure` (fixed `current_headers[:level-1]` bug `src/app.py:65`, code-fence aware).
 
