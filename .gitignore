@@ -26,3 +26,6 @@ archive/
 
 # IDE settings
 **/.vscode
+
+test-pdfs/
+
