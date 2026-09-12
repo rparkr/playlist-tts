@@ -5,6 +5,10 @@ export interface Section {
 	titles: string[];
 	level: number;
 	chunks: string[];
+	/** Sentence groups per paragraph. When `heading` is set, `paragraphs[0]` holds the heading sentence(s). */
+	paragraphs: string[][];
+	/** Own heading text for this section (the last `#` heading before its body), if any. */
+	heading: string | null;
 }
 
 export interface PageMapItem {
@@ -42,21 +46,63 @@ export function chunkTextIntoSentences(text: string): string[] {
 	return parts;
 }
 
+/** Split body lines into blank-line-separated paragraph blocks. */
+function splitParagraphBlocks(lines: string[]): string[] {
+	const blocks: string[] = [];
+	let buf: string[] = [];
+	const flush = () => {
+		const text = buf.join('\n').trim();
+		if (text) blocks.push(text);
+		buf = [];
+	};
+	for (const line of lines) {
+		if (line.trim() === '') flush();
+		else buf.push(line);
+	}
+	flush();
+	return blocks;
+}
+
 export function parseMarkdownStructure(mdText: string): Section[] {
 	const lines = mdText.split('\n');
 	const sections: Section[] = [];
 	let currentLevel = 0;
 	let currentLines: string[] = [];
+	let pendingHeading: string | null = null;
 	const headerStack: string[] = [];
 	let inFence = false;
 
 	function flushSection() {
-		if (currentLines.length === 0) return;
-		const content = currentLines.join('\n').trim();
-		const chunks = chunkTextIntoSentences(content);
-		if (chunks.length === 0) return;
+		const hasBody = currentLines.join('').trim().length > 0;
+		if (!pendingHeading && !hasBody) return;
+		const paragraphs: string[][] = [];
+		if (pendingHeading) {
+			const headingSentences = chunkTextIntoSentences(pendingHeading);
+			// Keep raw title if cleaning stripped everything (e.g. symbols only)
+			if (headingSentences.length > 0) paragraphs.push(headingSentences);
+			else if (pendingHeading.trim()) paragraphs.push([pendingHeading.trim()]);
+		}
+		for (const block of splitParagraphBlocks(currentLines)) {
+			const sentences = chunkTextIntoSentences(block);
+			if (sentences.length > 0) paragraphs.push(sentences);
+		}
+		const chunks = paragraphs.flat();
+		if (chunks.length === 0) {
+			currentLines = [];
+			pendingHeading = null;
+			return;
+		}
 		const titles = headerStack.length > 0 ? [...headerStack] : ['Document'];
-		sections.push({ id: sections.length, titles, level: currentLevel || 1, chunks });
+		sections.push({
+			id: sections.length,
+			titles,
+			level: currentLevel || 1,
+			chunks,
+			paragraphs,
+			heading: pendingHeading
+		});
+		currentLines = [];
+		pendingHeading = null;
 	}
 
 	for (const line of lines) {
@@ -86,12 +132,25 @@ export function parseMarkdownStructure(mdText: string): Section[] {
 			const cleaned = headerStack.filter(Boolean);
 			headerStack.length = 0;
 			headerStack.push(...cleaned);
+			pendingHeading = title;
 		} else {
 			currentLines.push(line);
 		}
 	}
 	flushSection();
 	return sections;
+}
+
+/** Paragraph groups for rendering; falls back for sections stored before `paragraphs` existed. */
+export function getSectionParagraphs(section: Section): string[][] {
+	if (section.paragraphs && section.paragraphs.length > 0) return section.paragraphs;
+	if (section.chunks.length > 0) return [section.chunks];
+	return [];
+}
+
+/** True when the paragraph at `paraIdx` holds the section heading sentence(s). */
+export function isHeadingParagraph(section: Section, paraIdx: number): boolean {
+	return paraIdx === 0 && section.heading != null;
 }
 
 /** Flatten sections to global sentence list */

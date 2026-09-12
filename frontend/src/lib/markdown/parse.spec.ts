@@ -3,6 +3,7 @@ import {
 	chunkTextIntoSentences,
 	parseMarkdownStructure,
 	getBreadcrumbs,
+	getGlobalSentences,
 	globalToSectionChunk,
 	sectionChunkToGlobal
 } from './parse';
@@ -32,23 +33,40 @@ describe('parseMarkdownStructure', () => {
 	const md =
 		'# Training methodology\n\n## Data selection\n\nContent here. Another sentence.';
 
-	it('parses sections with breadcrumbs and sentence chunks', () => {
+	it('includes headings as readable sentences', () => {
 		const sections = parseMarkdownStructure(md);
+		const all = getGlobalSentences(sections);
+		expect(all).toContain('Training methodology');
+		expect(all).toContain('Data selection');
+		expect(all).toContain('Content here.');
+	});
+
+	it('keeps a heading-only section when no body follows', () => {
+		const sections = parseMarkdownStructure(md);
+		expect(sections.length).toBe(2);
+		expect(sections[0].heading).toBe('Training methodology');
+		expect(sections[0].chunks).toEqual(['Training methodology']);
+		expect(sections[1].titles).toEqual(['Training methodology', 'Data selection']);
+		expect(sections[1].heading).toBe('Data selection');
+		expect(sections[1].chunks).toEqual(['Data selection', 'Content here.', 'Another sentence.']);
+	});
+
+	it('preserves paragraph breaks', () => {
+		const sections = parseMarkdownStructure('Para one.\n\nPara two.\n\nPara three.');
 		expect(sections.length).toBe(1);
-		expect(sections[0].titles).toEqual(['Training methodology', 'Data selection']);
-		expect(sections[0].level).toBe(2);
-		expect(sections[0].chunks).toEqual(['Content here.', 'Another sentence.']);
+		expect(sections[0].paragraphs).toEqual([['Para one.'], ['Para two.'], ['Para three.']]);
 	});
 
 	it('builds breadcrumb strings', () => {
 		const sections = parseMarkdownStructure(md);
-		expect(getBreadcrumbs(sections, 0)).toBe('Training methodology > Data selection');
+		expect(getBreadcrumbs(sections, 1)).toBe('Training methodology > Data selection');
 	});
 
 	it('maps between global and section-local sentence indexes', () => {
 		const sections = parseMarkdownStructure(md);
-		expect(globalToSectionChunk(sections, 1)).toEqual({ sectionIdx: 0, chunkIdx: 1 });
-		expect(sectionChunkToGlobal(sections, 0, 1)).toBe(1);
+		// section 1 = ['Data selection', 'Content here.', 'Another sentence.']
+		expect(globalToSectionChunk(sections, 2)).toEqual({ sectionIdx: 1, chunkIdx: 1 });
+		expect(sectionChunkToGlobal(sections, 1, 1)).toBe(2);
 	});
 
 	it('returns no sections for empty input', () => {

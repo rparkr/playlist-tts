@@ -189,7 +189,7 @@ def reflow_columns(markdown: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2. Uppercase normalisation
+# 2. Uppercase normalization
 # ---------------------------------------------------------------------------
 
 
@@ -439,33 +439,75 @@ def chunk_text_into_sentences(text: str) -> list[str]:
     return parts
 
 
+def _split_paragraph_blocks(lines: list[str]) -> list[str]:
+    """Split body lines into blank-line-separated paragraph blocks."""
+    blocks: list[str] = []
+    buf: list[str] = []
+    for line in lines:
+        if line.strip() == "":
+            text = "\n".join(buf).strip()
+            if text:
+                blocks.append(text)
+            buf = []
+        else:
+            buf.append(line)
+    text = "\n".join(buf).strip()
+    if text:
+        blocks.append(text)
+    return blocks
+
+
 def parse_markdown_structure(md_text: str) -> list[Section]:
-    """Parse Markdown into sections with sentence-level chunks."""
+    """Parse Markdown into sections with sentence-level chunks.
+
+    Section headings are included as the first sentence(s) of their section
+    so TTS playback reads them aloud. Paragraph breaks are preserved via
+    `Section.paragraphs` (paragraphs[0] holds heading sentences when set).
+    """
     lines = md_text.splitlines()
     heading_pat = re.compile(r"^(#{1,6})\s+(.+)$")
 
     sections: list[Section] = []
     current_level = 0
     current_lines: list[str] = []
+    pending_heading: str | None = None
     # Stack for breadcrumb correction — maintain header at each depth
     header_stack: list[str] = []
 
     def flush_section() -> None:
-        if not current_lines:
+        nonlocal current_lines, pending_heading
+        if not pending_heading and not "".join(current_lines).strip():
             return
-        content = "\n".join(current_lines).strip()
-        chunks = chunk_text_into_sentences(content)
-        if chunks:
-            # Titles = breadcrumb copy
-            titles = list(header_stack) if header_stack else ["Document"]
-            sections.append(
-                Section(
-                    id=len(sections),
-                    titles=titles,
-                    level=current_level if current_level else 1,
-                    chunks=chunks,
-                )
+        paragraphs: list[list[str]] = []
+        if pending_heading:
+            heading_sentences = chunk_text_into_sentences(pending_heading)
+            if heading_sentences:
+                paragraphs.append(heading_sentences)
+            elif pending_heading.strip():
+                paragraphs.append([pending_heading.strip()])
+        for block in _split_paragraph_blocks(current_lines):
+            sentences = chunk_text_into_sentences(block)
+            if sentences:
+                paragraphs.append(sentences)
+        chunks = [s for para in paragraphs for s in para]
+        if not chunks:
+            current_lines = []
+            pending_heading = None
+            return
+        # Titles = breadcrumb copy
+        titles = list(header_stack) if header_stack else ["Document"]
+        sections.append(
+            Section(
+                id=len(sections),
+                titles=titles,
+                level=current_level if current_level else 1,
+                chunks=chunks,
+                paragraphs=paragraphs,
+                heading=pending_heading,
             )
+        )
+        current_lines = []
+        pending_heading = None
 
     in_fence = False
     for line in lines:
@@ -499,6 +541,7 @@ def parse_markdown_structure(md_text: str) -> list[Section]:
             # Simpler: rebuild from stored levels — use dict.
             # For MVP keep header_stack as clean list; level check is
             # approximate but preserves ordered breadcrumbs.
+            pending_heading = title
         else:
             current_lines.append(line)
 

@@ -40,6 +40,13 @@ class Section(BaseModel):
     titles: list[str] = Field(description="Hierarchical breadcrumb titles")
     level: int = Field(ge=1, le=6, description="Header level (1-6)")
     chunks: list[str] = Field(description="Sentence-level chunks for TTS")
+    paragraphs: list[list[str]] | None = Field(
+        default=None,
+        description="Sentence groups per paragraph; [0] holds heading sentences",
+    )
+    heading: str | None = Field(
+        default=None, description="Own heading text for this section, if any"
+    )
 
 
 class OCRJobCreateResponse(BaseModel):
