@@ -40,6 +40,17 @@
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
 	import { formatEta, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
+	import {
+		LS_KEYS,
+		URL_PARAMS,
+		parseEngine,
+		parseRate,
+		parseSentenceIndex,
+		parsePostprocessFlags,
+		serializePostprocessFlags,
+		resolveWithUrlPrecedence,
+		progressKey
+	} from '$lib/settings';
 
 	// --- State ---
 	let docs: Doc[] = $state([]);
@@ -74,6 +85,9 @@
 	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
+	// Guard persistence writes until onMount has restored last-set state, so
+	// default initial values never clobber localStorage on first render.
+	let settingsHydrated: boolean = $state(false);
 
 	function currentPostprocessOpts(): PostprocessOptions {
 		return {
@@ -84,12 +98,27 @@
 		};
 	}
 
-	function syncPostprocessOptsFromDoc(doc: Doc | null) {
+	function syncPostprocessOptsFromDoc(doc: Doc | null, persist = false) {
 		if (!doc?.postprocess) return;
 		optCombine = doc.postprocess.combine_columns;
 		optUppercase = doc.postprocess.normalize_uppercase;
 		optPunct = doc.postprocess.ensure_punctuation;
 		optPageMarkers = doc.postprocess.insert_page_markers;
+		if (persist) {
+			try {
+				localStorage.setItem(
+					LS_KEYS.postprocess,
+					serializePostprocessFlags({
+						combine: optCombine,
+						uppercase: optUppercase,
+						punct: optPunct,
+						pageMarkers: optPageMarkers
+					})
+				);
+			} catch {
+				// ignore — persistence is best-effort
+			}
+		}
 	}
 
 	let editorEl: HTMLTextAreaElement | null = $state(null);
@@ -148,62 +177,91 @@
 			window.speechSynthesis.getVoices();
 		}
 		const url = new URL(window.location.href);
-		const docParam = url.searchParams.get('doc');
-		const s = url.searchParams.get('s');
-		const rate = url.searchParams.get('rate');
-		const voice = url.searchParams.get('voice');
-		if (rate) synthRate = parseFloat(rate) || 1.0;
-		if (voice) selectedVoiceId = voice;
+		const docParam = url.searchParams.get(URL_PARAMS.doc);
+		const sParam = url.searchParams.get(URL_PARAMS.sentence);
+		const rateParam = url.searchParams.get(URL_PARAMS.rate);
+		const voiceParam = url.searchParams.get(URL_PARAMS.voice);
+		const engineParam = url.searchParams.get(URL_PARAMS.engine);
+		// TTS prefs: URL wins (shareable deep link), else last-set localStorage.
+		const storedRate = localStorage.getItem(LS_KEYS.rate);
+		const storedVoice = localStorage.getItem(LS_KEYS.voice);
+		const storedEngine = localStorage.getItem(LS_KEYS.engine);
+		synthRate = resolveWithUrlPrecedence(rateParam, storedRate, 1.0, parseRate);
+		if (voiceParam) selectedVoiceId = voiceParam;
+		else if (storedVoice) selectedVoiceId = storedVoice;
+		const engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
+		useBackendTTS = engine === 'pocket';
+		// Postprocessing defaults: last-set global prefs until a doc overrides.
+		const storedPostprocess = parsePostprocessFlags(localStorage.getItem(LS_KEYS.postprocess));
+		if (storedPostprocess) {
+			optCombine = storedPostprocess.combine;
+			optUppercase = storedPostprocess.uppercase;
+			optPunct = storedPostprocess.punct;
+			optPageMarkers = storedPostprocess.pageMarkers;
+		}
+		const urlSentence = parseSentenceIndex(sParam);
 		if (docParam) {
 			const d = await getDocBySlugOrId(docParam);
 			if (d) {
 				activeDoc = d;
 				markdownDraft = d.markdown;
-				syncPostprocessOptsFromDoc(d);
-				if (s) {
-					const g = parseInt(s, 10);
-					if (!isNaN(g)) globalIdx = g;
+				syncPostprocessOptsFromDoc(d, true);
+				if (urlSentence !== null) {
+					globalIdx = urlSentence;
 				} else {
-					const saved = localStorage.getItem(`progress_${d.id}`);
-					if (saved) globalIdx = parseInt(saved, 10) || 0;
+					const saved = localStorage.getItem(progressKey(d.id));
+					if (saved) globalIdx = parseSentenceIndex(saved) ?? 0;
 				}
 			}
 		} else {
-			const last = localStorage.getItem('tts_active_doc_id');
+			const last = localStorage.getItem(LS_KEYS.activeDocId);
 			if (last) {
 				const d = await getDocBySlugOrId(last);
 				if (d) {
 					activeDoc = d;
 					markdownDraft = d.markdown;
-					syncPostprocessOptsFromDoc(d);
-					const saved = localStorage.getItem(`progress_${d.id}`);
-					if (saved) globalIdx = parseInt(saved, 10) || 0;
+					syncPostprocessOptsFromDoc(d, true);
+					if (urlSentence !== null) {
+						globalIdx = urlSentence;
+					} else {
+						const saved = localStorage.getItem(progressKey(d.id));
+						if (saved) globalIdx = parseSentenceIndex(saved) ?? 0;
+					}
 				}
 			}
 		}
-		const savedRate = localStorage.getItem('tts_rate');
-		if (savedRate) synthRate = parseFloat(savedRate) || 1.0;
-		const savedVoice = localStorage.getItem('tts_voice');
-		if (savedVoice && !url.searchParams.get('voice')) selectedVoiceId = savedVoice;
 		if (activeDoc) {
 			// Restore the cached PDF so the viewer renders after reload/deep-link.
 			await loadCachedPdf(activeDoc.id);
 		}
+		settingsHydrated = true;
 	});
 
 	$effect(() => {
+		if (!settingsHydrated) return;
 		if (activeDoc) {
-			localStorage.setItem('tts_active_doc_id', activeDoc.id);
-			localStorage.setItem(`progress_${activeDoc.id}`, String(globalIdx));
+			localStorage.setItem(LS_KEYS.activeDocId, activeDoc.id);
+			localStorage.setItem(progressKey(activeDoc.id), String(globalIdx));
 		}
-		localStorage.setItem('tts_rate', String(synthRate));
-		localStorage.setItem('tts_voice', selectedVoiceId);
+		localStorage.setItem(LS_KEYS.rate, String(synthRate));
+		localStorage.setItem(LS_KEYS.voice, selectedVoiceId);
+		localStorage.setItem(LS_KEYS.engine, useBackendTTS ? 'pocket' : 'device');
+		localStorage.setItem(
+			LS_KEYS.postprocess,
+			serializePostprocessFlags({
+				combine: optCombine,
+				uppercase: optUppercase,
+				punct: optPunct,
+				pageMarkers: optPageMarkers
+			})
+		);
 		if (typeof window !== 'undefined' && activeDoc) {
 			const url = new URL(window.location.href);
-			url.searchParams.set('doc', activeDoc.slug ?? activeDoc.id);
-			url.searchParams.set('s', String(globalIdx));
-			url.searchParams.set('rate', String(synthRate));
-			url.searchParams.set('voice', selectedVoiceId);
+			url.searchParams.set(URL_PARAMS.doc, activeDoc.slug ?? activeDoc.id);
+			url.searchParams.set(URL_PARAMS.sentence, String(globalIdx));
+			url.searchParams.set(URL_PARAMS.rate, String(synthRate));
+			url.searchParams.set(URL_PARAMS.voice, selectedVoiceId);
+			url.searchParams.set(URL_PARAMS.engine, useBackendTTS ? 'pocket' : 'device');
 			history.replaceState(null, '', url.toString());
 		}
 	});
@@ -525,10 +583,10 @@
 		clearPdfViewer();
 		activeDoc = d;
 		markdownDraft = d.markdown;
-		syncPostprocessOptsFromDoc(d);
+		syncPostprocessOptsFromDoc(d, true);
 		isEditing = false;
-		const saved = localStorage.getItem(`progress_${id}`);
-		globalIdx = saved ? parseInt(saved, 10) || 0 : 0;
+		const saved = localStorage.getItem(progressKey(id));
+		globalIdx = parseSentenceIndex(saved) ?? 0;
 		// Load the cached PDF for this doc so the viewer follows the active document.
 		await tick();
 		await loadCachedPdf(id);
@@ -544,7 +602,7 @@
 			activeDoc = null;
 			markdownDraft = '';
 			clearPdfViewer();
-			localStorage.removeItem('tts_active_doc_id');
+			localStorage.removeItem(LS_KEYS.activeDocId);
 		}
 	}
 	async function clearCachedPdf(id: string) {
