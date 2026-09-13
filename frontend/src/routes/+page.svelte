@@ -477,6 +477,10 @@
 			return;
 		}
 		const fileToUpload = pdfFile;
+		// No size limit — warn on large PDFs but allow any size.
+		if (fileToUpload.size > 100 * 1024 * 1024) {
+			showToast(`Large PDF (${(fileToUpload.size / 1024 / 1024).toFixed(1)} MB) — processing may take a while`);
+		}
 		isOcrRunning = true;
 		ocrProgress = { done: 0, total: 0 };
 		ocrStartAt = Date.now();

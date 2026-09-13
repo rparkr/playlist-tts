@@ -64,13 +64,6 @@ async def create_job(
 
     _validate_pdf_upload(file, pdf_bytes)
 
-    # Enforce size limit (100 MB)
-    from backend.app.core.config import settings
-
-    max_bytes = settings.max_pdf_mb * 1024 * 1024
-    if len(pdf_bytes) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"PDF exceeds {settings.max_pdf_mb} MB limit.")
-
     job_id = create_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts)
     return OCRJobCreateResponse(job_id=job_id)
 
@@ -139,12 +132,6 @@ async def ocr_sync(
     pdf_bytes = await file.read()
 
     _validate_pdf_upload(file, pdf_bytes)
-
-    from backend.app.core.config import settings
-
-    max_bytes = settings.max_pdf_mb * 1024 * 1024
-    if len(pdf_bytes) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"PDF exceeds {settings.max_pdf_mb} MB limit.")
 
     job_id = create_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts)
 
