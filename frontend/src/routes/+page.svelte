@@ -46,6 +46,11 @@
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
 	let ocrStartAt: number | null = $state(null);
+	// Anchored countdown ETA: each progress step sets a new anchor; the
+	// per-second ticker only ever counts that anchor down.
+	let ocrEtaSeconds: number | null = $state(null);
+	let ocrEtaAnchoredAt: number | null = $state(null);
+	let ocrNow: number = $state(Date.now());
 
 	let globalIdx: number = $state(0);
 	let isPlaying: boolean = $state(false);
@@ -192,15 +197,29 @@
 	});
 
 	let ocrEta: string = $derived.by(() => {
-		if (!isOcrRunning || !ocrProgress || !ocrStartAt || !ocrProgress.total) return '';
-		const elapsed = (Date.now() - ocrStartAt) / 1000;
-		if (ocrProgress.done === 0) return '';
-		const perPage = elapsed / ocrProgress.done;
-		const remaining = perPage * (ocrProgress.total - ocrProgress.done);
-		const m = Math.floor(remaining / 60);
-		const s = Math.round(remaining % 60);
-		return `${m}:${String(s).padStart(2, '0')}`;
+		if (!isOcrRunning || ocrEtaSeconds === null || ocrEtaAnchoredAt === null) return '';
+		return formatEta(tickDownEta(ocrEtaSeconds, ocrEtaAnchoredAt, ocrNow));
 	});
+
+	// Tick the countdown once per second while OCR runs. The ticker only
+	// re-renders; the anchor itself is set by progress steps below.
+	$effect(() => {
+		if (!isOcrRunning) return;
+		const id = setInterval(() => {
+			ocrNow = Date.now();
+		}, 1000);
+		return () => clearInterval(id);
+	});
+
+	function anchorOcrEta(done: number, total: number, eventEta: unknown) {
+		if (!isOcrRunning || ocrStartAt === null) return;
+		const elapsed = (Date.now() - ocrStartAt) / 1000;
+		const next = resolveAnchoredEta(eventEta, done, total, elapsed);
+		if (next === null) return;
+		ocrEtaSeconds = next;
+		ocrEtaAnchoredAt = Date.now();
+		ocrNow = Date.now();
+	}
 
 	// PDF handling
 	async function onPdfSelected(e: Event) {
@@ -308,6 +327,10 @@
 		isOcrRunning = true;
 		ocrProgress = { done: 0, total: 0 };
 		ocrStartAt = Date.now();
+		ocrEtaSeconds = null;
+		ocrEtaAnchoredAt = null;
+		ocrNow = Date.now();
+		let ocrSucceeded = false;
 		try {
 			const fd = new FormData();
 			// Pass filename explicitly so the backend always sees it,
@@ -332,6 +355,7 @@
 						const data = JSON.parse(ev.data);
 						if (data.type === 'progress' || data.type === 'keepalive') {
 							ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
+							anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
 						} else if (data.type === 'done') {
 							es.close();
 							resolve(data);
@@ -349,6 +373,7 @@
 					if (!r.ok) continue;
 					const j = await r.json();
 					ocrProgress = { done: j.progress.done, total: j.progress.total };
+					anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
 					if (j.status === 'done') return j;
 					if (j.status === 'error') throw new Error(j.error);
 				}
@@ -366,16 +391,22 @@
 			globalIdx = 0;
 			isEditing = false;
 			showToast('OCR completed');
-			if (pdfUrl) {
-				await new Promise((r) => setTimeout(r, 100));
-				await loadPdf();
-			}
+			ocrSucceeded = true;
 		} catch (e: any) {
 			showToast(`OCR failed: ${e.message}`);
 		} finally {
 			isOcrRunning = false;
 			ocrProgress = null;
 			ocrStartAt = null;
+			ocrEtaSeconds = null;
+			ocrEtaAnchoredAt = null;
+		}
+		// Load the preview only after the progress pane is gone — while OCR
+		// runs the PdfPane (and its canvas) is unmounted, so rendering then
+		// silently no-ops and the viewer stays blank.
+		if (ocrSucceeded && pdfUrl) {
+			await tick();
+			await loadPdf();
 		}
 	}
 
