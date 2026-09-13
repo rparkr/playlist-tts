@@ -1,18 +1,27 @@
 """Pydantic schemas for OCR, parse, and TTS contracts."""
 
 from enum import StrEnum
-from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PostprocessOptions(BaseModel):
     """User-configurable post-processing flags."""
 
     combine_columns: bool = True
-    normalize_uppercase: Literal["off", "title", "lower_long"] = "off"
+    normalize_uppercase: bool = False
     ensure_punctuation: bool = False
     insert_page_markers: bool = True
+
+    @field_validator("normalize_uppercase", mode="before")
+    @classmethod
+    def _coerce_uppercase(cls, v: object) -> bool:
+        """Accept legacy string modes for backward compatibility."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.lower() not in ("off", "false", "0", "")
+        return bool(v)
 
 
 class JobStatus(StrEnum):
@@ -72,6 +81,12 @@ class OCRDirectResponse(BaseModel):
     sections: list[Section]
     page_map: list[PageMapItem]
     meta: dict
+    raw_markdown: str | None = Field(
+        default=None, description="Unprocessed OCR markdown for client-side re-render"
+    )
+    raw_page_map: list[PageMapItem] | None = Field(
+        default=None, description="Page map aligned to raw_markdown"
+    )
 
 
 class ParseMarkdownResponse(BaseModel):

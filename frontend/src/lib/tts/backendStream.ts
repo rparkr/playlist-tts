@@ -3,7 +3,8 @@
 export async function fetchTTSWavStream(
 	text: string,
 	voiceId: string | null,
-	voiceBlob: Blob | null
+	voiceBlob: Blob | null,
+	signal?: AbortSignal
 ): Promise<{ blob: Blob; url: string }> {
 	const apiBase = import.meta.env.PUBLIC_API_URL ?? '';
 	const url = `${apiBase}/api/tts/stream`;
@@ -17,7 +18,7 @@ export async function fetchTTSWavStream(
 		form.append('voice_safetensors', voiceBlob, 'voice.safetensors');
 	}
 
-	const resp = await fetch(url, { method: 'POST', body: form });
+	const resp = await fetch(url, { method: 'POST', body: form, signal });
 	if (!resp.ok) {
 		const txt = await resp.text();
 		throw new Error(`TTS stream failed ${resp.status}: ${txt}`);

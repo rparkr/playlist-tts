@@ -71,7 +71,7 @@ OCR_SECONDS_PER_PAGE = 2.6
 OCR_FIXED_OVERHEAD_S = 8.0
 
 
-def create_document_converter():  # type: ignore[no-untyped-def]
+def create_document_converter(scale: float = 2.0, max_new_tokens: int = 8192):  # type: ignore[no-untyped-def]
     """Build the speed-tuned granite-docling converter.
 
     `scale=1.5` (vs default 2.0) halves VLM input pixels with no measured
@@ -86,8 +86,8 @@ def create_document_converter():  # type: ignore[no-untyped-def]
     from docling.pipeline.vlm_pipeline import VlmPipeline
 
     vlm_opts = copy.deepcopy(vlm_model_specs.GRANITEDOCLING_TRANSFORMERS)
-    vlm_opts.scale = 1.5
-    vlm_opts.max_new_tokens = 4096
+    vlm_opts.scale = scale
+    vlm_opts.max_new_tokens = max_new_tokens
     pipeline_options = VlmPipelineOptions(vlm_options=vlm_opts)
     return DocumentConverter(
         format_options={
@@ -215,6 +215,8 @@ async def _run_ocr_job(
             "markdown": md,
             "sections": [s.model_dump() for s in sections],
             "page_map": [p.model_dump() for p in page_map],
+            "raw_markdown": md_raw,
+            "raw_page_map": [p.model_dump() for p in page_map_init],
             "meta": {
                 "pageCount": total,
                 "processingMs": int((time.time() - job.created_at) * 1000),

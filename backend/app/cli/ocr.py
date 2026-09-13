@@ -1,7 +1,6 @@
 """CLI for OCR — reuses backend services."""
 
 from pathlib import Path
-from typing import Literal
 
 import typer
 from rich.console import Console
@@ -30,8 +29,10 @@ def convert(
         None, "--output", "-o", help="Output Markdown path (default: <input>.md)."
     ),
     no_reflow: bool = typer.Option(False, "--no-reflow", help="Disable column reflow."),
-    normalize_uppercase: Literal["off", "title", "lower_long"] = typer.Option(
-        "off", "--normalize-uppercase", help="Uppercase normalization mode."
+    normalize_uppercase: bool = typer.Option(
+        False,
+        "--normalize-uppercase/--no-normalize-uppercase",
+        help="Normalize uppercase spans to Title Case for TTS.",
     ),
     ensure_punctuation: bool = typer.Option(
         False, "--ensure-punctuation", help="Ensure headers end with punctuation."

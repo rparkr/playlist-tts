@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import {
 		createDoc,
 		getAllDocs,
@@ -9,11 +9,13 @@
 		renameDoc as renameDocStore,
 		deleteDoc,
 		saveDoc,
+		reapplyPostprocessing,
 		getVoices as getCustomVoices,
 		saveVoice,
 		migrateFromLocalStorage,
 		type Doc,
-		type VoiceRecord
+		type VoiceRecord,
+		type PostprocessOptions
 	} from '$lib/stores/library';
 	import {
 		parseMarkdownStructure,
@@ -22,7 +24,8 @@
 		sectionChunkToGlobal,
 		type Section
 	} from '$lib/markdown/parse';
-	import { fetchTTSWavStream, createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
+	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
+	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
 	import LibraryModal from '$lib/components/LibraryModal.svelte';
@@ -31,6 +34,7 @@
 	import MarkdownPane from '$lib/components/MarkdownPane.svelte';
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
+	import { formatEta, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
 
 	// --- State ---
 	let docs: Doc[] = $state([]);
@@ -55,8 +59,7 @@
 	let globalIdx: number = $state(0);
 	let isPlaying: boolean = $state(false);
 	let useBackendTTS: boolean = $state(false);
-	let backendAudioUrl: string | null = $state(null);
-	let backendAudioEl: HTMLAudioElement | null = $state.raw(null);
+	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
@@ -65,6 +68,23 @@
 	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
+
+	function currentPostprocessOpts(): PostprocessOptions {
+		return {
+			combine_columns: optCombine,
+			normalize_uppercase: optUppercase,
+			ensure_punctuation: optPunct,
+			insert_page_markers: optPageMarkers
+		};
+	}
+
+	function syncPostprocessOptsFromDoc(doc: Doc | null) {
+		if (!doc?.postprocess) return;
+		optCombine = doc.postprocess.combine_columns;
+		optUppercase = doc.postprocess.normalize_uppercase;
+		optPunct = doc.postprocess.ensure_punctuation;
+		optPageMarkers = doc.postprocess.insert_page_markers;
+	}
 
 	let editorEl: HTMLTextAreaElement | null = $state(null);
 	let canvasEl: HTMLCanvasElement | null = $state(null);
@@ -128,6 +148,7 @@
 			if (d) {
 				activeDoc = d;
 				markdownDraft = d.markdown;
+				syncPostprocessOptsFromDoc(d);
 				if (s) {
 					const g = parseInt(s, 10);
 					if (!isNaN(g)) globalIdx = g;
@@ -143,6 +164,7 @@
 				if (d) {
 					activeDoc = d;
 					markdownDraft = d.markdown;
+					syncPostprocessOptsFromDoc(d);
 					const saved = localStorage.getItem(`progress_${d.id}`);
 					if (saved) globalIdx = parseInt(saved, 10) || 0;
 				}
@@ -252,14 +274,23 @@
 			pdfDoc = await task.promise;
 			pdfTotalPages = pdfDoc.numPages;
 			pdfPageNum = 1;
-			await new Promise((r) => setTimeout(r, 50));
+			// Wait for the PdfPane canvas to mount before rendering into it.
+			await tick();
 			await renderPdfPage();
 		} catch (e: any) {
 			showToast(`PDF preview failed: ${e?.message ?? e}`);
 		}
 	}
 	async function renderPdfPage() {
-		if (!pdfDoc || !canvasEl) return;
+		if (!pdfDoc) return;
+		// The PdfPane canvas unmounts while OCR progress is shown (and when
+		// the pane is hidden), so wait for it to be bound before drawing.
+		let tries = 0;
+		while (!canvasEl && tries < 40) {
+			await new Promise((r) => setTimeout(r, 50));
+			tries++;
+		}
+		if (!canvasEl) return;
 		const page = await pdfDoc.getPage(pdfPageNum);
 		const viewport = page.getViewport({ scale: 1.2 });
 		canvasEl.width = viewport.width;
@@ -384,7 +415,11 @@
 			if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
 			const result = job.result;
 			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
-			const doc = await createDoc(title, result.markdown, result.page_map);
+			// Prefer raw backend output so re-render stays client-side/offline.
+			// Fall back to processed markdown for older backends.
+			const rawMarkdown = result.raw_markdown ?? result.markdown;
+			const rawPageMap = result.raw_page_map ?? result.page_map;
+			const doc = await createDoc(title, rawMarkdown, rawPageMap, currentPostprocessOpts());
 			docs = await getAllDocs();
 			activeDoc = doc;
 			markdownDraft = doc.markdown;
@@ -414,9 +449,11 @@
 		const d = await getDoc(id);
 		if (!d) return;
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+		sentencePlayer?.stop();
 		isPlaying = false;
 		activeDoc = d;
 		markdownDraft = d.markdown;
+		syncPostprocessOptsFromDoc(d);
 		isEditing = false;
 		const saved = localStorage.getItem(`progress_${id}`);
 		globalIdx = saved ? parseInt(saved, 10) || 0 : 0;
@@ -480,7 +517,15 @@
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {
-		globalIdx = idx;
+		if (isPlaying || useBackendTTS) seekTo(idx);
+		else globalIdx = idx;
+	}
+
+	function handleVoiceChange(id: string) {
+		selectedVoiceId = id;
+		// Cache keys are voice-scoped, so just restart the chain: the new
+		// voice synthesizes from the current sentence, nothing earlier.
+		if (isPlaying && useBackendTTS) playBackend();
 	}
 
 	// Voice handling
@@ -536,37 +581,47 @@
 
 	// Player
 	let isBackendGenerating: boolean = $state(false);
-	async function playBackend() {
+
+	function getSentencePlayer(): BackendSentencePlayer {
+		if (!sentencePlayer) {
+			sentencePlayer = new BackendSentencePlayer();
+			sentencePlayer.setCallbacks({
+				onSentenceStart: (idx) => {
+					globalIdx = idx;
+				},
+				onEnded: () => {
+					isPlaying = false;
+					globalIdx = Math.max(0, getGlobalSentences(sections).length - 1);
+				},
+				onError: (msg) => {
+					showToast(`Backend TTS failed: ${msg}`);
+					isPlaying = false;
+				},
+				onLoadingChange: (loading) => {
+					isBackendGenerating = loading;
+				}
+			});
+		}
+		return sentencePlayer;
+	}
+
+	function resolveBackendVoice(): { voiceKey: string; voiceId: string | null; blob: Blob | null } {
+		const custom = customVoices.find((v) => v.id === selectedVoiceId);
+		if (custom) return { voiceKey: custom.id, voiceId: null, blob: custom.blob };
+		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
+	}
+
+	/** Start backend playback from `globalIdx` — one sentence per request. */
+	function playBackend() {
 		if (!activeDoc) return;
 		const all = getGlobalSentences(sections);
-		const slice = all.slice(globalIdx).join(' ');
-		if (!slice.trim()) { isPlaying = false; return; }
-		let blob: Blob | null = null;
-		let voiceUrl: string | null = null;
-		const custom = customVoices.find((v) => v.id === selectedVoiceId);
-		if (custom) blob = custom.blob;
-		else voiceUrl = selectedVoiceId;
-		try {
-			isBackendGenerating = true;
-			const { url } = await fetchTTSWavStream(slice, voiceUrl, blob);
-			if (backendAudioUrl) URL.revokeObjectURL(backendAudioUrl);
-			backendAudioUrl = url;
-			if (!backendAudioEl) {
-				backendAudioEl = new Audio();
-				backendAudioEl.onended = () => {
-					isPlaying = false;
-					globalIdx = all.length - 1;
-				};
-			}
-			backendAudioEl.src = backendAudioUrl;
-			backendAudioEl.playbackRate = synthRate;
-			await backendAudioEl.play();
-		} catch (e: any) {
-			showToast(`Backend TTS failed: ${e.message}`);
+		if (all.slice(globalIdx).every((s) => !s.trim())) {
 			isPlaying = false;
-		} finally {
-			isBackendGenerating = false;
+			return;
 		}
+		const { voiceKey, voiceId, blob } = resolveBackendVoice();
+		isBackendGenerating = true;
+		void getSentencePlayer().play(all, globalIdx, voiceKey, voiceId, blob, synthRate);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
@@ -598,52 +653,62 @@
 		if (isPlaying) {
 			isPlaying = false;
 			cancelSpeech();
-			if (backendAudioEl) backendAudioEl.pause();
+			// Pause keeps cached sentence audio + position for instant resume.
+			sentencePlayer?.pause();
 		} else {
 			isPlaying = true;
-			if (useBackendTTS) playBackend();
-			else playWebSpeechCorrect();
+			if (useBackendTTS) {
+				if (sentencePlayer?.canResume()) void sentencePlayer.resume();
+				else playBackend();
+			} else playWebSpeechCorrect();
+		}
+	}
+	/** Move to `idx`, keeping backend playback going from there when playing. */
+	function seekTo(idx: number) {
+		const total = getGlobalSentences(sections).length;
+		const next = Math.max(0, Math.min(idx, total - 1));
+		globalIdx = next;
+		if (useBackendTTS) {
+			// When paused this just parks the resume position; when playing it
+			// aborts in-flight requests and starts at the new sentence.
+			void sentencePlayer?.seek(next);
+		} else if (isPlaying) {
+			cancelSpeech();
+			playWebSpeechCorrect();
 		}
 	}
 	function skipSentence(dir: number) {
-		const allLen = getGlobalSentences(sections).length;
-		let next = globalIdx + dir;
-		next = Math.max(0, Math.min(next, allLen - 1));
-		globalIdx = next;
-		if (isPlaying) {
-			if (useBackendTTS) {
-				if (backendAudioEl) backendAudioEl.pause();
-				playBackend();
-			} else {
-				cancelSpeech();
-				playWebSpeechCorrect();
-			}
-		}
+		seekTo(globalIdx + dir);
 	}
 	function nextSection() {
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx < sections.length - 1) {
-			globalIdx = sectionChunkToGlobal(sections, sectionIdx + 1, 0);
-			if (isPlaying && !useBackendTTS) { cancelSpeech(); playWebSpeechCorrect(); }
-			else if (isPlaying && useBackendTTS) { if (backendAudioEl) backendAudioEl.pause(); playBackend(); }
+			const target = sectionChunkToGlobal(sections, sectionIdx + 1, 0);
+			if (isPlaying || useBackendTTS) seekTo(target);
+			else globalIdx = target;
 		}
 	}
 	function prevSection() {
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx > 0) {
-			globalIdx = sectionChunkToGlobal(sections, sectionIdx - 1, 0);
-			if (isPlaying && !useBackendTTS) { cancelSpeech(); playWebSpeechCorrect(); }
-			else if (isPlaying && useBackendTTS) { if (backendAudioEl) backendAudioEl.pause(); playBackend(); }
+			const target = sectionChunkToGlobal(sections, sectionIdx - 1, 0);
+			if (isPlaying || useBackendTTS) seekTo(target);
+			else globalIdx = target;
 		}
 	}
 	function updateRate(v: number) {
 		synthRate = v;
-		if (backendAudioEl) backendAudioEl.playbackRate = v;
+		sentencePlayer?.setRate(v);
 	}
 
 	// Header actions
-	function handleLogoClick() {
+	async function handleLogoClick() {
 		pdfVisible = !pdfVisible;
+		if (pdfVisible && pdfDoc) {
+			// The canvas remounts when the pane becomes visible again.
+			await tick();
+			await renderPdfPage();
+		}
 	}
 	function handleHeaderUpload() {
 		pdfInputEl?.click();
@@ -652,16 +717,25 @@
 		showLibrary = true;
 	}
 
-	// Postprocessing apply
+	// Postprocessing apply — offline client-side re-render from stored raw Markdown.
 	let hasDirtyEdits = $derived(activeDoc ? markdownDraft !== (activeDoc as Doc).markdown : false);
 	async function applyPostprocess() {
+		if (!activeDoc) return;
 		if (hasDirtyEdits) {
 			if (!confirm('You have edited the Markdown. Re-applying postprocessing will overwrite your changes. Continue?')) return;
 		}
-		// For now, re-parse is instantaneous; real postprocess would need raw OCR text.
-		// We just close modal and toast; actual pipeline re-run deferred to backend re-process if needed.
-		showPostprocess = false;
-		showToast('Postprocessing settings saved — re-render pending raw text support');
+		try {
+			const updated = await reapplyPostprocessing(activeDoc, currentPostprocessOpts());
+			activeDoc = updated;
+			markdownDraft = updated.markdown;
+			docs = await getAllDocs();
+			globalIdx = 0;
+			isEditing = false;
+			showPostprocess = false;
+			showToast('Postprocessing applied');
+		} catch (e: any) {
+			showToast(`Re-render failed: ${e?.message ?? e}`);
+		}
 	}
 
 	// Overflow actions
@@ -763,7 +837,7 @@
 		onToggle={handleToggle}
 		onNextSentence={() => skipSentence(1)}
 		onNextSection={nextSection}
-		onSeek={(idx) => (globalIdx = idx)}
+		onSeek={seekTo}
 		onSettings={() => (showTtsSettings = true)}
 	/>
 
@@ -786,7 +860,7 @@
 		{customVoices}
 		{synthVoices}
 		{selectedVoiceId}
-		onVoiceChange={(id) => (selectedVoiceId = id)}
+		onVoiceChange={handleVoiceChange}
 		{synthRate}
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}

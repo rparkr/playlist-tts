@@ -19,7 +19,8 @@ def test_ocr_help():
     result = runner.invoke(ocr_app, ["--help"])
     assert result.exit_code == 0
     assert "INPUT_PDF" in result.output
-    assert "--normalize-uppercase" in result.output
+    # Rich may truncate long flag names with an ellipsis on narrow terminals.
+    assert "normalize-upperca" in result.output
 
 
 def test_ocr_missing_file():

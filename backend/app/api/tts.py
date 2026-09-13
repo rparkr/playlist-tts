@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from backend.app.models.schemas import (
@@ -62,11 +62,18 @@ async def convert_voice(
 
 @router.post("/stream")
 async def tts_stream(
+    request: Request,
     text: Annotated[str, Form()] = "",
     voice_url: Annotated[str | None, Form()] = None,
     voice_safetensors: Annotated[UploadFile | None, File()] = None,
 ) -> StreamingResponse:
-    """Stream WAV audio for given text (chunked)."""
+    """Stream WAV audio for given text (chunked).
+
+    The frontend sends one sentence (or a few) at a time so synthesis starts
+    fast and seeking/pause does not re-process the whole document. Stop
+    iterating (and free the worker) as soon as the client disconnects, e.g.
+    after a seek to a different sentence.
+    """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
     if voice_url and voice_safetensors:
@@ -80,8 +87,20 @@ async def tts_stream(
         if len(safetensors_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty safetensors file.")
 
-    def wav_gen():
-        yield from generate_stream(text, voice_url, safetensors_bytes)
+    async def wav_gen():
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        # Run the blocking pocket-tts generator in a worker thread and pump
+        # its chunks back to the event loop, so disconnect checks still run.
+        gen = generate_stream(text, voice_url, safetensors_bytes)
+        while True:
+            chunk = await loop.run_in_executor(None, lambda: next(gen, None))
+            if chunk is None:
+                break
+            if await request.is_disconnected():
+                break
+            yield chunk
 
     return StreamingResponse(
         wav_gen(),
