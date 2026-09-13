@@ -158,6 +158,18 @@ export function getGlobalSentences(sections: Section[]): string[] {
 	return sections.flatMap((s) => s.chunks);
 }
 
+/** Global sentence index of the `Page N.` marker, or -1 when absent.
+ *
+ * Used for exact PDF→Markdown sync: scrolling to the marker element is
+ * precise regardless of how text-heavy each page is, unlike line- or
+ * character-proportional estimates.
+ */
+export function findPageMarkerIndex(sentences: string[], page: number): number {
+	if (page <= 1) return -1;
+	const want = `Page ${page}.`;
+	return sentences.findIndex((s) => s.trim() === want);
+}
+
 /** Resolve which sections the reader (viewer + TTS) should use right now.
  *
  * When the Markdown draft differs from the last saved doc text there are

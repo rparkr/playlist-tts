@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	chunkTextIntoSentences,
 	parseMarkdownStructure,
+	findPageMarkerIndex,
 	getBreadcrumbs,
 	getGlobalSentences,
 	globalToSectionChunk,
@@ -108,5 +109,20 @@ describe('selectSections', () => {
 			'First sentence.',
 			'Second sentence.'
 		]);
+	});
+});
+
+describe('findPageMarkerIndex', () => {
+	it('locates the Page N marker sentence for exact PDF sync', () => {
+		const sentences = getGlobalSentences(
+			parseMarkdownStructure('Intro text here.\n\nPage 2.\n\nSecond page text here.')
+		);
+		expect(findPageMarkerIndex(sentences, 2)).toBeGreaterThanOrEqual(0);
+		expect(sentences[findPageMarkerIndex(sentences, 2)]).toBe('Page 2.');
+	});
+
+	it('returns -1 for page 1 and missing markers', () => {
+		expect(findPageMarkerIndex(['Page 2.'], 1)).toBe(-1);
+		expect(findPageMarkerIndex(['Just text.'], 3)).toBe(-1);
 	});
 });

@@ -23,6 +23,7 @@
 	} from '$lib/stores/library';
 	import {
 		parseMarkdownStructure,
+		findPageMarkerIndex,
 		getGlobalSentences,
 		globalToSectionChunk,
 		sectionChunkToGlobal,
@@ -358,33 +359,33 @@
 		canvasEl.height = viewport.height;
 		const ctx = canvasEl.getContext('2d');
 		if (ctx) await page.render({ canvasContext: ctx, viewport }).promise;
-		// Sync scroll
-		const targetLine = (() => {
-			if (activeDoc?.pageMap) {
-				const pm = activeDoc.pageMap.find((p) => p.page === pdfPageNum);
-				if (pm) return pm.start_line;
-			}
-			return null;
-		})();
-		if (targetLine !== null) {
-			const lineHeight = 20;
-			const top = Math.max(0, (targetLine - 1) * lineHeight - 40);
-			if (isEditing && editorEl) {
-				editorEl.scrollTop = top;
-			} else {
-				const viewer = markdownPaneRef?.getViewerEl?.();
-				if (viewer) viewer.scrollTop = top;
-				else if (editorEl) editorEl.scrollTop = top;
-			}
-		} else if (pdfTotalPages) {
-			// fallback proportional
-			const viewer = markdownPaneRef?.getViewerEl?.();
-			const el = isEditing ? editorEl : viewer;
-			if (el && pdfTotalPages) {
-				const approx = ((pdfPageNum - 1) / pdfTotalPages) * el.scrollHeight;
-				el.scrollTop = approx;
-			}
+	// Sync scroll — prefer the exact `Page N.` marker element (precise no
+	// matter how text-heavy each page is); fall back to character-offset
+	// proportional scrolling when markers are off or absent. Line-based
+	// estimates undershoot because rendered paragraphs wrap, and uneven
+	// true page lengths made that visible.
+	const viewer = markdownPaneRef?.getViewerEl?.();
+	const scrolledToMarker = (() => {
+		if (isEditing || !viewer || pdfPageNum <= 1) return false;
+		const idx = findPageMarkerIndex(getGlobalSentences(sections), pdfPageNum);
+		if (idx === -1) return false;
+		const node = viewer.querySelector(`[data-sentence-idx="${idx}"]`) as HTMLElement | null;
+		if (!node) return false;
+		const viewerRect = viewer.getBoundingClientRect();
+		const elRect = node.getBoundingClientRect();
+		viewer.scrollTop = Math.max(0, viewer.scrollTop + (elRect.top - viewerRect.top) - 16);
+		return true;
+	})();
+	if (!scrolledToMarker) {
+		const mdText = isEditing ? markdownDraft : (activeDoc?.markdown ?? markdownDraft);
+		const mdLen = mdText.length || 1;
+		const pm = activeDoc?.pageMap?.find((p) => p.page === pdfPageNum);
+		const charStart = pm ? pm.char_start : ((pdfPageNum - 1) / Math.max(1, pdfTotalPages)) * mdLen;
+		const el = isEditing ? editorEl : (viewer ?? editorEl);
+		if (el) {
+			el.scrollTop = Math.max(0, (charStart / mdLen) * el.scrollHeight - 40);
 		}
+	}
 	}
 	function nextPdfPage() {
 		if (pdfPageNum < pdfTotalPages) {
