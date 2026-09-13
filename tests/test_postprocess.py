@@ -5,6 +5,7 @@ from backend.app.services.postprocess import (
     apply_postprocessing,
     build_page_map,
     chunk_text_into_sentences,
+    dehyphenate,
     ensure_punctuation,
     normalize_uppercase,
     parse_markdown_structure,
@@ -139,3 +140,38 @@ def test_page_break_placeholders_preserved_through_strip():
     cleaned = _strip_image_artifacts(raw)
     assert has_page_breaks(cleaned)
     assert "<!-- image -->" not in cleaned
+
+
+def test_dehyphenate_inline_breaks():
+    """Hyphen + space/newline between letters joins to one word."""
+    assert (
+        dehyphenate("stresses and dete- rioration and even")
+        == "stresses and deterioration and even"
+    )
+    assert dehyphenate("cables in combi- nation with") == "cables in combination with"
+    assert dehyphenate("more reli- able signals") == "more reliable signals"
+    assert (
+        dehyphenate("immune to electromag- netic interference")
+        == "immune to electromagnetic interference"
+    )
+    assert dehyphenate("easy to dis- tinguish from") == "easy to distinguish from"
+    assert dehyphenate("stresses and dete-\nrioration and") == "stresses and deterioration and"
+
+
+def test_dehyphenate_preserves_legitimate_hyphens():
+    """Real hyphens, spaced dashes, and digit ranges are untouched."""
+    assert dehyphenate("fiber-optic cables") == "fiber-optic cables"
+    assert dehyphenate("word - word stays") == "word - word stays"
+    assert dehyphenate("pages 1990- 1995 here") == "pages 1990- 1995 here"
+    out = dehyphenate("```\nCODE- WITH space\n```\nnormal dete- rioration")
+    assert "CODE- WITH" in out
+    assert "deterioration" in out
+
+
+def test_apply_postprocessing_dehyphenates():
+    """Full pipeline joins hyphen breaks when combine_columns is on."""
+    md = "they can suffer undue stresses and dete- rioration and even pull."
+    opts = PostprocessOptions(combine_columns=True, insert_page_markers=False)
+    out_md, _, _ = apply_postprocessing(md, opts, None)
+    assert "deterioration" in out_md
+    assert "dete- rioration" not in out_md

@@ -27,6 +27,14 @@ _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])')
 # Stray leading quotes after split are stripped in post-cleanup; an optional
 # closing quote stays with the prior sentence via _TERMINAL_RE detection
 
+# Line-break hyphenation: a word split across lines/columns as `dete- rioration`
+# or `dete-\nrioration`. Letters-only on both sides so digit ranges (`1990- 1995`)
+# and spaced dashes (`word - word`) are left alone. `fiber-optic` (no space)
+# is also untouched.
+_DEHYPHEN_RE = re.compile(r"(?<=[A-Za-z])-\s+(?=[A-Za-z])")
+# Soft hyphen (U+00AD) — invisible break hint; always drop, incl. trailing space.
+_SOFT_HYPHEN_RE = re.compile(r"­\s*")
+
 
 _IMAGE_COMMENT_RE = re.compile(r"^\s*<!--\s*image\s*-->\s*$", re.IGNORECASE)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -109,6 +117,30 @@ def _is_special_block(line: str) -> bool:
 def _ends_with_terminal(text: str) -> bool:
     """Check if text ends with terminal punctuation (quote-aware)."""
     return bool(_TERMINAL_RE.search(text.strip()))
+
+
+def dehyphenate(markdown: str) -> str:
+    """Join words split by line-break hyphenation.
+
+    Fixes OCR artifacts like `dete- rioration` → `deterioration`,
+    `combi- nation` → `combination`, and `dete-\\nrioration` (hyphen +
+    newline inside a paragraph). Only the hyphen + whitespace between two
+    letters is removed, so `fiber-optic`, `word - word`, and digit ranges
+    are left alone.
+
+    Code fences are left untouched; page-break placeholders are preserved.
+    """
+
+    def _fix_chunk(chunk: str) -> str:
+        chunk = _SOFT_HYPHEN_RE.sub("", chunk)
+        return _DEHYPHEN_RE.sub("", chunk)
+
+    # Apply outside fenced code blocks (regex spans newlines, so a
+    # line-wise map would miss `word-\\ncontinuation`).
+    parts = markdown.split("```")
+    for i in range(0, len(parts), 2):
+        parts[i] = _fix_chunk(parts[i])
+    return "```".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +809,7 @@ def apply_postprocessing(
         for page in pages:
             p = page
             if opts.combine_columns:
+                p = dehyphenate(p)
                 p = reflow_columns(p)
             if opts.normalize_uppercase:
                 p = normalize_uppercase(p)
@@ -784,10 +817,15 @@ def apply_postprocessing(
                 p = ensure_punctuation(p)
             processed.append(p)
         md, new_map = join_pages_with_markers(processed, opts.insert_page_markers)
+        if opts.combine_columns:
+            # Catch hyphen breaks straddling a page boundary
+            # (`dete-` at end of one page + `rioration` at start of next).
+            md = dehyphenate(md)
         sections = parse_markdown_structure(md)
         return md, sections, new_map
 
     if opts.combine_columns:
+        md = dehyphenate(md)
         md = reflow_columns(md)
 
     if opts.normalize_uppercase:

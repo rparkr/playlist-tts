@@ -37,6 +37,22 @@ export const PAGE_BREAK_PLACEHOLDER = '<!-- page break -->';
 const PAGE_BREAK_LINE_RE = /^\s*<!--\s*page\s*break\s*-->\s*$/i;
 const PAGE_BREAK_INLINE_RE = /<!--\s*page\s*break\s*-->/gi;
 const TERM_FORWARD_RE = /[.!?…]["'\)\]]*(?=\s|$)/;
+const DEHYPHEN_RE = /(?<=[A-Za-z])-\s+(?=[A-Za-z])/g;
+const SOFT_HYPHEN_RE = /­\s*/g;
+
+/** Join words split by line-break hyphenation (`dete- rioration` → `deterioration`).
+ *
+ * Mirrors backend `dehyphenate`: only a hyphen + whitespace between two
+ * letters is removed, so `fiber-optic`, `word - word`, and digit ranges are
+ * left alone. Code fences are left untouched.
+ */
+export function dehyphenate(markdown: string): string {
+	const parts = markdown.split('```');
+	for (let i = 0; i < parts.length; i += 2) {
+		parts[i] = parts[i].replace(SOFT_HYPHEN_RE, '').replace(DEHYPHEN_RE, '');
+	}
+	return parts.join('```');
+}
 
 /** Remove Docling image placeholders and HTML comments (preserving page breaks). */
 export function stripImageArtifacts(markdown: string): string {
@@ -511,15 +527,23 @@ export function applyPostprocessing(
 		const pages = splitOnPageBreaks(md);
 		const processed = pages.map((page) => {
 			let p = page;
-			if (opts.combine_columns) p = reflowColumns(p);
+			if (opts.combine_columns) {
+				p = dehyphenate(p);
+				p = reflowColumns(p);
+			}
 			if (opts.normalize_uppercase) p = normalizeUppercase(p);
 			if (opts.ensure_punctuation) p = ensurePunctuation(p);
 			return p;
 		});
 		const joined = joinPagesWithMarkers(processed, opts.insert_page_markers);
-		return { markdown: joined.markdown, sections: parseMarkdownStructure(joined.markdown), pageMap: joined.pageMap };
+		let out = joined.markdown;
+		if (opts.combine_columns) out = dehyphenate(out);
+		return { markdown: out, sections: parseMarkdownStructure(out), pageMap: joined.pageMap };
 	}
-	if (opts.combine_columns) md = reflowColumns(md);
+	if (opts.combine_columns) {
+		md = dehyphenate(md);
+		md = reflowColumns(md);
+	}
 	if (opts.normalize_uppercase) md = normalizeUppercase(md);
 	if (opts.ensure_punctuation) md = ensurePunctuation(md);
 

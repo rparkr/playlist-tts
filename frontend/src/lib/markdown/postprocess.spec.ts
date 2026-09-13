@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	applyPostprocessing,
 	buildPageMap,
+	dehyphenate,
 	ensurePunctuation,
 	insertPageMarkers,
 	normalizeUppercase,
@@ -88,6 +89,26 @@ describe('page markers', () => {
 		const twice = insertPageMarkers(once, buildPageMap(once, 2));
 		// Should not duplicate Page 2 marker endlessly.
 		expect(twice.match(/Page 2\./g)?.length ?? 0).toBeLessThanOrEqual(2);
+	});
+});
+
+describe('dehyphenate', () => {
+	it('joins hyphen + space/newline breaks into one word', () => {
+		expect(dehyphenate('stresses and dete- rioration and even')).toBe(
+			'stresses and deterioration and even'
+		);
+		expect(dehyphenate('cables in combi- nation with')).toBe('cables in combination with');
+		expect(dehyphenate('stresses and dete-\nrioration and')).toBe(
+			'stresses and deterioration and'
+		);
+	});
+
+	it('preserves real hyphens, spaced dashes, and code fences', () => {
+		expect(dehyphenate('fiber-optic cables')).toBe('fiber-optic cables');
+		expect(dehyphenate('word - word stays')).toBe('word - word stays');
+		const out = dehyphenate('```\nCODE- WITH space\n```\nnormal dete- rioration');
+		expect(out).toContain('CODE- WITH');
+		expect(out).toContain('deterioration');
 	});
 });
 
