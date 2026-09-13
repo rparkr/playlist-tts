@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Pencil, Trash2, FileText } from 'lucide-svelte';
+	import { X, Pencil, Trash2, FileText, FileX2 } from 'lucide-svelte';
 	import type { Doc } from '$lib/stores/library';
 	import { getGlobalSentences } from '$lib/markdown/parse';
 
@@ -7,13 +7,16 @@
 		open: boolean;
 		docs: Doc[];
 		activeDocId: string | null;
+		/** Cached PDF bytes per doc id, for storage UI. */
+		pdfSizes?: Record<string, number>;
 		onClose: () => void;
 		onSelect: (id: string) => void;
 		onDelete: (id: string) => void;
 		onRename: (id: string, newTitle: string) => Promise<void>;
+		onClearPdf?: (id: string) => Promise<void> | void;
 	}
 
-	let { open, docs, activeDocId, onClose, onSelect, onDelete, onRename }: Props = $props();
+	let { open, docs, activeDocId, pdfSizes = {}, onClose, onSelect, onDelete, onRename, onClearPdf }: Props = $props();
 
 	let editingId: string | null = $state(null);
 	let editValue: string = $state('');
@@ -43,6 +46,13 @@
 
 	function onBackdropClick(e: MouseEvent) {
 		if (e.target === e.currentTarget) onClose();
+	}
+
+	function formatBytes(bytes: number): string {
+		if (!Number.isFinite(bytes) || bytes < 0) return '—';
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 	}
 </script>
 
@@ -106,9 +116,11 @@
 									{:else}
 										<div class="text-sm font-medium text-slate-100 truncate">{doc.title}</div>
 										<div class="text-xs text-slate-400">
-											{doc.sections.length} sections · {getGlobalSentences(doc.sections).length} sentences{doc.pageMap
-												? ' · 📄 PDF'
-												: ''}
+											{doc.sections.length} sections · {getGlobalSentences(doc.sections).length} sentences{pdfSizes[doc.id] !== undefined
+												? ` · 📄 PDF ${formatBytes(pdfSizes[doc.id])}`
+												: doc.pageMap
+													? ' · 📄 PDF'
+													: ''}
 										</div>
 									{/if}
 								</span>
@@ -140,6 +152,16 @@
 									>
 										<Pencil size={14} />
 									</button>
+									{#if pdfSizes[doc.id] !== undefined && onClearPdf}
+										<button
+											onclick={() => onClearPdf?.(doc.id)}
+											aria-label="Clear cached PDF"
+											title="Clear cached PDF ({formatBytes(pdfSizes[doc.id])}) to save storage — text stays"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 hover:text-amber-300"
+										>
+											<FileX2 size={14} />
+										</button>
+									{/if}
 									<button
 										onclick={() => onDelete(doc.id)}
 										aria-label="Delete"

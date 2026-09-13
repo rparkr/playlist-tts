@@ -28,6 +28,7 @@ export interface Doc {
 interface OCRTTSDB extends DBSchema {
 	docs: { key: string; value: Doc };
 	voices: { key: string; value: VoiceRecord };
+	pdfs: { key: string; value: PdfRecord };
 }
 
 export interface VoiceRecord {
@@ -39,8 +40,18 @@ export interface VoiceRecord {
 	createdAt: number;
 }
 
+/** Cached source PDF for a doc, so the viewer survives reloads/doc switches. */
+export interface PdfRecord {
+	/** Matches the owning `Doc.id`. */
+	docId: string;
+	blob: Blob;
+	bytes: number;
+	name: string;
+	createdAt: number;
+}
+
 const DB_NAME = 'ocr-tts';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 function getDB() {
 	return openDB<OCRTTSDB>(DB_NAME, DB_VERSION, {
@@ -51,6 +62,9 @@ function getDB() {
 			}
 			if (oldVersion < 3 && !db.objectStoreNames.contains('voices')) {
 				db.createObjectStore('voices', { keyPath: 'id' });
+			}
+			if (!db.objectStoreNames.contains('pdfs')) {
+				db.createObjectStore('pdfs', { keyPath: 'docId' });
 			}
 		}
 	});
@@ -184,6 +198,12 @@ export async function getAllDocs(): Promise<Doc[]> {
 export async function deleteDoc(id: string): Promise<void> {
 	const db = await getDB();
 	await db.delete('docs', id);
+	// Don't orphan the cached PDF: the doc is gone so its preview is useless.
+	try {
+		await db.delete('pdfs', id);
+	} catch {
+		// ignore — pdfs store may be missing on very old profiles until upgrade
+	}
 }
 
 /** Re-export defaults for UI state initialisation. */
@@ -280,4 +300,53 @@ export async function deleteVoice(id: string): Promise<void> {
 export async function getVoice(id: string): Promise<VoiceRecord | undefined> {
 	const db = await getDB();
 	return db.get('voices', id);
+}
+
+// Cached source PDFs (one per doc) for the PDF viewer.
+
+/** Persist the uploaded PDF bytes for a doc so the viewer can reload them later. */
+export async function savePdf(docId: string, data: Blob, name: string): Promise<PdfRecord> {
+	const db = await getDB();
+	const record: PdfRecord = {
+		docId,
+		blob: data,
+		bytes: data.size,
+		name,
+		createdAt: Date.now()
+	};
+	await db.put('pdfs', record);
+	return record;
+}
+
+/** Load a cached PDF for a doc, if one was stored. */
+export async function getPdf(docId: string): Promise<PdfRecord | undefined> {
+	const db = await getDB();
+	try {
+		return await db.get('pdfs', docId);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Remove the cached PDF for a doc to free storage; keeps the doc itself. */
+export async function deletePdf(docId: string): Promise<void> {
+	const db = await getDB();
+	try {
+		await db.delete('pdfs', docId);
+	} catch {
+		// ignore — store may not exist yet
+	}
+}
+
+/** Lightweight `{ docId, bytes }` listing for library storage UI (no blob reads by caller). */
+export async function getPdfSizes(): Promise<Record<string, number>> {
+	const db = await getDB();
+	try {
+		const all = await db.getAll('pdfs');
+		const sizes: Record<string, number> = {};
+		for (const r of all) sizes[r.docId] = r.bytes;
+		return sizes;
+	} catch {
+		return {};
+	}
 }

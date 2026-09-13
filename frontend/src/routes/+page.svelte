@@ -13,6 +13,10 @@
 		getVoices as getCustomVoices,
 		saveVoice,
 		migrateFromLocalStorage,
+		savePdf,
+		getPdf,
+		deletePdf,
+		getPdfSizes,
 		type Doc,
 		type VoiceRecord,
 		type PostprocessOptions
@@ -42,6 +46,7 @@
 	let customVoices: VoiceRecord[] = $state([]);
 	let builtinVoices: { name: string }[] = $state([]);
 	let activeDoc: Doc | null = $state(null);
+	let pdfSizes: Record<string, number> = $state({});
 	let markdownDraft: string = $state('');
 	let pdfFile: File | null = $state.raw(null);
 	let pdfUrl: string | null = $state(null);
@@ -115,6 +120,11 @@
 		await ensureAllDocSlugs();
 		docs = await getAllDocs();
 		customVoices = await getCustomVoices();
+		try {
+			pdfSizes = await getPdfSizes();
+		} catch {
+			pdfSizes = {};
+		}
 	}
 	async function loadBuiltinVoices() {
 		try {
@@ -175,6 +185,10 @@
 		if (savedRate) synthRate = parseFloat(savedRate) || 1.0;
 		const savedVoice = localStorage.getItem('tts_voice');
 		if (savedVoice && !url.searchParams.get('voice')) selectedVoiceId = savedVoice;
+		if (activeDoc) {
+			// Restore the cached PDF so the viewer renders after reload/deep-link.
+			await loadCachedPdf(activeDoc.id);
+		}
 	});
 
 	$effect(() => {
@@ -250,12 +264,43 @@
 	}
 
 	// PDF handling
+	/** Point the viewer at `blob` (revoking the previous object URL). */
+	function setPdfFromBlob(blob: Blob, name: string) {
+		if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+		pdfFile = blob instanceof File ? blob : new File([blob], name || 'document.pdf', { type: 'application/pdf' });
+		pdfUrl = URL.createObjectURL(blob);
+	}
+
+	function clearPdfViewer() {
+		if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+		pdfFile = null;
+		pdfUrl = null;
+		pdfDoc = null;
+		pdfTotalPages = 0;
+		pdfPageNum = 1;
+	}
+
+	/** Load the IndexedDB-cached PDF for a doc into the viewer; clears viewer if none. */
+	async function loadCachedPdf(docId: string): Promise<boolean> {
+		try {
+			const record = await getPdf(docId);
+			if (!record) {
+				clearPdfViewer();
+				return false;
+			}
+			setPdfFromBlob(record.blob, record.name);
+			await loadPdf();
+			return true;
+		} catch {
+			clearPdfViewer();
+			return false;
+		}
+	}
+
 	async function onPdfSelected(e: Event) {
 		const input = e.target as HTMLInputElement;
 		if (!input.files?.[0]) return;
-		pdfFile = input.files[0];
-		if (pdfUrl) URL.revokeObjectURL(pdfUrl);
-		pdfUrl = URL.createObjectURL(pdfFile);
+		setPdfFromBlob(input.files[0], input.files[0].name);
 		// Auto-run OCR immediately (header flow)
 		await runOcr();
 		// reset input so same file can be re-selected
@@ -268,7 +313,7 @@
 	}
 
 	async function loadPdf() {
-		if (!pdfUrl) return;
+		if (!pdfUrl && !pdfFile) return;
 		try {
 			const pdfjs: any = await import('pdfjs-dist');
 			try {
@@ -276,7 +321,17 @@
 				const workerUrl = workerMod.default ?? workerMod;
 				if (workerUrl) pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 			} catch {}
-			const task = pdfjs.getDocument(pdfUrl);
+			// pdfjs-dist v6 requires a params object (`{ data }` / `{ url }`);
+			// passing the URL string directly throws "expected either
+			// `data`, `range`, or `url` parameter". Prefer bytes so the
+			// preview doesn't depend on the object-URL lifetime.
+			let task;
+			if (pdfFile) {
+				const bytes = await pdfFile.arrayBuffer();
+				task = pdfjs.getDocument({ data: bytes });
+			} else {
+				task = pdfjs.getDocument({ url: pdfUrl });
+			}
 			pdfDoc = await task.promise;
 			pdfTotalPages = pdfDoc.numPages;
 			pdfPageNum = 1;
@@ -426,7 +481,17 @@
 			const rawMarkdown = result.raw_markdown ?? result.markdown;
 			const rawPageMap = result.raw_page_map ?? result.page_map;
 			const doc = await createDoc(title, rawMarkdown, rawPageMap, currentPostprocessOpts());
+			// Cache the uploaded PDF so the viewer can reload it after
+			// reloads and doc switches. Storage failures must not fail OCR.
+			try {
+				await savePdf(doc.id, fileToUpload, fileToUpload.name || 'upload.pdf');
+			} catch (e: any) {
+				showToast(`OCR completed, but PDF caching failed: ${e?.message ?? e}`);
+			}
 			docs = await getAllDocs();
+			try {
+				pdfSizes = await getPdfSizes();
+			} catch {}
 			activeDoc = doc;
 			markdownDraft = doc.markdown;
 			globalIdx = 0;
@@ -457,27 +522,41 @@
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
 		sentencePlayer?.stop();
 		isPlaying = false;
+		clearPdfViewer();
 		activeDoc = d;
 		markdownDraft = d.markdown;
 		syncPostprocessOptsFromDoc(d);
 		isEditing = false;
 		const saved = localStorage.getItem(`progress_${id}`);
 		globalIdx = saved ? parseInt(saved, 10) || 0 : 0;
-		if (!d.pageMap) {
-			pdfFile = null;
-			pdfUrl = null;
-			pdfDoc = null;
-		}
+		// Load the cached PDF for this doc so the viewer follows the active document.
+		await tick();
+		await loadCachedPdf(id);
 	}
 	async function deleteDocHandler(id: string) {
 		if (!confirm('Delete document?')) return;
 		await deleteDoc(id);
+		try {
+			pdfSizes = await getPdfSizes();
+		} catch {}
 		docs = await getAllDocs();
 		if (activeDoc?.id === id) {
 			activeDoc = null;
 			markdownDraft = '';
+			clearPdfViewer();
 			localStorage.removeItem('tts_active_doc_id');
 		}
+	}
+	async function clearCachedPdf(id: string) {
+		const bytes = pdfSizes[id];
+		const label = bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : 'cached PDF';
+		if (!confirm(`Remove the cached PDF (${label}) to save storage? The document text stays.`)) return;
+		await deletePdf(id);
+		try {
+			pdfSizes = await getPdfSizes();
+		} catch {}
+		if (activeDoc?.id === id) clearPdfViewer();
+		showToast('Cached PDF cleared');
 	}
 	async function renameDoc(id: string, newTitle: string) {
 		const d = await renameDocStore(id, newTitle);
@@ -851,10 +930,12 @@
 		open={showLibrary}
 		{docs}
 		activeDocId={activeDoc?.id ?? null}
+		pdfSizes={pdfSizes}
 		onClose={() => (showLibrary = false)}
 		onSelect={openDoc}
 		onDelete={deleteDocHandler}
 		onRename={renameDoc}
+		onClearPdf={clearCachedPdf}
 	/>
 
 	<TtsSettingsModal
