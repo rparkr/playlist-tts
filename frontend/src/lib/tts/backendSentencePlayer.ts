@@ -234,6 +234,24 @@ export class BackendSentencePlayer {
 		await this.runChain(gen);
 	}
 
+	/** Replace the sentence snapshot (e.g. after Markdown edits).
+	 *
+	 * Keeps the position clamped into the new array. A running chain picks the
+	 * new text up from the next sentence (the current one already fetched);
+	 * a paused player resumes from the clamped position, so deleted sentences
+	 * can never sound. Ignored while pristine so unrelated recomputes cannot
+	 * arm a resume.
+	 */
+	updateSentences(sentences: string[]): void {
+		if (this.sentences.length === 0 && !this.running && !this.paused) return;
+		this.sentences = sentences;
+		if (this.sentences.length === 0) {
+			this.idx = 0;
+			return;
+		}
+		this.idx = Math.max(0, Math.min(this.idx, this.sentences.length - 1));
+	}
+
 	/** Full stop — use when switching documents or engines. */
 	stop(): void {
 		this.stopChain();

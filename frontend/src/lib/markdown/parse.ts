@@ -158,6 +158,25 @@ export function getGlobalSentences(sections: Section[]): string[] {
 	return sections.flatMap((s) => s.chunks);
 }
 
+/** Resolve which sections the reader (viewer + TTS) should use right now.
+ *
+ * When the Markdown draft differs from the last saved doc text there are
+ * unsaved edits (or a save is still debounced) — live-parse the draft so
+ * rendering and speech always agree. Otherwise reuse the stored sections.
+ */
+export function selectSections(
+	stored: Section[] | undefined,
+	savedMarkdown: string | undefined,
+	draft: string
+): Section[] {
+	if (savedMarkdown !== undefined && draft !== savedMarkdown) {
+		return parseMarkdownStructure(draft);
+	}
+	if (stored && stored.length > 0 && stored[0].paragraphs) return stored;
+	if (stored && stored.length > 0) return parseMarkdownStructure(savedMarkdown ?? draft);
+	return parseMarkdownStructure(draft);
+}
+
 export function getBreadcrumbs(sections: Section[], sectionIdx: number): string {
 	const sec = sections[sectionIdx];
 	if (!sec) return '';

@@ -5,7 +5,8 @@ import {
 	getBreadcrumbs,
 	getGlobalSentences,
 	globalToSectionChunk,
-	sectionChunkToGlobal
+	sectionChunkToGlobal,
+	selectSections
 } from './parse';
 
 describe('chunkTextIntoSentences', () => {
@@ -71,5 +72,41 @@ describe('parseMarkdownStructure', () => {
 
 	it('returns no sections for empty input', () => {
 		expect(parseMarkdownStructure('')).toEqual([]);
+	});
+});
+
+describe('selectSections', () => {
+	const saved = 'First sentence. Second sentence.';
+	const stored = parseMarkdownStructure(saved);
+
+	it('reuses stored sections when the draft matches the saved doc', () => {
+		expect(selectSections(stored, saved, saved)).toBe(stored);
+	});
+
+	it('live-parses the draft when unsaved edits exist', () => {
+		const draft = 'First sentence.';
+		const sections = selectSections(stored, saved, draft);
+		expect(sections).not.toBe(stored);
+		expect(getGlobalSentences(sections)).toEqual(['First sentence.']);
+	});
+
+	it('drops deleted sentences from the live parse', () => {
+		const draft = 'Second sentence.';
+		expect(getGlobalSentences(selectSections(stored, saved, draft))).toEqual([
+			'Second sentence.'
+		]);
+	});
+
+	it('re-parses legacy stored sections without paragraph data', () => {
+		const legacy = [{ ...stored[0], paragraphs: undefined as unknown as string[][] }];
+		const sections = selectSections(legacy, saved, saved);
+		expect(getGlobalSentences(sections)).toEqual(['First sentence.', 'Second sentence.']);
+	});
+
+	it('parses the draft when nothing is stored', () => {
+		expect(getGlobalSentences(selectSections(undefined, undefined, saved))).toEqual([
+			'First sentence.',
+			'Second sentence.'
+		]);
 	});
 });

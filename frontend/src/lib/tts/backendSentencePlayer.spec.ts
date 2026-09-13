@@ -177,4 +177,42 @@ describe('BackendSentencePlayer seeking', () => {
 		expect(fetchMock.mock.calls.length).toBe(fetchesBefore);
 		expect(audio().src).toBe('url:Alpha.');
 	});
+
+	it('never sounds a sentence deleted while paused', async () => {
+		void player.play(['Alpha.', 'Bravo.'], 0, 'v', 'v', null, 1);
+		await vi.waitFor(() => expect(audio().src).toBe('url:Alpha.'));
+
+		audio().currentTime = 1;
+		player.pause();
+		// User deletes the first sentence, then presses play.
+		player.updateSentences(['Bravo.']);
+
+		void player.resume();
+		await vi.waitFor(() => expect(audio().src).toBe('url:Bravo.'));
+		// Alpha was fetched once (before the edit) and never replayed.
+		expect(fetchMock.mock.calls.filter((c) => c[0] === 'Alpha.').length).toBe(1);
+		expect(started).toEqual([0, 0]);
+	});
+
+	it('clamps a parked position past the end of an edited document', async () => {
+		void player.play(['Alpha.', 'Bravo.', 'Charlie.'], 0, 'v', 'v', null, 1);
+		await vi.waitFor(() => expect(audio().src).toBe('url:Alpha.'));
+
+		audio().currentTime = 1;
+		player.pause();
+		await player.seek(2);
+		// User deletes everything after the first sentence.
+		player.updateSentences(['Alpha.']);
+
+		void player.resume();
+		await vi.waitFor(() => expect(audio().src).toBe('url:Alpha.'));
+		expect(player.currentIndex).toBe(0);
+		expect(started).toEqual([0, 0]);
+	});
+
+	it('ignores snapshot updates while pristine', () => {
+		player.updateSentences(['Alpha.']);
+		expect(player.canResume()).toBe(false);
+		expect(player.currentIndex).toBe(0);
+	});
 });

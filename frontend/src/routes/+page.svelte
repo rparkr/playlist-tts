@@ -22,6 +22,7 @@
 		getGlobalSentences,
 		globalToSectionChunk,
 		sectionChunkToGlobal,
+		selectSections,
 		type Section
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
@@ -193,18 +194,23 @@
 		}
 	});
 
-	// Derived
-	let sections: Section[] = $derived.by(() => {
-		const stored = activeDoc?.sections;
-		// Re-parse docs stored before headings/paragraphs existed.
-		if (stored && stored.length > 0 && stored[0].paragraphs) return stored;
-		if (stored && stored.length > 0) return parseMarkdownStructure(activeDoc?.markdown ?? markdownDraft);
-		return parseMarkdownStructure(markdownDraft);
-	});
+	// Derived — sections live-parse the draft while it differs from the saved
+	// doc, so unsaved edits (and the save debounce window) reach the viewer
+	// and TTS immediately instead of only after persisting.
+	let sections: Section[] = $derived.by(() =>
+		selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
+	);
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
 	let currentSectionIdx: number = $derived(globalToSectionChunk(sections, globalIdx).sectionIdx);
 	let currentSection: Section | null = $derived(sections[currentSectionIdx] ?? null);
 	let breadcrumbs: string = $derived(currentSection ? currentSection.titles.join(' > ') : '');
+
+	// Keep the backend player's snapshot aligned with the live sections, so
+	// edits (saved or not) replace what TTS speaks from the next sentence on
+	// and deleted sentences can never sound after a pause/seek/resume.
+	$effect(() => {
+		sentencePlayer?.updateSentences(getGlobalSentences(sections));
+	});
 
 	// Remaining time heuristic: 150 wpm at 1.0x
 	let remainingText: string = $derived.by(() => {
