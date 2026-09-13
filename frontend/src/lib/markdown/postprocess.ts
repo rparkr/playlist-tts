@@ -33,14 +33,23 @@ const UPPER_WORD_RE = /\b[A-Z]{2,}\b/;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z0-9"'])/;
 const IMAGE_COMMENT_RE = /^\s*<!--\s*image\s*-->\s*$/i;
 const HTML_COMMENT_RE = /<!--.*?-->/gs;
+export const PAGE_BREAK_PLACEHOLDER = '<!-- page break -->';
+const PAGE_BREAK_LINE_RE = /^\s*<!--\s*page\s*break\s*-->\s*$/i;
+const PAGE_BREAK_INLINE_RE = /<!--\s*page\s*break\s*-->/gi;
+const TERM_FORWARD_RE = /[.!?…]["'\)\]]*(?=\s|$)/;
 
-/** Remove Docling image placeholders and HTML comments. */
+/** Remove Docling image placeholders and HTML comments (preserving page breaks). */
 export function stripImageArtifacts(markdown: string): string {
 	const lines = markdown.split('\n');
 	const out: string[] = [];
 	let skipNextOther = false;
 	for (let line of lines) {
 		const stripped = line.trim();
+		if (PAGE_BREAK_LINE_RE.test(line)) {
+			if (skipNextOther && stripped !== '') skipNextOther = false;
+			out.push(PAGE_BREAK_PLACEHOLDER);
+			continue;
+		}
 		if (IMAGE_COMMENT_RE.test(line)) {
 			skipNextOther = true;
 			continue;
@@ -51,6 +60,20 @@ export function stripImageArtifacts(markdown: string): string {
 		}
 		if (skipNextOther && stripped !== '') skipNextOther = false;
 		if (line.includes('<!--') && line.includes('-->')) {
+			PAGE_BREAK_INLINE_RE.lastIndex = 0;
+			if (PAGE_BREAK_INLINE_RE.test(line)) {
+				PAGE_BREAK_INLINE_RE.lastIndex = 0;
+				const m = PAGE_BREAK_INLINE_RE.exec(line);
+				PAGE_BREAK_INLINE_RE.lastIndex = 0;
+				if (m && m.index !== undefined) {
+					const before = line.slice(0, m.index).replace(HTML_COMMENT_RE, '').trim();
+					const after = line.slice(m.index + m[0].length).replace(HTML_COMMENT_RE, '').trim();
+					if (before) out.push(before);
+					out.push(PAGE_BREAK_PLACEHOLDER);
+					if (after) out.push(after);
+					continue;
+				}
+			}
 			const cleaned = line.replace(HTML_COMMENT_RE, '').trim();
 			if (!cleaned) continue;
 			line = cleaned;
@@ -64,6 +87,7 @@ export function stripImageArtifacts(markdown: string): string {
 function isSpecialBlock(line: string): boolean {
 	const stripped = line.trim();
 	if (!stripped) return false;
+	if (PAGE_BREAK_LINE_RE.test(line)) return true;
 	if (CODE_FENCE_RE.test(line)) return true;
 	if (stripped.startsWith('>')) return true;
 	return TABLE_RE.test(line);
@@ -324,8 +348,119 @@ export function insertPageMarkers(markdown: string, pageMap: PageMapItem[]): str
 	return result;
 }
 
-/** Estimate pageMap when accurate offsets are unavailable. */
+export function hasPageBreaks(markdown: string): boolean {
+	PAGE_BREAK_INLINE_RE.lastIndex = 0;
+	return PAGE_BREAK_INLINE_RE.test(markdown);
+}
+
+export function splitOnPageBreaks(markdown: string): string[] {
+	return markdown.split(/<!--\s*page\s*break\s*-->/gi).map((p) => p.replace(/^\n+|\n+$/g, ''));
+}
+
+function firstSentenceEnd(text: string): number | null {
+	const m = TERM_FORWARD_RE.exec(text);
+	return m && m.index !== undefined ? m.index + m[0].length : null;
+}
+
+export function joinPagesWithMarkers(
+	pages: string[],
+	insertMarkers: boolean
+): { markdown: string; pageMap: PageMapItem[] } {
+	const nonEmpty = pages.filter((p) => p.trim());
+	const effective = nonEmpty.length > 0 ? nonEmpty : pages;
+	const total = effective.length;
+	if (total <= 1) {
+		const md = (effective[0] ?? '').trim();
+		return { markdown: md, pageMap: [{ page: 1, char_start: 0, char_end: md.length, start_line: 1 }] };
+	}
+	if (!insertMarkers) {
+		const parts: string[] = [];
+		const pageMap: PageMapItem[] = [];
+		let offset = 0;
+		effective.forEach((page, i) => {
+			const body = page.trim();
+			if (i > 0) {
+				parts.push('\n\n');
+				offset += 2;
+			}
+			const cs = offset;
+			parts.push(body);
+			offset += body.length;
+			pageMap.push({ page: i + 1, char_start: cs, char_end: offset, start_line: parts.join('').slice(0, cs).split('\n').length });
+		});
+		return { markdown: parts.join(''), pageMap };
+	}
+	const parts: string[] = [];
+	const pageMap: PageMapItem[] = [];
+	let offset = 0;
+	const emit = (t: string) => {
+		parts.push(t);
+		offset += t.length;
+	};
+	const cur = () => parts.join('');
+	emit(effective[0].trim());
+	pageMap.push({ page: 1, char_start: 0, char_end: offset, start_line: 1 });
+	for (let idx = 1; idx < total; idx++) {
+		const nextPageNum = idx + 1;
+		const remainder = effective[idx].trim();
+		const prefix = cur();
+		if (!remainder || endsWithTerminal(prefix)) {
+			const marker = `\n\nPage ${nextPageNum}.\n\n`;
+			emit(marker);
+			const cs = offset;
+			emit(remainder);
+			pageMap.push({ page: nextPageNum, char_start: cs, char_end: offset, start_line: cur().slice(0, cs).split('\n').length });
+			continue;
+		}
+		const end = firstSentenceEnd(remainder);
+		if (end === null) {
+			emit(' ' + remainder.replace(/^\s+/, ''));
+			pageMap[pageMap.length - 1].char_end = offset;
+			const marker = `\n\nPage ${nextPageNum}.\n\n`;
+			emit(marker);
+			const cs = offset;
+			pageMap.push({ page: nextPageNum, char_start: cs, char_end: cs, start_line: cur().slice(0, cs).split('\n').length });
+		} else {
+			const firstSent = remainder.slice(0, end).trim();
+			const rest = remainder.slice(end).trim();
+			emit(' ' + firstSent.replace(/^\s+/, ''));
+			pageMap[pageMap.length - 1].char_end = offset;
+			const marker = `\n\nPage ${nextPageNum}.\n\n`;
+			emit(marker);
+			const cs = offset;
+			if (rest) emit(rest);
+			pageMap.push({ page: nextPageNum, char_start: cs, char_end: offset, start_line: cur().slice(0, cs).split('\n').length });
+		}
+	}
+	return { markdown: cur(), pageMap };
+}
+
+/** Build pageMap, preferring Docling page-break placeholders when present. */
 export function buildPageMap(markdown: string, totalPages: number): PageMapItem[] {
+	const breaks = markdown.match(/<!--\s*page\s*break\s*-->/gi);
+	if (breaks && breaks.length > 0) {
+		const rawPages = splitOnPageBreaks(markdown);
+		const pageMap: PageMapItem[] = [];
+		let cursor = 0;
+		for (const seg of rawPages) {
+			const idx = markdown.indexOf(seg, cursor);
+			const segStart = seg ? (idx === -1 ? cursor : idx) : cursor;
+			const segEnd = segStart + seg.length;
+			if (seg.trim()) {
+				pageMap.push({
+					page: pageMap.length + 1,
+					char_start: segStart,
+					char_end: segEnd,
+					start_line: markdown.slice(0, segStart).split('\n').length
+				});
+			}
+			const rest = markdown.slice(segEnd);
+			const m = /<!--\s*page\s*break\s*-->/i.exec(rest);
+			if (!m || m.index === undefined) break;
+			cursor = segEnd + m.index + m[0].length;
+		}
+		if (pageMap.length > 0) return pageMap;
+	}
 	if (totalPages <= 1) {
 		return [{ page: 1, char_start: 0, char_end: markdown.length, start_line: 1 }];
 	}
@@ -353,6 +488,18 @@ export function applyPostprocessing(
 	rawPageMap?: PageMapItem[] | null
 ): { markdown: string; sections: Section[]; pageMap: PageMapItem[] } {
 	let md = stripImageArtifacts(rawMarkdown);
+	if (hasPageBreaks(md)) {
+		const pages = splitOnPageBreaks(md);
+		const processed = pages.map((page) => {
+			let p = page;
+			if (opts.combine_columns) p = reflowColumns(p);
+			if (opts.normalize_uppercase) p = normalizeUppercase(p);
+			if (opts.ensure_punctuation) p = ensurePunctuation(p);
+			return p;
+		});
+		const joined = joinPagesWithMarkers(processed, opts.insert_page_markers);
+		return { markdown: joined.markdown, sections: parseMarkdownStructure(joined.markdown), pageMap: joined.pageMap };
+	}
 	if (opts.combine_columns) md = reflowColumns(md);
 	if (opts.normalize_uppercase) md = normalizeUppercase(md);
 	if (opts.ensure_punctuation) md = ensurePunctuation(md);

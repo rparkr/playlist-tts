@@ -114,9 +114,23 @@ def estimate_done_pages(total_pages: int, elapsed_s: float) -> int:
 
 
 def convert_one_pdf_to_markdown(converter, pdf_path: Path) -> str:  # type: ignore[no-untyped-def]
-    """Convert a single (possibly single-page) PDF to markdown."""
+    """Convert a single (possibly single-page) PDF to markdown.
+
+    Requests Docling's `page_break_placeholder` so true page boundaries
+    survive in the markdown (`<!-- page break -->`). Post-processing splits
+    on these tokens instead of evenly guessing — which previously placed
+    `Page N` markers mid-page between two columns.
+    """
+    from backend.app.services.postprocess import PAGE_BREAK_PLACEHOLDER
+
     result = converter.convert(pdf_path)
-    return str(result.document.export_to_markdown())
+    try:
+        return str(
+            result.document.export_to_markdown(page_break_placeholder=PAGE_BREAK_PLACEHOLDER)
+        )
+    except TypeError:
+        # Older docling-core without page_break_placeholder support.
+        return str(result.document.export_to_markdown())
 
 
 async def _run_ocr_job(

@@ -3,6 +3,7 @@
 from backend.app.models.schemas import PostprocessOptions
 from backend.app.services.postprocess import (
     apply_postprocessing,
+    build_page_map,
     chunk_text_into_sentences,
     ensure_punctuation,
     normalize_uppercase,
@@ -113,3 +114,28 @@ def test_build_page_map():
     assert len(pm) == 4
     assert pm[0].page == 1
     assert pm[-1].page == 4
+
+
+def test_page_markers_use_true_breaks_not_columns():
+    """Page markers follow true page breaks, not mid-page column splits."""
+    raw = (
+        "Depending on how it is harnessed, stored, distributed, and used, energy can"
+        "\n\ntake many forms. On the Earth, we can trace nearly all our energy back to the sun."
+        "\n\n<!-- page break -->\n\nSecond page content starts here. More text on page two."
+    )
+    opts = PostprocessOptions(combine_columns=True, insert_page_markers=True)
+    md, _, pm = apply_postprocessing(raw, opts, build_page_map(raw, 2))
+    assert "energy can take many forms." in md
+    assert md.index("take many forms.") < md.index("Page 2.")
+    assert md.index("Page 2.") < md.index("Second page")
+    assert len(pm) == 2
+
+
+def test_page_break_placeholders_preserved_through_strip():
+    """Image cleanup must not eat page-break tokens."""
+    from backend.app.services.postprocess import _strip_image_artifacts, has_page_breaks
+
+    raw = "Page one.\n\n<!-- page break -->\n\n<!-- image -->\nOther\nPage two."
+    cleaned = _strip_image_artifacts(raw)
+    assert has_page_breaks(cleaned)
+    assert "<!-- image -->" not in cleaned

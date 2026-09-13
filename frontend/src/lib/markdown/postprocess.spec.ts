@@ -113,4 +113,28 @@ describe('applyPostprocessing', () => {
 		expect(withMarkers.markdown).toContain('Page 2.');
 		expect(withoutMarkers.markdown).not.toContain('Page 2.');
 	});
+
+	it('keeps Page markers at true page breaks, not between columns', () => {
+		const raw = [
+			'Depending on how it is harnessed, stored, distributed, and used, energy can',
+			'',
+			'take many forms. On the Earth, we can trace nearly all our energy back to the sun.',
+			'',
+			'<!-- page break -->',
+			'',
+			'Second page content starts here. More text on page two.'
+		].join('\n');
+		const rendered = applyPostprocessing(
+			raw,
+			{ ...DEFAULT_POSTPROCESS, combine_columns: true, insert_page_markers: true },
+			buildPageMap(raw, 2)
+		);
+		expect(rendered.markdown).toContain('energy can take many forms.');
+		expect(rendered.markdown.indexOf('take many forms.')).toBeLessThan(
+			rendered.markdown.indexOf('Page 2.')
+		);
+		expect(rendered.markdown.indexOf('Page 2.')).toBeLessThan(
+			rendered.markdown.indexOf('Second page')
+		);
+	});
 });

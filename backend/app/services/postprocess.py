@@ -31,19 +31,36 @@ _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])')
 _IMAGE_COMMENT_RE = re.compile(r"^\s*<!--\s*image\s*-->\s*$", re.IGNORECASE)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
+#: Docling page-break placeholder emitted via `export_to_markdown(
+#: page_break_placeholder=PAGE_BREAK_PLACEHOLDER)`. True page boundaries —
+#: unlike the even-split fallback in `build_page_map`, these never fall
+#: inside a two-column page.
+PAGE_BREAK_PLACEHOLDER = "<!-- page break -->"
+_PAGE_BREAK_LINE_RE = re.compile(r"^\s*<!--\s*page\s*break\s*-->\s*$", re.IGNORECASE)
+# Inline occurrence (same line as text) — split around it.
+_PAGE_BREAK_INLINE_RE = re.compile(r"<!--\s*page\s*break\s*-->", re.IGNORECASE)
+_TERM_FORWARD_RE = re.compile(r'[.!?…]["\'\)\]]*(?=\s|$)')
+
 
 def _strip_image_artifacts(markdown: str) -> str:
     """Remove Docling image placeholders and HTML comments.
 
     Docling emits `<!-- image -->` and often a stray `Other` on the next
     line as an artifact; both are removed. Inline `<!-- ... -->` comments
-    are stripped but surrounding text is kept.
+    are stripped but surrounding text is kept. Page-break placeholders
+    (`<!-- page break -->`) are preserved — they carry true page
+    boundaries needed to avoid numbering columns as pages.
     """
     lines = markdown.split("\n")
     out: list[str] = []
     skip_next_other = False
     for line in lines:
         stripped = line.strip()
+        if _PAGE_BREAK_LINE_RE.match(line):
+            if skip_next_other and stripped != "":
+                skip_next_other = False
+            out.append(PAGE_BREAK_PLACEHOLDER)
+            continue
         if _IMAGE_COMMENT_RE.match(line):
             skip_next_other = True
             continue
@@ -54,6 +71,18 @@ def _strip_image_artifacts(markdown: str) -> str:
         if skip_next_other and stripped != "":
             skip_next_other = False
         if "<!--" in line and "-->" in line:
+            if _PAGE_BREAK_INLINE_RE.search(line):
+                # Keep page-break token, strip any other comments on the line.
+                kept = _PAGE_BREAK_INLINE_RE.search(line)
+                assert kept is not None
+                before = _HTML_COMMENT_RE.sub("", line[: kept.start()]).strip()
+                after = _HTML_COMMENT_RE.sub("", line[kept.end() :]).strip()
+                if before:
+                    out.append(before)
+                out.append(PAGE_BREAK_PLACEHOLDER)
+                if after:
+                    out.append(after)
+                continue
             cleaned = _HTML_COMMENT_RE.sub("", line).strip()
             if not cleaned:
                 continue
@@ -67,6 +96,9 @@ def _is_special_block(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if _PAGE_BREAK_LINE_RE.match(line):
+        # Page boundary — never merge columns across pages.
+        return True
     if _CODE_FENCE_RE.match(line):
         return True
     if stripped.startswith(">"):
@@ -543,12 +575,166 @@ def parse_markdown_structure(md_text: str) -> list[Section]:
     return sections
 
 
-def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
-    """Estimate pageMap when docling does not provide per-page exports.
+def has_page_breaks(markdown: str) -> bool:
+    """Return True when Docling page-break placeholders are present."""
+    return bool(_PAGE_BREAK_INLINE_RE.search(markdown))
 
-    Evenly splits lines across pages as fallback; caller should replace with
-    accurate docling offsets when available.
+
+def split_on_page_breaks(markdown: str) -> list[str]:
+    """Split markdown into per-page texts on page-break placeholders."""
+    parts = _PAGE_BREAK_INLINE_RE.split(markdown)
+    return [p.strip("\n") for p in parts]
+
+
+def _first_sentence_end(text: str) -> int | None:
+    """Return end offset (exclusive) of first sentence terminal, if any."""
+    m = _TERM_FORWARD_RE.search(text)
+    return m.end() if m else None
+
+
+def join_pages_with_markers(
+    pages: list[str], insert_markers: bool
+) -> tuple[str, list[PageMapItem]]:
+    """Join per-page texts with `Page N.` markers, tracking exact offsets.
+
+    When a page ends mid-sentence (no terminal punctuation) and the next
+    page begins with a continuation, the boundary sentence is kept together
+    and the marker is deferred to after that sentence — so `Page N` never
+    splits a sentence, but also never lands mid-page inside a column.
+    Returns (markdown, page_map) with exact char offsets.
     """
+    # Strip empty pages from Docling artefacts (e.g. leading/trailing breaks)
+    # while keeping at least one page.
+    non_empty = [p for p in pages if p.strip()]
+    effective = non_empty if non_empty else pages
+    total = len(effective)
+    if total <= 1:
+        md = effective[0].strip() if effective else ""
+        return md, [PageMapItem(page=1, char_start=0, char_end=len(md), start_line=1)]
+
+    if not insert_markers:
+        md_parts: list[str] = []
+        page_map: list[PageMapItem] = []
+        offset = 0
+        for i, page in enumerate(effective):
+            body = page.strip()
+            if i > 0:
+                md_parts.append("\n\n")
+                offset += 2
+            cs = offset
+            md_parts.append(body)
+            offset += len(body)
+            ce = offset
+            start_line = "".join(md_parts)[:cs].count("\n") + 1 if cs else 1
+            page_map.append(
+                PageMapItem(page=i + 1, char_start=cs, char_end=ce, start_line=start_line)
+            )
+        return "".join(md_parts), page_map
+
+    out_parts: list[str] = []
+    page_map_out: list[PageMapItem] = []
+    offset_out = 0
+
+    def _emit(text: str) -> None:
+        nonlocal offset_out
+        out_parts.append(text)
+        offset_out += len(text)
+
+    first_body = effective[0].strip()
+    _emit(first_body)
+    # Page 1 spans from 0 to current offset.
+    page_map_out.append(PageMapItem(page=1, char_start=0, char_end=offset_out, start_line=1))
+
+    for idx in range(1, total):
+        next_page_num = idx + 1
+        remainder = effective[idx].strip()
+        prefix_so_far = "".join(out_parts)
+        if _ends_with_terminal(prefix_so_far) or not remainder:
+            marker = f"\n\nPage {next_page_num}.\n\n"
+            _emit(marker)
+            cs = offset_out
+            _emit(remainder)
+            ce = offset_out
+            start_line = (
+                prefix_so_far.count("\n") + 1 if False else "".join(out_parts)[:cs].count("\n") + 1
+            )
+            page_map_out.append(
+                PageMapItem(page=next_page_num, char_start=cs, char_end=ce, start_line=start_line)
+            )
+            continue
+        # Mid-sentence boundary — carry the first sentence of the next page
+        # before the marker so the sentence stays intact.
+        end = _first_sentence_end(remainder)
+        if end is None:
+            # No terminal ahead: whole remainder is a continuation fragment.
+            # Keep it with the prior page, then mark the boundary after it.
+            _emit(" " + remainder.lstrip())
+            # Extend previous page's end to include carried text.
+            page_map_out[-1].char_end = offset_out
+            marker = f"\n\nPage {next_page_num}.\n\n"
+            _emit(marker)
+            # Next page contributes nothing beyond the carried fragment.
+            cs = ce = offset_out
+            start_line = "".join(out_parts)[:cs].count("\n") + 1
+            page_map_out.append(
+                PageMapItem(page=next_page_num, char_start=cs, char_end=ce, start_line=start_line)
+            )
+        else:
+            first_sent = remainder[:end].strip()
+            rest = remainder[end:].strip()
+            _emit(" " + first_sent.lstrip())
+            page_map_out[-1].char_end = offset_out
+            marker = f"\n\nPage {next_page_num}.\n\n"
+            _emit(marker)
+            cs = offset_out
+            if rest:
+                _emit(rest)
+            ce = offset_out
+            start_line = "".join(out_parts)[:cs].count("\n") + 1
+            page_map_out.append(
+                PageMapItem(page=next_page_num, char_start=cs, char_end=ce, start_line=start_line)
+            )
+
+    return "".join(out_parts), page_map_out
+
+
+def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
+    """Build pageMap, preferring Docling page-break placeholders when present.
+
+    When `markdown` contains `<!-- page break -->` tokens (emitted via
+    `export_to_markdown(page_break_placeholder=...)`), boundaries are exact
+    per-page offsets. Otherwise falls back to evenly splitting lines.
+    """
+    if _PAGE_BREAK_INLINE_RE.search(markdown):
+        raw_pages = _PAGE_BREAK_INLINE_RE.split(markdown)
+        # Number of pages implied by breaks; tolerate mismatch with total_pages
+        # (e.g. blank leading/trailing segments) by dropping empties.
+        # If caller knows a larger total (e.g. PDF page count with blank
+        # pages), keep segment count — blank pages carry no text to map.
+        page_map: list[PageMapItem] = []
+        cursor = 0
+        for seg in raw_pages:
+            seg_start = markdown.find(seg, cursor)
+            if seg_start == -1:
+                seg_start = cursor
+            seg_end = seg_start + len(seg)
+            # Only record non-empty segments as pages; placeholders advance cursor.
+            if seg.strip():
+                page_no = len(page_map) + 1
+                # start_line computed on text up to segment start.
+                start_line = markdown[:seg_start].count("\n") + 1
+                page_map.append(
+                    PageMapItem(
+                        page=page_no, char_start=seg_start, char_end=seg_end, start_line=start_line
+                    )
+                )
+            m = _PAGE_BREAK_INLINE_RE.search(markdown, seg_end)
+            cursor = m.end() if m else seg_end
+            if not m:
+                break
+        if page_map:
+            return page_map
+        # Fall through to estimator if splitting yielded nothing usable.
     if total_pages <= 1:
         return [PageMapItem(page=1, char_start=0, char_end=len(markdown), start_line=1)]
 
@@ -579,8 +765,27 @@ def apply_postprocessing(
 ) -> tuple[str, list[Section], list[PageMapItem]]:
     """Apply configured post-processing and return (markdown, sections, page_map)."""
     md = markdown
-    # Always strip Docling image placeholders (non-configurable cleanup)
+    # Always strip Docling image placeholders (non-configurable cleanup).
+    # Page-break placeholders are preserved by _strip_image_artifacts.
     md = _strip_image_artifacts(md)
+
+    if has_page_breaks(md):
+        # True page boundaries available — process each page independently
+        # so columns merge within a page but markers never land mid-page.
+        pages = split_on_page_breaks(md)
+        processed: list[str] = []
+        for page in pages:
+            p = page
+            if opts.combine_columns:
+                p = reflow_columns(p)
+            if opts.normalize_uppercase:
+                p = normalize_uppercase(p)
+            if opts.ensure_punctuation:
+                p = ensure_punctuation(p)
+            processed.append(p)
+        md, new_map = join_pages_with_markers(processed, opts.insert_page_markers)
+        sections = parse_markdown_structure(md)
+        return md, sections, new_map
 
     if opts.combine_columns:
         md = reflow_columns(md)
