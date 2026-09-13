@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Pencil, Trash2, FileText, FileX2 } from 'lucide-svelte';
+	import { X, Pencil, Trash2, FileText, FileX2, Check } from 'lucide-svelte';
 	import type { Doc } from '$lib/stores/library';
 	import { getGlobalSentences } from '$lib/markdown/parse';
 
@@ -96,6 +96,21 @@
 								? 'border-sky-500'
 								: 'border-transparent'} transition-colors"
 						>
+						{#if editingId === doc.id}
+							<div class="flex-1 min-w-0 flex items-center gap-2">
+								<FileText size={16} class="shrink-0 text-slate-400" />
+								<span class="flex-1 min-w-0">
+									<input
+										bind:value={editValue}
+										onkeydown={handleKey}
+										onblur={commitEdit}
+										onclick={(e) => e.stopPropagation()}
+										class="w-full bg-slate-900 border border-sky-500 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none"
+										autofocus
+									/>
+								</span>
+							</div>
+						{:else}
 							<button
 								class="flex-1 min-w-0 text-left flex items-center gap-2"
 								onclick={() => {
@@ -105,45 +120,36 @@
 							>
 								<FileText size={16} class="shrink-0 text-slate-400" />
 								<span class="flex-1 min-w-0">
-									{#if editingId === doc.id}
-										<input
-											bind:value={editValue}
-											onkeydown={handleKey}
-											onblur={commitEdit}
-											class="w-full bg-slate-900 border border-sky-500 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none"
-											autofocus
-										/>
-									{:else}
-										<div class="text-sm font-medium text-slate-100 truncate">{doc.title}</div>
-										<div class="text-xs text-slate-400">
-											{doc.sections.length} sections · {getGlobalSentences(doc.sections).length} sentences{pdfSizes[doc.id] !== undefined
-												? ` · 📄 PDF ${formatBytes(pdfSizes[doc.id])}`
-												: doc.pageMap
-													? ' · 📄 PDF'
-													: ''}
-										</div>
-									{/if}
+									<div class="text-sm font-medium text-slate-100 truncate">{doc.title}</div>
+									<div class="text-xs text-slate-400">
+										{doc.sections.length} sections · {getGlobalSentences(doc.sections).length} sentences{pdfSizes[doc.id] !== undefined
+											? ` · 📄 PDF ${formatBytes(pdfSizes[doc.id])}`
+											: doc.pageMap
+												? ' · 📄 PDF'
+												: ''}
+									</div>
 								</span>
 							</button>
+						{/if}
 
 							<div class="flex items-center gap-1 shrink-0">
-								{#if editingId === doc.id}
-									<button
-										onclick={commitEdit}
-										aria-label="Save"
-										class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-sky-400"
-									>
-										<X size={14} class="rotate-45" />
-										<!-- use check via text fallback -->
-										<span class="sr-only">Save</span>✓
-									</button>
-									<button
-										onclick={cancelEdit}
-										aria-label="Cancel"
-										class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300"
-									>
-										<X size={14} />
-									</button>
+							{#if editingId === doc.id}
+								<button
+									onclick={commitEdit}
+									onmousedown={(e) => e.preventDefault()}
+									aria-label="Save"
+									class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-sky-400"
+								>
+									<Check size={14} />
+								</button>
+								<button
+									onclick={cancelEdit}
+									onmousedown={(e) => e.preventDefault()}
+									aria-label="Cancel"
+									class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300"
+								>
+									<X size={14} />
+								</button>
 								{:else}
 									<button
 										onclick={() => startEdit(doc)}
