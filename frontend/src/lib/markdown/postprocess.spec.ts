@@ -7,6 +7,7 @@ import {
 	normalizeUppercase,
 	reflowColumns,
 	stripImageArtifacts,
+	stripPageMarkers,
 	DEFAULT_POSTPROCESS
 } from './postprocess';
 
@@ -60,6 +61,19 @@ describe('ensurePunctuation', () => {
 });
 
 describe('page markers', () => {
+	it('strips previously-inserted markers so re-render from edits toggles cleanly', () => {
+		const withMarkers = 'First page text.\n\nPage 2.\n\nSecond page text.';
+		const stripped = stripPageMarkers(withMarkers);
+		expect(stripped).not.toContain('Page 2.');
+		expect(stripped).toContain('First page text.');
+		expect(stripped).toContain('Second page text.');
+	});
+
+	it('does not strip inline mentions of pages', () => {
+		const md = 'See Page 2 for details. More text here.';
+		expect(stripPageMarkers(md)).toBe(md);
+	});
+
 	it('inserts markers after sentence boundaries', () => {
 		const md = 'First sentence. Second sentence. Third sentence. Fourth sentence.';
 		const pageMap = buildPageMap(md, 2);

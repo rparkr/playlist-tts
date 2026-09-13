@@ -353,6 +353,25 @@ export function hasPageBreaks(markdown: string): boolean {
 	return PAGE_BREAK_INLINE_RE.test(markdown);
 }
 
+/** Remove previously-inserted standalone `Page N.` marker paragraphs.
+ *
+ * Lets re-renders that start from user-edited Markdown (which already
+ * contains markers) toggle markers off cleanly and avoid duplicating them
+ * when toggling back on. Only removes markers on their own paragraph.
+ */
+export function stripPageMarkers(markdown: string): string {
+	const lines = markdown.split('\n');
+	const out: string[] = [];
+	for (const line of lines) {
+		if (/^\s*Page \d+\.\s*$/.test(line)) continue;
+		out.push(line);
+	}
+	return out
+		.join('\n')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
+}
+
 export function splitOnPageBreaks(markdown: string): string[] {
 	return markdown.split(/<!--\s*page\s*break\s*-->/gi).map((p) => p.replace(/^\n+|\n+$/g, ''));
 }

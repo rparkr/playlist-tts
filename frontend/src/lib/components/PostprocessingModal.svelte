@@ -52,7 +52,7 @@
 			<div class="flex-1 overflow-auto p-5 flex flex-col gap-4">
 				{#if hasDirtyEdits}
 					<div class="bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs px-3 py-2 rounded-md">
-						You have edited the Markdown. Changing these settings will re-render the Markdown and may overwrite your edits.
+						You have edited the Markdown. Re-rendering will keep your edits and apply the new settings on top.
 					</div>
 				{/if}
 

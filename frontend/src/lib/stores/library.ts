@@ -3,6 +3,7 @@ import { parseMarkdownStructure, type Section, type PageMapItem } from '$lib/mar
 import {
 	applyPostprocessing,
 	DEFAULT_POSTPROCESS,
+	stripPageMarkers,
 	type PostprocessOptions
 } from '$lib/markdown/postprocess';
 
@@ -106,9 +107,14 @@ export async function migrateFromLocalStorage(): Promise<void> {
 }
 
 export async function saveDoc(doc: Doc): Promise<void> {
-	const db = await getDB();
 	doc.updatedAt = Date.now();
-	await db.put('docs', doc);
+	// `doc` is often a Svelte 5 `$state` proxy in the UI layer. Proxies (and
+	// any nested proxied values) fail IndexedDB structured-clone with
+	// "could not be cloned". Docs are plain JSON-safe data (no Blobs), so
+	// round-trip through JSON to strip proxies before `put`.
+	const storable = JSON.parse(JSON.stringify(doc)) as Doc;
+	const db = await getDB();
+	await db.put('docs', storable);
 }
 
 export function slugify(title: string): string {
@@ -240,23 +246,56 @@ export async function createDoc(
 	return doc;
 }
 
-/** Re-render a doc from its stored raw Markdown with new options (offline). */
+/** Re-render a doc from its stored raw Markdown with new options (offline).
+ *
+ * When `editedSource` is provided (the user's current Markdown draft differs
+ * from the last render), re-render from those edits instead of discarding
+ * them: strip previously-inserted `Page N.` markers so the toggle applies
+ * cleanly, run the pipeline on the edited text, and promote the edited text
+ * to the new raw source so future re-renders keep the edits. Never mutates
+ * the input (which may be a Svelte proxy) before the save succeeds.
+ */
 export async function reapplyPostprocessing(
 	doc: Doc,
-	opts: PostprocessOptions
+	opts: PostprocessOptions,
+	editedSource?: string
 ): Promise<Doc> {
-	const source = doc.rawMarkdown ?? doc.markdown;
-	const rawMap = doc.rawPageMap ?? doc.pageMap ?? null;
+	const useEdited = editedSource !== undefined;
+	let source: string;
+	let rawMap: PageMapItem[] | null;
+	let nextRawMarkdown: string | undefined;
+	let nextRawPageMap: PageMapItem[] | undefined;
+
+	if (useEdited) {
+		// The draft may already equal the auto-saved doc text; it still counts
+		// as edited when the caller passes it (draft differs from last render).
+		const clean = stripPageMarkers(editedSource as string);
+		source = clean;
+		rawMap = null;
+		nextRawMarkdown = clean;
+		nextRawPageMap = undefined;
+	} else {
+		source = doc.rawMarkdown ?? doc.markdown;
+		rawMap = doc.rawPageMap ?? doc.pageMap ?? null;
+		// Preserve raw source on first re-render of legacy docs.
+		nextRawMarkdown = doc.rawMarkdown === undefined ? doc.markdown : doc.rawMarkdown;
+		nextRawPageMap =
+			doc.rawPageMap === undefined && doc.pageMap ? doc.pageMap : doc.rawPageMap;
+	}
 	const rendered = applyPostprocessing(source, opts, rawMap);
-	// Preserve raw source on first re-render of legacy docs.
-	if (doc.rawMarkdown === undefined) doc.rawMarkdown = doc.markdown;
-	if (doc.rawPageMap === undefined && doc.pageMap) doc.rawPageMap = doc.pageMap;
-	doc.markdown = rendered.markdown;
-	doc.sections = rendered.sections;
-	doc.pageMap = rendered.pageMap;
-	doc.postprocess = { ...opts };
-	await saveDoc(doc);
-	return doc;
+	const updated: Doc = {
+		...JSON.parse(JSON.stringify(doc)) as Doc,
+		markdown: rendered.markdown,
+		sections: rendered.sections,
+		pageMap: rendered.pageMap,
+		postprocess: { ...opts },
+		rawMarkdown: nextRawMarkdown,
+		rawPageMap: nextRawPageMap
+	};
+	if (updated.rawMarkdown === undefined) delete (updated as Partial<Doc>).rawMarkdown;
+	if (updated.rawPageMap === undefined) delete (updated as Partial<Doc>).rawPageMap;
+	await saveDoc(updated);
+	return updated;
 }
 
 /** Rename a doc and refresh its slug to track the new title (unique). */

@@ -206,6 +206,7 @@
 			if (d) {
 				activeDoc = d;
 				markdownDraft = d.markdown;
+				renderBaseline = d.markdown;
 				syncPostprocessOptsFromDoc(d, true);
 				if (urlSentence !== null) {
 					globalIdx = urlSentence;
@@ -221,6 +222,7 @@
 				if (d) {
 					activeDoc = d;
 					markdownDraft = d.markdown;
+					renderBaseline = d.markdown;
 					syncPostprocessOptsFromDoc(d, true);
 					if (urlSentence !== null) {
 						globalIdx = urlSentence;
@@ -553,6 +555,7 @@
 			} catch {}
 			activeDoc = doc;
 			markdownDraft = doc.markdown;
+			renderBaseline = doc.markdown;
 			globalIdx = 0;
 			isEditing = false;
 			showToast('OCR completed');
@@ -584,6 +587,7 @@
 		clearPdfViewer();
 		activeDoc = d;
 		markdownDraft = d.markdown;
+		renderBaseline = d.markdown;
 		syncPostprocessOptsFromDoc(d, true);
 		isEditing = false;
 		const saved = localStorage.getItem(progressKey(id));
@@ -602,6 +606,7 @@
 		if (activeDoc?.id === id) {
 			activeDoc = null;
 			markdownDraft = '';
+			renderBaseline = null;
 			clearPdfViewer();
 			localStorage.removeItem(LS_KEYS.activeDocId);
 		}
@@ -625,14 +630,20 @@
 	}
 
 	let saveDebounce: ReturnType<typeof setTimeout> | null = null;
+	// Last postprocess-rendered Markdown. `hasDirtyEdits` compares the draft
+	// against this (not against the auto-saved doc) so saved user edits still
+	// count as edits that re-render must preserve, and a failed re-render can
+	// never leave a spurious dirty flag behind.
+	let renderBaseline: string | null = $state(null);
 	function onMarkdownDraftChange(v: string) {
 		markdownDraft = v;
 		if (!activeDoc) return;
 		if (saveDebounce) clearTimeout(saveDebounce);
 		saveDebounce = setTimeout(async () => {
 			if (!activeDoc) return;
-			activeDoc.markdown = markdownDraft;
-			activeDoc.sections = parseMarkdownStructure(markdownDraft);
+			const draftAtSave = markdownDraft;
+			activeDoc.markdown = draftAtSave;
+			activeDoc.sections = parseMarkdownStructure(draftAtSave);
 			await saveDoc(activeDoc);
 			docs = await getAllDocs();
 		}, 600);
@@ -649,6 +660,10 @@
 	}
 	async function handleEditSave() {
 		if (!activeDoc) return;
+		if (saveDebounce) {
+			clearTimeout(saveDebounce);
+			saveDebounce = null;
+		}
 		isEditing = false;
 		activeDoc.markdown = markdownDraft;
 		activeDoc.sections = parseMarkdownStructure(markdownDraft);
@@ -657,6 +672,10 @@
 		showToast('Saved');
 	}
 	function handleEditCancel() {
+		if (saveDebounce) {
+			clearTimeout(saveDebounce);
+			saveDebounce = null;
+		}
 		markdownDraft = editBackup;
 		isEditing = false;
 	}
@@ -861,17 +880,40 @@
 		showLibrary = true;
 	}
 
-	// Postprocessing apply — offline client-side re-render from stored raw Markdown.
-	let hasDirtyEdits = $derived(activeDoc ? markdownDraft !== (activeDoc as Doc).markdown : false);
+	// Postprocessing apply — offline client-side re-render, preserving user edits.
+	let hasDirtyEdits = $derived(
+		activeDoc ? markdownDraft !== (renderBaseline ?? (activeDoc as Doc).markdown) : false
+	);
 	async function applyPostprocess() {
 		if (!activeDoc) return;
+		// Drop any pending autosave so it can't clobber the fresh render below.
+		if (saveDebounce) {
+			clearTimeout(saveDebounce);
+			saveDebounce = null;
+		}
+		// Persist the draft first so a re-render never loses typed-but-unsaved text.
+		if (markdownDraft !== activeDoc.markdown) {
+			activeDoc.markdown = markdownDraft;
+			activeDoc.sections = parseMarkdownStructure(markdownDraft);
+			try {
+				await saveDoc(activeDoc);
+			} catch (e: any) {
+				showToast(`Re-render failed: ${e?.message ?? e}`);
+				return;
+			}
+		}
 		if (hasDirtyEdits) {
-			if (!confirm('You have edited the Markdown. Re-applying postprocessing will overwrite your changes. Continue?')) return;
+			if (!confirm('You have edited the Markdown. Re-applying postprocessing will keep your edits and apply the new settings on top. Continue?')) return;
 		}
 		try {
-			const updated = await reapplyPostprocessing(activeDoc, currentPostprocessOpts());
+			const updated = await reapplyPostprocessing(
+				activeDoc,
+				currentPostprocessOpts(),
+				hasDirtyEdits ? markdownDraft : undefined
+			);
 			activeDoc = updated;
 			markdownDraft = updated.markdown;
+			renderBaseline = updated.markdown;
 			docs = await getAllDocs();
 			globalIdx = 0;
 			isEditing = false;
