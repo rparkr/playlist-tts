@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from rich.console import Console
 
 from backend.app.api.ocr import router as ocr_router
+from backend.app.api.ocr_llm import router as ocr_llm_router
 from backend.app.api.parse import router as parse_router
 from backend.app.api.tts import router as tts_router
 
@@ -36,6 +37,7 @@ app.add_middleware(
 )
 
 app.include_router(ocr_router)
+app.include_router(ocr_llm_router)
 app.include_router(parse_router)
 app.include_router(tts_router)
 
@@ -117,6 +119,7 @@ def main():
     console.print(f"[bold cyan]Local:[/bold cyan] http://localhost:{port}")
     console.print(f"[bold gold1]📱 Mobile:[/bold gold1] http://{ip}:{port}\n")
     uvicorn.run("backend.app.main:app", host="0.0.0.0", port=port, reload=True)
+
 
 if __name__ == "__main__":
     main()

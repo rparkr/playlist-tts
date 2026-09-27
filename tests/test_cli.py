@@ -20,7 +20,7 @@ def test_ocr_help():
     assert result.exit_code == 0
     assert "INPUT_PDF" in result.output
     # Rich may truncate long flag names with an ellipsis on narrow terminals.
-    assert "normalize-upperca" in result.output
+    assert "normalize-upperc" in result.output
 
 
 def test_ocr_missing_file():
@@ -40,6 +40,30 @@ def test_ocr_rejects_bad_normalize_mode(tmp_path: Path):
         writer.write(f)
 
     result = runner.invoke(ocr_app, [str(pdf), "fake"])
+    assert result.exit_code != 0
+
+
+def test_ocr_help_lists_engine_option():
+    """OCR CLI advertises the engine choice without importing heavy deps."""
+    result = runner.invoke(ocr_app, ["--help"])
+    assert result.exit_code == 0
+    assert "--engine" in result.output
+    assert "--llm-model" in result.output
+    assert "--log-file" in result.output
+    assert "--first-page-marker" in result.output
+
+
+def test_ocr_rejects_unknown_engine(tmp_path: Path):
+    """OCR CLI rejects an unknown engine before doing any work."""
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "in.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with open(pdf, "wb") as f:
+        writer.write(f)
+
+    result = runner.invoke(ocr_app, [str(pdf), "--engine", "bogus"])
     assert result.exit_code != 0
 
 

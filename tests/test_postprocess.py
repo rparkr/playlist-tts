@@ -7,6 +7,7 @@ from backend.app.services.postprocess import (
     chunk_text_into_sentences,
     dehyphenate,
     ensure_punctuation,
+    join_pages_strict,
     normalize_uppercase,
     parse_markdown_structure,
     reflow_columns,
@@ -175,3 +176,61 @@ def test_apply_postprocessing_dehyphenates():
     out_md, _, _ = apply_postprocessing(md, opts, None)
     assert "deterioration" in out_md
     assert "dete- rioration" not in out_md
+
+
+def test_join_pages_strict_never_carries_next_page_content():
+    """Strict join keeps a next-page heading after its marker.
+
+    Regression: page 1 ends without terminal punctuation (map legend) and
+    page 2 starts with a heading — the deferring join would carry the heading
+    before `Page 2.`; the strict join must not.
+    """
+    md, page_map = join_pages_strict(
+        ["OUTER ISLAND\nDINOTOPIA\nSTATUTE MILES", "HOW I DISCOVERED THE SKETCHBOOK"],
+        True,
+    )
+    assert md.index("STATUTE MILES") < md.index("Page 2.")
+    assert md.index("Page 2.") < md.index("HOW I DISCOVERED")
+    assert [p.page for p in page_map] == [1, 2]
+    assert md[page_map[1].char_start : page_map[1].char_end] == "HOW I DISCOVERED THE SKETCHBOOK"
+
+
+def test_join_pages_strict_keeps_empty_pages_aligned():
+    """Empty pages are kept so markers stay aligned with source pages."""
+    md, page_map = join_pages_strict(["First.", "", "Third."], True)
+    assert [p.page for p in page_map] == [1, 2, 3]
+    assert "\n\nPage 2.\n\n" in md
+    assert "\n\nPage 3.\n\n" in md
+    assert md.index("First.") < md.index("Page 2.") < md.index("Page 3.") < md.index("Third.")
+
+
+def test_join_pages_strict_single_page_has_no_marker():
+    """A single page needs no marker and maps the whole text."""
+    md, page_map = join_pages_strict(["Only page."], True)
+    assert md == "Only page."
+    assert [p.page for p in page_map] == [1]
+
+
+def test_join_pages_strict_without_markers():
+    """Without markers, pages join with blank lines and tracked offsets."""
+    md, page_map = join_pages_strict(["First.", "Second."], False)
+    assert "Page 2." not in md
+    assert md == "First.\n\nSecond."
+    assert [p.page for p in page_map] == [1, 2]
+    assert md[page_map[1].char_start : page_map[1].char_end] == "Second."
+
+
+def test_join_pages_strict_first_page_marker():
+    """Opt-in leading marker precedes page 1 with aligned offsets."""
+    md, page_map = join_pages_strict(["First.", "Second."], True, first_page_marker=True)
+    assert md.startswith("\n\nPage 1.\n\n")
+    assert md.index("Page 1.") < md.index("First.") < md.index("Page 2.")
+    assert md[page_map[0].char_start : page_map[0].char_end] == "First."
+    assert md[page_map[1].char_start : page_map[1].char_end] == "Second."
+
+
+def test_join_pages_strict_first_page_marker_single_page():
+    """A lone page still gets its marker when explicitly requested."""
+    md, page_map = join_pages_strict(["Only page."], True, first_page_marker=True)
+    assert md == "\n\nPage 1.\n\nOnly page."
+    assert [p.page for p in page_map] == [1]

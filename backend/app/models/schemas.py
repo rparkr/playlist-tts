@@ -12,6 +12,8 @@ class PostprocessOptions(BaseModel):
     normalize_uppercase: bool = False
     ensure_punctuation: bool = False
     insert_page_markers: bool = True
+    # Honored by the LLM engine's strict join; the Docling pipeline ignores it.
+    first_page_marker: bool = False
 
     @field_validator("normalize_uppercase", mode="before")
     @classmethod

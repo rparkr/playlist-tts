@@ -730,6 +730,51 @@ def join_pages_with_markers(
     return "".join(out_parts), page_map_out
 
 
+def join_pages_strict(
+    pages: list[str], insert_markers: bool, first_page_marker: bool = False
+) -> tuple[str, list[PageMapItem]]:
+    """Join per-page texts with `Page N.` markers strictly between pages.
+
+    Unlike `join_pages_with_markers`, the marker is never deferred past the
+    next page's content: `Page N.` always directly precedes page N's text.
+    Intended for independently transcribed pages (e.g. per-page LLM OCR),
+    where carrying a sentence across the boundary would misattribute one
+    page's heading to the prior page. Empty pages are kept (never dropped)
+    so numbering stays aligned with the source document.
+    Returns (markdown, page_map) with exact char offsets.
+    """
+    bodies = [(p or "").strip() for p in pages]
+    if not bodies:
+        return "", [PageMapItem(page=1, char_start=0, char_end=0, start_line=1)]
+
+    out_parts: list[str] = []
+    page_map: list[PageMapItem] = []
+    offset = 0
+
+    def _emit(text: str) -> None:
+        nonlocal offset
+        out_parts.append(text)
+        offset += len(text)
+
+    if insert_markers and first_page_marker:
+        _emit("\n\nPage 1.\n\n")
+    cs = offset
+    _emit(bodies[0])
+    start_line = "".join(out_parts)[:cs].count("\n") + 1
+    page_map.append(PageMapItem(page=1, char_start=cs, char_end=offset, start_line=start_line))
+
+    for page_number, body in enumerate(bodies[1:], start=2):
+        _emit(f"\n\nPage {page_number}.\n\n" if insert_markers else "\n\n")
+        cs = offset
+        _emit(body)
+        start_line = "".join(out_parts)[:cs].count("\n") + 1
+        page_map.append(
+            PageMapItem(page=page_number, char_start=cs, char_end=offset, start_line=start_line)
+        )
+
+    return "".join(out_parts), page_map
+
+
 def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
     """Build pageMap, preferring Docling page-break placeholders when present.
 
