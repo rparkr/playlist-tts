@@ -3,7 +3,6 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "openai",
-#     "pypdf",
 #     "typer",
 #     "rich",
 # ]
@@ -14,10 +13,19 @@ import base64
 import logging
 import mimetypes
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from openai import AsyncOpenAI
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 LLAMA_CPP_BASE_URL: str = "http://127.0.0.1:8080/v1"
 DEFAULT_MODEL: str = "qwen3.5-4b"
@@ -32,22 +40,23 @@ DEFAULT_USER_MESSAGE = (
     "the continuation with the paragraph it started in so the paragraph stays together. "
     "Collapse hyphenated word breaks at the end of lines, merging the word segments "
     "together.\n\n"
-    "If there is no text to extract, say `<no text found><scene description>`, followed "
-    "by a detailed description of the scene in the image."
+    "If there is no text to extract, say `<no text found>`, followed by a detailed "
+    "description of the scene in the image."
 )
 
 app = typer.Typer(
     no_args_is_help=True, help="Extract text from all images in a folder using an LLM."
 )
 
-logger = logging.getLogger()
 file_handler = logging.FileHandler("llm-ocr.log")
+logger = logging.getLogger()
 logger.addHandler(file_handler)
 
 
 async def process_one_image(
     client: AsyncOpenAI,
     image_path: Path,
+    output_directory: Path,
     progress: Progress,
     task_id: TaskID,
     model: str = DEFAULT_MODEL,
@@ -65,6 +74,8 @@ async def process_one_image(
     Args:
         client: the OpenAI client.
         image_path: path-like object to the image file.
+        output_directory: path-like object to the directory where the output will be
+            saved.
         progress: `rich.Progress` object for the progress bar.
         task_id: identifies the task for the progress bar updates.
         model: the name of the model to use.
@@ -83,9 +94,11 @@ async def process_one_image(
             progress.update(
                 task_id,
                 description=f"[red]Skipped (unknown type): {image_path.name}[/red]",
-                completed=1,
+                advance=1,
             )
             return None
+
+        progress.update(task_id, description=f"Working on: {image_path.name}")
 
         # Read and encode image asynchronously in a separate thread pool to prevent blocking the event loop
         loop = asyncio.get_running_loop()
@@ -100,6 +113,7 @@ async def process_one_image(
             extra_body={
                 "chat_template_kwargs": {"enable_thinking": enable_thinking},
             },
+            temperature=0,
             messages=[
                 {"role": "system", "content": system_message},
                 {
@@ -121,23 +135,22 @@ async def process_one_image(
         )
 
         # Save the output
-        image_path.with_suffix(".md").write_text(
-            (response.choices[0].message.content or "").strip()
-        )
-        progress.console.print(f"\n[bold green]✔ Finished: {image_path.name}[/bold green]")
+        output_path = (output_directory / image_path.stem).with_suffix(".md")
+        output_path.write_text((response.choices[0].message.content or "").strip())
         progress.update(
-            task_id, description=f"[green]✔ Complete: {image_path.name}[/green]", completed=1
+            task_id, description=f"[green]Completed[/green] {image_path.name}", advance=1
         )
     except Exception as e:
         logger.debug(f"Failed to process {image_path.name}.", exc_info=True, stack_info=True)
         progress.update(
-            task_id, description=f"[red]Failed: {image_path.name} ({str(e)})[/red]", completed=1
+            task_id, description=f"[red]Failed: {image_path.name} ({str(e)})[/red]", advance=1
         )
     return None
 
 
 async def process_all_images(
     image_directory: Path,
+    output_directory: Path | None,
     base_url: str = LLAMA_CPP_BASE_URL,
     model: str = DEFAULT_MODEL,
     system_message: str = DEFAULT_SYSTEM_MESSAGE,
@@ -150,37 +163,51 @@ async def process_all_images(
 
     # Filter files using pathlib
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
-    image_files = [
-        p
-        for p in image_directory.expanduser().iterdir()
-        if p.is_file() and p.suffix.lower() in image_extensions
-    ]
+    image_files = sorted(
+        [
+            p
+            for p in image_directory.expanduser().iterdir()
+            if p.is_file() and p.suffix.lower() in image_extensions
+        ]
+    )
 
     if not image_files:
         typer.echo(f"No matching images found in {image_directory}")
         return
+
+    if not output_directory:
+        output_directory = image_directory / "extracted_text"
+
+    output_directory.mkdir(parents=True, exist_ok=True)
 
     # Set up multi-progress tracker tracking each individual file asynchronously
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
         transient=False,
     ) as progress:
         tasks = []
+        main_task_id = progress.add_task(
+            description=f"[yellow]Processing files at {image_directory}...[/yellow]",
+            total=len(image_files),
+        )
         for img_path in image_files:
             # Create a localized progress bar slot for each file
-            task_id = progress.add_task(
-                description=f"[yellow]Processing: {img_path.name}[/yellow]", total=1
-            )
+            # task_id = progress.add_task(
+            #     description=f"[yellow]Processing: {img_path.name}[/yellow]", total=1
+            # )
 
             # Queue the async coroutine
             tasks.append(
                 process_one_image(
                     client=client,
                     image_path=img_path,
+                    output_directory=output_directory,
                     progress=progress,
-                    task_id=task_id,
+                    task_id=main_task_id,
                     model=model,
                     system_message=system_message,
                     user_message=user_message,
@@ -191,39 +218,64 @@ async def process_all_images(
         # Run all scheduled API execution contexts concurrently
         await asyncio.gather(*tasks)
 
+        progress.update(main_task_id, description="[bold green]✔ Finished![/bold green]")
+
 
 @app.command(no_args_is_help=True)
 def process(
-    directory: Path = typer.Argument(
-        ...,
-        help="Path to the directory containing images",
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
-        resolve_path=True,
-    ),
-    server_url: str = typer.Option(
-        LLAMA_CPP_BASE_URL, "--base-url", "-b", help="Base URL of your local llama.cpp server"
-    ),
-    model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m", help="Model name identifier loaded in your local server"
-    ),
-    system_message: str = typer.Option(
-        DEFAULT_SYSTEM_MESSAGE,
-        "--system",
-        help="System prompt with each conversation.",
-    ),
-    user_message: str = typer.Option(
-        DEFAULT_USER_MESSAGE,
-        "--user",
-        "-u",
-        help="User prompt for each image.",
-    ),
+    directory: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to the directory containing images",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            help="Output directory. If not specified, `extracted_text` will be used.",
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = None,
+    server_url: Annotated[
+        str, typer.Option("--base-url", help="Base URL of your local llama.cpp server")
+    ] = LLAMA_CPP_BASE_URL,
+    model: Annotated[
+        str, typer.Option("--model", help="Model name identifier loaded in your local server")
+    ] = DEFAULT_MODEL,
+    system_message: Annotated[
+        str,
+        typer.Option(
+            "--system",
+            help="System prompt with each conversation.",
+        ),
+    ] = DEFAULT_SYSTEM_MESSAGE,
+    user_message: Annotated[
+        str,
+        typer.Option(
+            "--user",
+            help="User prompt for each image.",
+        ),
+    ] = DEFAULT_USER_MESSAGE,
 ):
     """
     Process all supported image files in a folder concurrently using llama.cpp and view progress.
     """
-    asyncio.run(process_all_images(directory, server_url, model, system_message, user_message))
+    asyncio.run(
+        process_all_images(
+            image_directory=directory,
+            output_directory=output_dir,
+            base_url=server_url,
+            model=model,
+            system_message=system_message,
+            user_message=user_message,
+        )
+    )
 
 
 if __name__ == "__main__":
