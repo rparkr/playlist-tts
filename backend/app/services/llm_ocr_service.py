@@ -47,7 +47,7 @@ DEFAULT_BASE_URL: str = "http://127.0.0.1:8080/v1"
 DEFAULT_MODEL: str = "qwen3.5-4b"
 DEFAULT_SYSTEM_MESSAGE: str = (
     "Extract text from the page in reading order. Do not include any preamble like: "
-    '"Here\'s the extracted text:";  instead, begin directly with the text from the page.'
+    '"Here\'s the extracted text:"; instead, begin directly with the text from the page.'
 )
 DEFAULT_USER_MESSAGE: str = (
     "Please extract all the English text from this page. "
@@ -57,7 +57,7 @@ DEFAULT_USER_MESSAGE: str = (
     "Collapse hyphenated word breaks at the end of lines, merging the word segments "
     "together.\n\n"
     "If there is no text to extract, say `<no text found>`, followed by a detailed "
-    "description of the scene in the image."
+    "description of the image."
 )
 
 #: Upper bound for the synchronous `POST /api/ocr/llm` poll loop. LLM jobs are
