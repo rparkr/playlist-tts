@@ -31,6 +31,8 @@ export interface PostprocessFlags {
 	uppercase: boolean;
 	punct: boolean;
 	pageMarkers: boolean;
+	firstPageMarker?: boolean;
+	firstPageNumber?: number;
 }
 
 /** Parse an `engine` URL/localStorage value; return null when absent/invalid. */
@@ -92,7 +94,12 @@ export function parsePostprocessFlags(value: string | null | undefined): Postpro
 		) {
 			return null;
 		}
-		return { combine: p.combine, uppercase: p.uppercase, punct: p.punct, pageMarkers: p.pageMarkers };
+		const out: PostprocessFlags = { combine: p.combine, uppercase: p.uppercase, punct: p.punct, pageMarkers: p.pageMarkers };
+		if (typeof p.firstPageMarker === 'boolean') out.firstPageMarker = p.firstPageMarker;
+		if (typeof p.firstPageNumber === 'number' && Number.isFinite(p.firstPageNumber) && p.firstPageNumber >= 1) {
+			out.firstPageNumber = Math.floor(p.firstPageNumber);
+		}
+		return out;
 	} catch {
 		return null;
 	}

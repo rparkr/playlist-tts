@@ -14,6 +14,14 @@ export interface PostprocessOptions {
 	normalize_uppercase: boolean;
 	ensure_punctuation: boolean;
 	insert_page_markers: boolean;
+	first_page_marker?: boolean;
+	/** Logical number of physical PDF page 1 (chapter scans). */
+	first_page_number?: number;
+	/** Physical (1-indexed) → logical page overrides (skipped illustrations). */
+	page_overrides?: Record<number, number> | null;
+	use_text_extract?: boolean;
+	text_min_chars?: number;
+	text_coverage_min?: number;
 }
 
 /** Default options for new documents (match backend defaults). */
@@ -21,7 +29,13 @@ export const DEFAULT_POSTPROCESS: PostprocessOptions = {
 	combine_columns: true,
 	normalize_uppercase: false,
 	ensure_punctuation: false,
-	insert_page_markers: true
+	insert_page_markers: true,
+	first_page_marker: false,
+	first_page_number: 1,
+	page_overrides: null,
+	use_text_extract: true,
+	text_min_chars: 200,
+	text_coverage_min: 0.6
 };
 
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
@@ -39,6 +53,32 @@ const PAGE_BREAK_INLINE_RE = /<!--\s*page\s*break\s*-->/gi;
 const TERM_FORWARD_RE = /[.!?…]["'\)\]]*(?=\s|$)/;
 const DEHYPHEN_RE = /(?<=[A-Za-z])-\s+(?=[A-Za-z])/g;
 const SOFT_HYPHEN_RE = /­\s*/g;
+
+/** Coerce page-override keys/values to positive ints (JSON keys arrive as strings). */
+export function normalizePageOverrides(
+	raw: Record<number | string, number> | null | undefined
+): Record<number, number> {
+	if (!raw) return {};
+	const out: Record<number, number> = {};
+	for (const [k, v] of Object.entries(raw)) {
+		const pk = Number(k);
+		const pv = Number(v);
+		if (Number.isInteger(pk) && Number.isInteger(pv) && pk >= 1 && pv >= 1) out[pk] = pv;
+	}
+	return out;
+}
+
+/** Map a physical PDF page (1-indexed) to its logical `Page N.` number. */
+export function resolveLogicalPage(
+	physical: number,
+	firstPageNumber = 1,
+	pageOverrides?: Record<number | string, number> | null
+): number {
+	const overrides = normalizePageOverrides(pageOverrides);
+	if (overrides[physical] !== undefined) return overrides[physical];
+	const base = firstPageNumber && firstPageNumber >= 1 ? firstPageNumber : 1;
+	return base + physical - 1;
+}
 
 /** Join words split by line-break hyphenation (`dete- rioration` → `deterioration`).
  *
@@ -296,14 +336,23 @@ export function ensurePunctuation(markdown: string): string {
 }
 
 /** Insert `Page N.` markers at page boundaries after sentence completion. */
-export function insertPageMarkers(markdown: string, pageMap: PageMapItem[]): string {
+export function insertPageMarkers(
+	markdown: string,
+	pageMap: PageMapItem[],
+	firstPageNumber = 1,
+	pageOverrides?: Record<number | string, number> | null
+): string {
 	if (!pageMap || pageMap.length <= 1) return markdown;
 	const sorted = [...pageMap].sort((a, b) => a.page - b.page);
+	const logicalByPos = sorted.map((p) => p.page);
+	void firstPageNumber;
+	void pageOverrides;
 	let result = markdown;
 	const termRe = /[.!?…]["'\)\]]*(?=\s|$)/;
 	let nextMarkerPos: number | null = null;
 
-	for (const item of [...sorted.slice(0, -1)].reverse()) {
+	for (let pos = sorted.length - 2; pos >= 0; pos--) {
+		const item = sorted[pos];
 		let insertAt = Math.max(0, Math.min(item.char_end, result.length));
 		const prefix = result.slice(0, insertAt);
 		let newInsertAt: number;
@@ -350,7 +399,7 @@ export function insertPageMarkers(markdown: string, pageMap: PageMapItem[]): str
 			newInsertAt = Math.max(0, Math.min(insertAt, nextMarkerPos - 1));
 		}
 
-		const nextPage = item.page + 1;
+		const nextPage = pos + 1 < logicalByPos.length ? logicalByPos[pos + 1] : item.page + 1;
 		const marker = `\n\nPage ${nextPage}.\n\n`;
 		const windowStart = Math.max(0, newInsertAt - 12);
 		const windowEnd = Math.min(result.length, newInsertAt + 12 + marker.length);
@@ -399,14 +448,40 @@ function firstSentenceEnd(text: string): number | null {
 
 export function joinPagesWithMarkers(
 	pages: string[],
-	insertMarkers: boolean
+	insertMarkers: boolean,
+	joinOpts?: { firstPageNumber?: number; pageOverrides?: Record<number | string, number> | null; firstPageMarker?: boolean }
 ): { markdown: string; pageMap: PageMapItem[] } {
-	const nonEmpty = pages.filter((p) => p.trim());
-	const effective = nonEmpty.length > 0 ? nonEmpty : pages;
+	const firstPageNumber = joinOpts?.firstPageNumber ?? 1;
+	const pageOverrides = joinOpts?.pageOverrides ?? null;
+	const firstPageMarker = joinOpts?.firstPageMarker ?? false;
+	const overrides = normalizePageOverrides(pageOverrides);
+	const keepAlignment =
+		Object.keys(overrides).length > 0 || firstPageNumber !== 1 || firstPageMarker;
+	const logical = (physical: number) => resolveLogicalPage(physical, firstPageNumber, overrides);
+	let effective: string[];
+	let physicalNos: number[];
+	if (keepAlignment) {
+		effective = pages.map((p) => (p ?? '').replace(/^\n+|\n+$/g, ''));
+		physicalNos = effective.map((_, i) => i + 1);
+	} else {
+		const nonEmpty = pages.filter((p) => p.trim());
+		effective = nonEmpty.length > 0 ? nonEmpty : pages;
+		physicalNos = effective.map((_, i) => i + 1);
+	}
 	const total = effective.length;
-	if (total <= 1) {
+	if (total <= 0) {
+		return { markdown: '', pageMap: [{ page: logical(1), char_start: 0, char_end: 0, start_line: 1 }] };
+	}
+	if (total === 1 && !(insertMarkers && firstPageMarker)) {
 		const md = (effective[0] ?? '').trim();
-		return { markdown: md, pageMap: [{ page: 1, char_start: 0, char_end: md.length, start_line: 1 }] };
+		return { markdown: md, pageMap: [{ page: logical(physicalNos[0]), char_start: 0, char_end: md.length, start_line: 1 }] };
+	}
+	if (total === 1 && insertMarkers && firstPageMarker) {
+		const body = (effective[0] ?? '').trim();
+		const lg = logical(physicalNos[0]);
+		const md = body ? `\n\nPage ${lg}.\n\n${body}`.trim() : `\n\nPage ${lg}.\n\n`.trim();
+		const start = body ? md.indexOf(body) : md.length;
+		return { markdown: md, pageMap: [{ page: lg, char_start: start, char_end: start + body.length, start_line: md.slice(0, start).split('\n').length }] };
 	}
 	if (!insertMarkers) {
 		const parts: string[] = [];
@@ -421,7 +496,7 @@ export function joinPagesWithMarkers(
 			const cs = offset;
 			parts.push(body);
 			offset += body.length;
-			pageMap.push({ page: i + 1, char_start: cs, char_end: offset, start_line: parts.join('').slice(0, cs).split('\n').length });
+			pageMap.push({ page: logical(physicalNos[i]), char_start: cs, char_end: offset, start_line: parts.join('').slice(0, cs).split('\n').length });
 		});
 		return { markdown: parts.join(''), pageMap };
 	}
@@ -433,10 +508,14 @@ export function joinPagesWithMarkers(
 		offset += t.length;
 	};
 	const cur = () => parts.join('');
+	if (firstPageMarker) emit(`\n\nPage ${logical(physicalNos[0])}.\n\n`);
 	emit(effective[0].trim());
-	pageMap.push({ page: 1, char_start: 0, char_end: offset, start_line: 1 });
+	{
+		const cs = offset - effective[0].trim().length;
+		pageMap.push({ page: logical(physicalNos[0]), char_start: Math.max(0, cs), char_end: offset, start_line: 1 });
+	}
 	for (let idx = 1; idx < total; idx++) {
-		const nextPageNum = idx + 1;
+		const nextPageNum = logical(physicalNos[idx]);
 		const remainder = effective[idx].trim();
 		const prefix = cur();
 		if (!remainder || endsWithTerminal(prefix)) {
@@ -471,19 +550,26 @@ export function joinPagesWithMarkers(
 }
 
 /** Build pageMap, preferring Docling page-break placeholders when present. */
-export function buildPageMap(markdown: string, totalPages: number): PageMapItem[] {
+export function buildPageMap(
+	markdown: string,
+	totalPages: number,
+	firstPageNumber = 1,
+	pageOverrides?: Record<number | string, number> | null
+): PageMapItem[] {
 	const breaks = markdown.match(/<!--\s*page\s*break\s*-->/gi);
 	if (breaks && breaks.length > 0) {
 		const rawPages = splitOnPageBreaks(markdown);
 		const pageMap: PageMapItem[] = [];
 		let cursor = 0;
+		let physical = 0;
 		for (const seg of rawPages) {
+			physical += 1;
 			const idx = markdown.indexOf(seg, cursor);
 			const segStart = seg ? (idx === -1 ? cursor : idx) : cursor;
 			const segEnd = segStart + seg.length;
 			if (seg.trim()) {
 				pageMap.push({
-					page: pageMap.length + 1,
+					page: resolveLogicalPage(physical, firstPageNumber, pageOverrides),
 					char_start: segStart,
 					char_end: segEnd,
 					start_line: markdown.slice(0, segStart).split('\n').length
@@ -497,21 +583,21 @@ export function buildPageMap(markdown: string, totalPages: number): PageMapItem[
 		if (pageMap.length > 0) return pageMap;
 	}
 	if (totalPages <= 1) {
-		return [{ page: 1, char_start: 0, char_end: markdown.length, start_line: 1 }];
+		return [{ page: resolveLogicalPage(1, firstPageNumber, pageOverrides), char_start: 0, char_end: markdown.length, start_line: 1 }];
 	}
 	const lines = markdown.split('\n');
 	const perPage = Math.max(1, Math.floor(lines.length / totalPages));
 	const pageMap: PageMapItem[] = [];
 	let charOffset = 0;
-	for (let page = 1; page <= totalPages; page++) {
-		const startLine = (page - 1) * perPage + 1;
-		const endLine = page < totalPages ? perPage * page : lines.length;
+	for (let physical = 1; physical <= totalPages; physical++) {
+		const startLine = (physical - 1) * perPage + 1;
+		const endLine = physical < totalPages ? perPage * physical : lines.length;
 		const sliceLines = lines.slice(startLine - 1, endLine);
 		const sliceText = sliceLines.join('\n');
 		const cs = charOffset;
 		const ce = cs + sliceText.length;
-		pageMap.push({ page, char_start: cs, char_end: ce, start_line: startLine });
-		charOffset = ce + (page < totalPages ? 2 : 0);
+		pageMap.push({ page: resolveLogicalPage(physical, firstPageNumber, pageOverrides), char_start: cs, char_end: ce, start_line: startLine });
+		charOffset = ce + (physical < totalPages ? 2 : 0);
 	}
 	return pageMap;
 }
@@ -523,6 +609,9 @@ export function applyPostprocessing(
 	rawPageMap?: PageMapItem[] | null
 ): { markdown: string; sections: Section[]; pageMap: PageMapItem[] } {
 	let md = stripImageArtifacts(rawMarkdown);
+	const firstPageNumber = opts.first_page_number ?? 1;
+	const pageOverrides = opts.page_overrides ?? null;
+	const firstPageMarker = opts.first_page_marker ?? false;
 	if (hasPageBreaks(md)) {
 		const pages = splitOnPageBreaks(md);
 		const processed = pages.map((page) => {
@@ -535,7 +624,11 @@ export function applyPostprocessing(
 			if (opts.ensure_punctuation) p = ensurePunctuation(p);
 			return p;
 		});
-		const joined = joinPagesWithMarkers(processed, opts.insert_page_markers);
+		const joined = joinPagesWithMarkers(processed, opts.insert_page_markers, {
+			firstPageNumber,
+			pageOverrides,
+			firstPageMarker
+		});
 		let out = joined.markdown;
 		if (opts.combine_columns) out = dehyphenate(out);
 		return { markdown: out, sections: parseMarkdownStructure(out), pageMap: joined.pageMap };
@@ -550,13 +643,13 @@ export function applyPostprocessing(
 	let sections = parseMarkdownStructure(md);
 	let newMap: PageMapItem[];
 	if (!rawPageMap) {
-		newMap = buildPageMap(md, 1);
+		newMap = buildPageMap(md, 1, firstPageNumber, pageOverrides);
 	} else if (opts.insert_page_markers && rawPageMap.length > 1) {
-		md = insertPageMarkers(md, rawPageMap);
-		newMap = buildPageMap(md, rawPageMap.length);
+		md = insertPageMarkers(md, rawPageMap, firstPageNumber, pageOverrides);
+		newMap = buildPageMap(md, rawPageMap.length, firstPageNumber, pageOverrides);
 		sections = parseMarkdownStructure(md);
 	} else {
-		newMap = buildPageMap(md, rawPageMap.length);
+		newMap = buildPageMap(md, rawPageMap.length, firstPageNumber, pageOverrides);
 	}
 	return { markdown: md, sections, pageMap: newMap };
 }

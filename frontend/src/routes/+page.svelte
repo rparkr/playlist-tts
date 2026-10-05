@@ -26,6 +26,9 @@
 	import {
 		parseMarkdownStructure,
 		findPageMarkerIndex,
+		findPageForSentence,
+		logicalToPhysical,
+		physicalToLogical,
 		getGlobalSentences,
 		globalToSectionChunk,
 		sectionChunkToGlobal,
@@ -99,16 +102,28 @@
 	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
+	let optFirstPageMarker: boolean = $state(false);
+	let optFirstPageNumber: number = $state(1);
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
 	let settingsHydrated: boolean = $state(false);
+
+	// Pre-OCR staging (#6): a newly selected PDF previews before any POST.
+	// `pageOverrides` maps physical PDF pages → logical `Page N.` numbers.
+	let pdfPendingOcr: boolean = $state(false);
+	let pendingPdfName: string = $state('');
+	let pageOverrides: Record<number, number> = $state({});
+	let mdInputEl: HTMLInputElement | null = $state(null);
 
 	function currentPostprocessOpts(): PostprocessOptions {
 		return {
 			combine_columns: optCombine,
 			normalize_uppercase: optUppercase,
 			ensure_punctuation: optPunct,
-			insert_page_markers: optPageMarkers
+			insert_page_markers: optPageMarkers,
+			first_page_marker: optFirstPageMarker,
+			first_page_number: optFirstPageNumber,
+			page_overrides: Object.keys(pageOverrides).length > 0 ? { ...pageOverrides } : null
 		};
 	}
 
@@ -118,6 +133,9 @@
 		optUppercase = doc.postprocess.normalize_uppercase;
 		optPunct = doc.postprocess.ensure_punctuation;
 		optPageMarkers = doc.postprocess.insert_page_markers;
+		optFirstPageMarker = doc.postprocess.first_page_marker ?? false;
+		const n = doc.postprocess.first_page_number ?? 1;
+		optFirstPageNumber = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
 		if (persist) {
 			try {
 				localStorage.setItem(
@@ -126,7 +144,9 @@
 						combine: optCombine,
 						uppercase: optUppercase,
 						punct: optPunct,
-						pageMarkers: optPageMarkers
+						pageMarkers: optPageMarkers,
+						firstPageMarker: optFirstPageMarker,
+						firstPageNumber: optFirstPageNumber
 					})
 				);
 			} catch {
@@ -224,6 +244,8 @@
 			optUppercase = storedPostprocess.uppercase;
 			optPunct = storedPostprocess.punct;
 			optPageMarkers = storedPostprocess.pageMarkers;
+			if (typeof storedPostprocess.firstPageMarker === 'boolean') optFirstPageMarker = storedPostprocess.firstPageMarker;
+			if (typeof storedPostprocess.firstPageNumber === 'number') optFirstPageNumber = storedPostprocess.firstPageNumber;
 		}
 		const urlSentence = parseSentenceIndex(sParam);
 		if (docParam) {
@@ -281,7 +303,9 @@
 				combine: optCombine,
 				uppercase: optUppercase,
 				punct: optPunct,
-				pageMarkers: optPageMarkers
+				pageMarkers: optPageMarkers,
+				firstPageMarker: optFirstPageMarker,
+				firstPageNumber: optFirstPageNumber
 			})
 		);
 		if (typeof window !== 'undefined' && activeDoc) {
@@ -312,6 +336,24 @@
 	// and deleted sentences can never sound after a pause/seek/resume.
 	$effect(() => {
 		sentencePlayer?.updateSentences(getGlobalSentences(sections));
+	});
+
+	// Two-way Markdown→PDF sync (#1): as the current sentence crosses a
+	// `Page N.` marker (listening or seek), follow it in the PDF viewer.
+	// Only renders when the physical page differs to avoid loops with the
+	// PDF→Markdown scroll inside `renderPdfPage`.
+	$effect(() => {
+		const idx = globalIdx;
+		const sens = sections;
+		if (!pdfVisible || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
+		const sentences = getGlobalSentences(sens);
+		if (sentences.length === 0) return;
+		const logical = findPageForSentence(sentences, idx);
+		const physical = logicalToPhysical(logical, activeDoc?.pageMap, pdfTotalPages);
+		if (physical !== pdfPageNum && physical >= 1 && physical <= pdfTotalPages) {
+			pdfPageNum = physical;
+			void renderPdfPage();
+		}
 	});
 
 	// Remaining time heuristic: 150 wpm at 1.0x
@@ -386,11 +428,123 @@
 	async function onPdfSelected(e: Event) {
 		const input = e.target as HTMLInputElement;
 		if (!input.files?.[0]) return;
-		setPdfFromBlob(input.files[0], input.files[0].name);
-		// Auto-run OCR immediately (header flow)
-		await runOcr();
+		const file = input.files[0];
+		setPdfFromBlob(file, file.name);
+		pendingPdfName = file.name;
+		pageOverrides = {};
+		pdfPendingOcr = true;
+		pdfVisible = true;
+		// Stage the PDF for preview + options — do NOT POST yet. The user
+		// presses "Extract text" (staging bar) to kick off OCR (#6).
+		await loadPdf();
+		showToast('PDF loaded — set page options, then press Extract text');
 		// reset input so same file can be re-selected
 		input.value = '';
+	}
+
+	function cancelPendingPdf() {
+		pdfPendingOcr = false;
+		pendingPdfName = '';
+		pageOverrides = {};
+		clearPdfViewer();
+		if (activeDoc) void loadCachedPdf(activeDoc.id);
+	}
+
+	// Markdown upload + PDF+Markdown pair (#20). Markers (`Page N.` lines)
+	// drive viewer sync; the PDF page count validates the pairing.
+	function triggerMarkdownUpload() {
+		mdInputEl?.click();
+	}
+
+	async function onMarkdownSelected(e: Event) {
+		const input = e.target as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		let text = '';
+		try {
+			text = await file.text();
+		} catch (err: any) {
+			showToast(`Could not read Markdown: ${err?.message ?? err}`);
+			return;
+		}
+		if (!text.trim()) {
+			showToast('Markdown file is empty');
+			return;
+		}
+		const title = (file.name.replace(/\.(md|markdown|txt)$/i, '') || pendingPdfName.replace(/\.pdf$/i, '') || 'Untitled').trim();
+		if (pdfPendingOcr && pdfFile && pdfTotalPages > 0) {
+			// Paired import: validate marker count against the staged PDF.
+			const nums = [...text.matchAll(/^\s*Page (\d+)\.\s*$/gm)].map((m) => parseInt(m[1], 10));
+			if (nums.length > 0) {
+				const maxMarker = Math.max(...nums);
+				const expectedLast = resolveStagedLogical(pdfTotalPages);
+				if (maxMarker !== expectedLast) {
+					const ok = confirm(
+						`Page markers go up to Page ${maxMarker} but the PDF has ${pdfTotalPages} pages` +
+						` (expected last marker Page ${expectedLast}). Import anyway?`
+					);
+					if (!ok) return;
+				}
+			}
+			try {
+				const doc = await createDoc(title, text, undefined, currentPostprocessOpts());
+				try {
+					await savePdf(doc.id, pdfFile, pendingPdfName || 'document.pdf');
+				} catch (err: any) {
+					showToast(`Imported, but PDF caching failed: ${err?.message ?? err}`);
+				}
+				docs = await getAllDocs();
+				try {
+					pdfSizes = await getPdfSizes();
+				} catch {}
+				activeDoc = doc;
+				markdownDraft = doc.markdown;
+				renderBaseline = doc.markdown;
+				globalIdx = 0;
+				isEditing = false;
+				pdfPendingOcr = false;
+				pendingPdfName = '';
+				pageOverrides = {};
+				syncPostprocessOptsFromDoc(doc, true);
+				showToast('PDF + Markdown imported');
+				await tick();
+				await loadCachedPdf(doc.id);
+			} catch (err: any) {
+				showToast(`Import failed: ${err?.message ?? err}`);
+			}
+			return;
+		}
+		// Markdown-only import (no PDF): parse client-side, no backend needed.
+		try {
+			const doc = await createDoc(title, text, undefined, currentPostprocessOpts());
+			docs = await getAllDocs();
+			activeDoc = doc;
+			markdownDraft = doc.markdown;
+			renderBaseline = doc.markdown;
+			globalIdx = 0;
+			isEditing = false;
+			syncPostprocessOptsFromDoc(doc, true);
+			showToast('Markdown imported');
+		} catch (err: any) {
+			showToast(`Import failed: ${err?.message ?? err}`);
+		}
+	}
+
+	/** Logical `Page N.` number for a physical PDF page while staging (pre-OCR). */
+	function resolveStagedLogical(physical: number): number {
+		const ov = (pageOverrides as Record<number, number>)[physical];
+		if (ov !== undefined) return ov;
+		const base = optFirstPageNumber >= 1 ? optFirstPageNumber : 1;
+		return base + physical - 1;
+	}
+
+	function handlePageOverrideChange(physical: number, raw: string) {
+		const n = parseInt(raw, 10);
+		const next = { ...(pageOverrides as Record<number, number>) };
+		if (!Number.isFinite(n) || n < 1) delete next[physical];
+		else next[physical] = Math.floor(n);
+		pageOverrides = next;
 	}
 
 	// For manual trigger from PdfPane placeholder
@@ -464,7 +618,11 @@
 	if (!scrolledToMarker) {
 		const mdText = isEditing ? markdownDraft : (activeDoc?.markdown ?? markdownDraft);
 		const mdLen = mdText.length || 1;
-		const pm = activeDoc?.pageMap?.find((p) => p.page === pdfPageNum);
+		// `pageMap[i].page` is the logical number for physical page `i + 1`;
+		// prefer positional lookup so first-page offsets don't misalign.
+		const pm =
+			activeDoc?.pageMap?.[pdfPageNum - 1] ??
+			activeDoc?.pageMap?.find((p) => p.page === pdfPageNum);
 		const charStart = pm ? pm.char_start : ((pdfPageNum - 1) / Math.max(1, pdfTotalPages)) * mdLen;
 		const el = isEditing ? editorEl : (viewer ?? editorEl);
 		if (el) {
@@ -475,13 +633,28 @@
 	function nextPdfPage() {
 		if (pdfPageNum < pdfTotalPages) {
 			pdfPageNum++;
+			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
 		}
 	}
 	function prevPdfPage() {
 		if (pdfPageNum > 1) {
 			pdfPageNum--;
+			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
+		}
+	}
+
+	/** PDF→Markdown sync (#1): move the reader to the new PDF page's marker. */
+	function syncMarkdownToPdfPage(physical: number) {
+		if (isEditing || pdfPendingOcr) return;
+		const sentences = getGlobalSentences(sections);
+		if (sentences.length === 0) return;
+		const logical = physicalToLogical(physical, activeDoc?.pageMap);
+		const markerIdx = findPageMarkerIndex(sentences, logical);
+		if (markerIdx !== -1 && markerIdx !== globalIdx) {
+			if (isPlaying || useBackendTTS) seekTo(markerIdx);
+			else globalIdx = markerIdx;
 		}
 	}
 
@@ -518,15 +691,7 @@
 			// Pass filename explicitly so the backend always sees it,
 			// even if the File object was wrapped/proxied by state.
 			fd.append('file', fileToUpload, fileToUpload.name || 'upload.pdf');
-			fd.append(
-				'postprocess',
-				JSON.stringify({
-					combine_columns: optCombine,
-					normalize_uppercase: optUppercase,
-					ensure_punctuation: optPunct,
-					insert_page_markers: optPageMarkers
-				})
-			);
+			fd.append('postprocess', JSON.stringify(currentPostprocessOpts()));
 			const resp = await fetch(`${API_BASE}/api/ocr/jobs`, { method: 'POST', body: fd });
 			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 			const { job_id } = await resp.json();
@@ -587,6 +752,9 @@
 			renderBaseline = doc.markdown;
 			globalIdx = 0;
 			isEditing = false;
+			pdfPendingOcr = false;
+			pendingPdfName = '';
+			pageOverrides = {};
 			showToast('OCR completed');
 			ocrSucceeded = true;
 		} catch (e: any) {
@@ -613,6 +781,9 @@
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
 		sentencePlayer?.stop();
 		isPlaying = false;
+		pdfPendingOcr = false;
+		pendingPdfName = '';
+		pageOverrides = {};
 		clearPdfViewer();
 		activeDoc = d;
 		markdownDraft = d.markdown;
@@ -1073,6 +1244,7 @@
 	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} onLogoClick={handleLogoClick} onUploadClick={handleHeaderUpload} onMenuClick={handleMenuClick} />
 
 	<input bind:this={pdfInputEl} type="file" accept="application/pdf" onchange={onPdfSelected} class="hidden" />
+	<input bind:this={mdInputEl} type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onchange={onMarkdownSelected} class="hidden" />
 
 	{#if toast}
 		<div class="fixed top-16 right-4 bg-slate-800 border border-sky-500 text-slate-100 px-4 py-2 rounded-lg shadow z-50">{toast}</div>
@@ -1081,10 +1253,86 @@
 	<main class="flex-1 min-h-0 flex flex-col mx-auto w-full max-w-6xl px-4 py-4 gap-4">
 		{#if isOcrRunning}
 			<OcrProgressPane {ocrProgress} {ocrEta} />
+		{:else if pdfPendingOcr && pdfUrl}
+			<div class="bg-slate-800 border border-sky-500/40 rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center gap-3">
+				<div class="flex-1 min-w-0">
+					<div class="text-sm font-medium text-slate-100 truncate">Staged: {pendingPdfName || 'document.pdf'} ({pdfTotalPages} pages)</div>
+					<div class="text-xs text-slate-400">Preview the PDF, set page options, then extract — or attach its Markdown instead of OCR.</div>
+				</div>
+				<label class="flex items-center gap-2 text-xs text-slate-300">
+					First page number
+					<input
+						type="number"
+						min="1"
+						step="1"
+						value={optFirstPageNumber}
+						oninput={(e) => {
+							const n = parseInt((e.target as HTMLInputElement).value, 10);
+							optFirstPageNumber = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+						}}
+						class="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
+					/>
+				</label>
+				<div class="flex items-center gap-2">
+					<button onclick={triggerMarkdownUpload} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
+					<button onclick={cancelPendingPdf} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
+					<button onclick={runOcr} class="text-xs px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">Extract text</button>
+				</div>
+			</div>
+			<div class="{pdfVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-19rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full flex flex-col'}">
+				{#if pdfVisible}
+					<PdfPane
+						{pdfUrl}
+						bind:canvasEl
+						{pdfPageNum}
+						{pdfTotalPages}
+						onPrev={prevPdfPage}
+						onNext={nextPdfPage}
+						onUploadClick={triggerPdfUpload}
+						logicalPage={resolveStagedLogical(pdfPageNum)}
+						showOverrideInput={true}
+						pageOverrideText={pageOverrides[pdfPageNum] !== undefined ? String(pageOverrides[pdfPageNum]) : ''}
+						onPageOverrideInput={(v) => handlePageOverrideChange(pdfPageNum, v)}
+					/>
+				{/if}
+				{#if activeDoc}
+					<MarkdownPane
+						bind:this={markdownPaneRef}
+						bind:editorEl
+						{markdownDraft}
+						{sections}
+						{globalIdx}
+						{isEditing}
+						onDraftChange={onMarkdownDraftChange}
+						onEditToggle={handleEditToggle}
+						onEditSave={handleEditSave}
+						onEditCancel={handleEditCancel}
+						onOpenPostprocess={() => (showPostprocess = true)}
+						onDownloadMd={downloadMd}
+						onSaveAudio={saveAudioFile}
+						hasActiveDoc={!!activeDoc}
+						onSentenceClick={handleSentenceClick}
+					/>
+				{:else}
+					<div class="bg-slate-800 rounded-xl border border-slate-700 flex flex-col items-center justify-center gap-3 p-8 text-center min-h-[420px]">
+						<div class="text-sm text-slate-300">No document yet — extract the staged PDF or attach its Markdown.</div>
+						<div class="text-xs text-slate-500 max-w-sm">Markdown files with `Page N.` lines are validated against the PDF page count, then synced like OCR output.</div>
+					</div>
+				{/if}
+			</div>
 		{:else if activeDoc}
 			<div class="{pdfVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0 flex flex-col'}">
 				{#if pdfVisible}
-					<PdfPane {pdfUrl} bind:canvasEl {pdfPageNum} {pdfTotalPages} onPrev={prevPdfPage} onNext={nextPdfPage} onUploadClick={triggerPdfUpload} />
+					<PdfPane
+						{pdfUrl}
+						bind:canvasEl
+						{pdfPageNum}
+						{pdfTotalPages}
+						onPrev={prevPdfPage}
+						onNext={nextPdfPage}
+						onUploadClick={triggerPdfUpload}
+						logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
+					/>
 				{/if}
 				<MarkdownPane
 					bind:this={markdownPaneRef}
@@ -1107,10 +1355,15 @@
 		{:else}
 			<div class="flex-1 flex flex-col items-center justify-center gap-4 py-12 text-center">
 				<h2 class="text-lg font-semibold text-slate-200">No document selected</h2>
-				<p class="text-sm text-slate-400 max-w-md">Upload a PDF to extract text, or open a document from the library.</p>
-				<button onclick={handleHeaderUpload} class="mt-2 inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded-md font-medium">
-					Upload PDF
-				</button>
+				<p class="text-sm text-slate-400 max-w-md">Upload a PDF to extract text, upload Markdown directly, or open a document from the library.</p>
+				<div class="mt-2 flex flex-wrap items-center justify-center gap-2">
+					<button onclick={handleHeaderUpload} class="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded-md font-medium">
+						Upload PDF
+					</button>
+					<button onclick={triggerMarkdownUpload} class="inline-flex items-center gap-2 border border-slate-600 hover:bg-slate-800 text-slate-200 px-5 py-2 rounded-md font-medium">
+						Upload Markdown
+					</button>
+				</div>
 				<button onclick={() => (showLibrary = true)} class="text-sm text-slate-400 hover:text-slate-200 underline">
 					Open library ({docs.length} {docs.length === 1 ? 'doc' : 'docs'})
 				</button>
@@ -1173,6 +1426,10 @@
 		onPunctChange={(v) => (optPunct = v)}
 		onPageMarkersChange={(v) => (optPageMarkers = v)}
 		onUppercaseChange={(v) => (optUppercase = v)}
+		optFirstPageMarker={optFirstPageMarker}
+		onFirstPageMarkerChange={(v) => (optFirstPageMarker = v)}
+		optFirstPageNumber={optFirstPageNumber}
+		onFirstPageNumberChange={(v) => (optFirstPageNumber = v)}
 		{hasDirtyEdits}
 		onApply={applyPostprocess}
 	/>

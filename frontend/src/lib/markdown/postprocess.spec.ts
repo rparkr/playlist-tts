@@ -173,3 +173,21 @@ describe('applyPostprocessing', () => {
 		);
 	});
 });
+
+describe('page offsets', () => {
+	it('resolves logical pages with offset and overrides', async () => {
+		const { resolveLogicalPage } = await import('./postprocess');
+		expect(resolveLogicalPage(1, 1, null)).toBe(1);
+		expect(resolveLogicalPage(3, 5, null)).toBe(7);
+		expect(resolveLogicalPage(3, 5, { 3: 9 })).toBe(9);
+	});
+
+	it('joins with logical markers when offset', async () => {
+		const { joinPagesWithMarkers } = await import('./postprocess');
+		const { markdown, pageMap } = joinPagesWithMarkers(['P1 here.', 'P2 here.'], true, {
+			firstPageNumber: 5
+		});
+		expect(markdown).toContain('Page 6.');
+		expect(pageMap.map((p) => p.page)).toEqual([5, 6]);
+	});
+});

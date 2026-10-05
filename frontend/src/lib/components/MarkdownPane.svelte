@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { Pencil, Check, X, Settings, EllipsisVertical } from 'lucide-svelte';
 	import type { Section } from '$lib/markdown/parse';
 	import {
@@ -121,6 +122,47 @@
 			if (fullyVisible) return;
 			const top = viewer.scrollTop + (elRect.top - viewerRect.top) - 16;
 			viewer.scrollTo({ top, behavior: 'smooth' });
+		});
+	});
+
+	// Preserve scroll across the viewer↔editor swap so editing a 100-page
+	// doc lands at the same position instead of jumping to the top. The
+	// outer scroll container persists; only its content height changes, so a
+	// scroll *fraction* transfers across modes. Captures before the swap and
+	// restores after Svelte swaps the inner content.
+	let prevEditing = false;
+	$effect(() => {
+		if (isEditing === prevEditing) return;
+		const scroller = viewerEl;
+		const entering = isEditing && !prevEditing;
+		prevEditing = isEditing;
+		if (!scroller) return;
+		// Capture the pre-swap fraction, biasing toward the active sentence
+		// when it is currently visible (the common playback-follow case).
+		let fraction: number;
+		const maxBefore = scroller.scrollHeight - scroller.clientHeight;
+		const active = scroller.querySelector(
+			`[data-sentence-idx="${globalIdx}"]`
+		) as HTMLElement | null;
+		if (active && !entering) {
+			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
+		} else if (active && entering) {
+			const viewerRect = scroller.getBoundingClientRect();
+			const elRect = active.getBoundingClientRect();
+			const absTop = scroller.scrollTop + (elRect.top - viewerRect.top);
+			fraction = scroller.scrollHeight > 0 ? absTop / scroller.scrollHeight : 0;
+		} else {
+			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
+		}
+		fraction = Math.max(0, Math.min(1, fraction));
+		void tick().then(() => {
+			requestAnimationFrame(() => {
+				const el = viewerEl;
+				if (!el) return;
+				const maxAfter = el.scrollHeight - el.clientHeight;
+				if (maxAfter <= 0) return;
+				el.scrollTop = fraction * maxAfter;
+			});
 		});
 	});
 </script>

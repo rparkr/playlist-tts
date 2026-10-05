@@ -12,6 +12,10 @@
 		onPunctChange: (v: boolean) => void;
 		onPageMarkersChange: (v: boolean) => void;
 		onUppercaseChange: (v: boolean) => void;
+		optFirstPageMarker: boolean;
+		onFirstPageMarkerChange: (v: boolean) => void;
+		optFirstPageNumber: number;
+		onFirstPageNumberChange: (v: number) => void;
 		hasDirtyEdits: boolean;
 		onApply: () => void;
 	}
@@ -27,6 +31,10 @@
 		onPunctChange,
 		onPageMarkersChange,
 		onUppercaseChange,
+		optFirstPageMarker,
+		onFirstPageMarkerChange,
+		optFirstPageNumber,
+		onFirstPageNumberChange,
 		hasDirtyEdits,
 		onApply
 	}: Props = $props();
@@ -219,6 +227,32 @@
 						</span>
 					</span>
 				</label>
+
+			<div class="flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2.5">
+				<label class="flex items-start gap-3 cursor-pointer">
+					<input
+						type="checkbox"
+						checked={optFirstPageMarker}
+						onchange={(e) => onFirstPageMarkerChange((e.target as HTMLInputElement).checked)}
+						class="mt-0.5 accent-sky-500"
+					/>
+					<span class="flex-1 text-sm text-slate-200">First-page marker (emit “Page N.” before page 1)</span>
+				</label>
+				<label class="flex items-center gap-2 text-sm text-slate-200">
+					<span class="flex-1">First page number <span class="text-slate-400">(chapter scans start here)</span></span>
+					<input
+						type="number"
+						min="1"
+						step="1"
+						value={optFirstPageNumber}
+						oninput={(e) => {
+							const n = parseInt((e.target as HTMLInputElement).value, 10);
+							onFirstPageNumberChange(Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1);
+						}}
+						class="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-slate-100"
+					/>
+				</label>
+			</div>
 
 				<button
 					onclick={onApply}

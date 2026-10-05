@@ -126,3 +126,30 @@ describe('findPageMarkerIndex', () => {
 		expect(findPageMarkerIndex(['Just text.'], 3)).toBe(-1);
 	});
 });
+
+describe('findPageForSentence', () => {
+	it('maps sentence indexes to logical pages via markers', async () => {
+		const { findPageForSentence, logicalToPhysical, physicalToLogical } = await import('./parse');
+		const sentences = ['Intro.', 'Page 6.', 'Sixth page.', 'Page 9.', 'Ninth page.'];
+		expect(findPageForSentence(sentences, 0)).toBe(1);
+		expect(findPageForSentence(sentences, 2)).toBe(6);
+		expect(findPageForSentence(sentences, 4)).toBe(9);
+		const pageMap = [
+			{ page: 5, char_start: 0, char_end: 5, start_line: 1 },
+			{ page: 6, char_start: 5, char_end: 10, start_line: 2 },
+			{ page: 9, char_start: 10, char_end: 15, start_line: 3 }
+		];
+		expect(logicalToPhysical(9, pageMap, 3)).toBe(3);
+		expect(physicalToLogical(3, pageMap)).toBe(9);
+	});
+});
+
+describe('flat-h2 breadcrumbs', () => {
+	it('parents subsections under the latest chapter, not the first heading', async () => {
+		const { parseMarkdownStructure } = await import('./parse');
+		const md = '## ELECTRICAL GRID.\n\nIntro.\n\n## COMMUNICATIONS.\n\nIntro.\n\n## Radio Antenna Towers.\n\nTowers.';
+		const sections = parseMarkdownStructure(md);
+		const radio = sections.find((s) => s.heading === 'Radio Antenna Towers.');
+		expect(radio?.titles[0].toLowerCase()).toContain('communications');
+	});
+});

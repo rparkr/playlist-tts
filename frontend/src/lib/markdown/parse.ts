@@ -138,6 +138,7 @@ export function parseMarkdownStructure(mdText: string): Section[] {
 		}
 	}
 	flushSection();
+	fixFlatHeadings(sections);
 	return sections;
 }
 
@@ -151,6 +152,37 @@ export function getSectionParagraphs(section: Section): string[][] {
 /** True when the paragraph at `paraIdx` holds the section heading sentence(s). */
 export function isHeadingParagraph(section: Section, paraIdx: number): boolean {
 	return paraIdx === 0 && section.heading != null;
+}
+
+/** Map a logical `Page N.` number to its physical PDF page (1-indexed).
+ *
+ * `pageMap[i].page` holds the logical number for physical page `i + 1`
+ * (they coincide when no first-page offset or per-page overrides apply).
+ * Falls back to clamping `logical` into `[1, totalPages]` when no map
+ * entry matches (e.g. markers off or skipped illustration pages).
+ */
+export function logicalToPhysical(
+	logical: number,
+	pageMap: PageMapItem[] | undefined,
+	totalPages: number
+): number {
+	if (pageMap && pageMap.length > 0) {
+		const idx = pageMap.findIndex((p) => p.page === logical);
+		if (idx !== -1) return idx + 1;
+	}
+	const total = totalPages > 0 ? totalPages : logical;
+	return Math.max(1, Math.min(logical, total));
+}
+
+/** Map a physical PDF page (1-indexed) to its logical `Page N.` number. */
+export function physicalToLogical(
+	physical: number,
+	pageMap: PageMapItem[] | undefined
+): number {
+	if (pageMap && physical >= 1 && physical <= pageMap.length) {
+		return pageMap[physical - 1].page ?? physical;
+	}
+	return physical;
 }
 
 /** Flatten sections to global sentence list */
@@ -168,6 +200,81 @@ export function findPageMarkerIndex(sentences: string[], page: number): number {
 	if (page <= 1) return -1;
 	const want = `Page ${page}.`;
 	return sentences.findIndex((s) => s.trim() === want);
+}
+
+const PAGE_MARKER_RE = /^\s*Page (\d+)\.\s*$/;
+
+/** Logical page number for a global sentence index (Markdown→PDF sync).
+ *
+ * Counts `Page N.` markers at or before `globalIdx`: page 1 until the
+ * first marker, then the marker's number afterwards. Returns the marker's
+ * logical number (which may differ from the physical PDF page when a
+ * first-page offset or per-page overrides are used — callers map
+ * logical→physical via the page map).
+ */
+export function findPageForSentence(sentences: string[], globalIdx: number): number {
+	let page = 1;
+	const end = Math.max(0, Math.min(globalIdx, sentences.length - 1));
+	for (let i = 0; i <= end; i++) {
+		const m = PAGE_MARKER_RE.exec(sentences[i]);
+		if (m) page = parseInt(m[1], 10);
+	}
+	return page;
+}
+
+/** True when a heading looks like an ALL-CAPS chapter title.
+ *
+ * Strips non-letters; requires ≥4 letters and fully uppercase so short
+ * acronyms (`NASA`) and Title Case subsections don't promote.
+ */
+function isChapterHeading(text: string): boolean {
+	const letters = text.replace(/[^A-Za-z]/g, '');
+	return letters.length >= 4 && letters === letters.toUpperCase();
+}
+
+/** Restructure flat-heading docs (e.g. all-`h2` scans) into chapters.
+ *
+ * Docling often emits every heading at one level, which leaves the
+ * breadcrumb's top level stuck at the first heading (`Electrical grid >
+ * Radio towers` instead of `Communications > Radio towers`). When all
+ * sections share one level and unique ALL-CAPS headings exist, promote
+ * those to level 1 chapters and parent following subsections under the
+ * most recent chapter. Repeating ALL-CAPS callouts (e.g. `KEEP AN EYE
+ * OUT.` ×37) are never chapters — only headings seen once qualify.
+ */
+export function fixFlatHeadings(sections: Section[]): void {
+	if (sections.length < 3) return;
+	const levels = new Set(sections.map((s) => s.level));
+	if (levels.size !== 1) return;
+	const counts = new Map<string, number>();
+	for (const s of sections) {
+		if (!s.heading) continue;
+		const key = s.heading.trim().toLowerCase();
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const chapterKeys = new Set<string>();
+	for (const s of sections) {
+		if (!s.heading || !isChapterHeading(s.heading)) continue;
+		const key = s.heading.trim().toLowerCase();
+		if ((counts.get(key) ?? 0) === 1) chapterKeys.add(key);
+	}
+	if (chapterKeys.size === 0) return;
+	let currentChapter: string | null = null;
+	for (const s of sections) {
+		const key = (s.heading ?? '').trim().toLowerCase();
+		if (s.heading && chapterKeys.has(key)) {
+			currentChapter = s.heading.trim().replace(/\.+$/, '');
+			s.titles = [currentChapter];
+			s.level = 1;
+		} else if (currentChapter && s.heading) {
+			const own = s.heading.trim().replace(/\.+$/, '');
+			s.titles = own.toLowerCase() === currentChapter.toLowerCase() ? [currentChapter] : [currentChapter, own];
+			s.level = 2;
+		} else if (currentChapter) {
+			s.titles = [currentChapter, ...(s.titles.slice(-1))];
+			s.level = 2;
+		}
+	}
 }
 
 /** Resolve which sections the reader (viewer + TTS) should use right now.
