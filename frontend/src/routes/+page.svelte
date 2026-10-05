@@ -40,7 +40,7 @@
 	import MarkdownPane from '$lib/components/MarkdownPane.svelte';
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
-	import { formatEta, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
+	import { formatEta, formatRemaining, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
 	import {
 		LS_KEYS,
 		URL_PARAMS,
@@ -293,10 +293,8 @@
 		if (all.length === 0) return '';
 		const remaining = all.slice(globalIdx).join(' ');
 		const words = remaining.trim().split(/\s+/).filter(Boolean).length;
-		const secs = (words / (150 / 60)) / synthRate;
-		const m = Math.floor(secs / 60);
-		const s = Math.round(secs % 60);
-		return `-${m}:${String(s).padStart(2, '0')}`;
+		const secs = words / (150 / 60) / synthRate;
+		return formatRemaining(secs);
 	});
 
 	let ocrEta: string = $derived.by(() => {

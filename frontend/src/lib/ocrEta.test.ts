@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	fallbackEtaSeconds,
 	formatEta,
+	formatRemaining,
 	resolveAnchoredEta,
 	tickDownEta
 } from './ocrEta';
@@ -46,5 +47,24 @@ describe('ocrEta countdown', () => {
 		expect(formatEta(18.4)).toBe('0:18');
 		expect(formatEta(74)).toBe('1:14');
 		expect(formatEta(-3)).toBe('0:00');
+	});
+
+	it('formats remaining under an hour as -m:ss', () => {
+		expect(formatRemaining(125)).toBe('-2:05');
+		expect(formatRemaining(59.4)).toBe('-0:59');
+		expect(formatRemaining(3599)).toBe('-59:59');
+	});
+
+	it('formats remaining of an hour or more as -h:mm:ss', () => {
+		expect(formatRemaining(382 * 60 + 45)).toBe('-6:22:45');
+		expect(formatRemaining(3600)).toBe('-1:00:00');
+		expect(formatRemaining(3600 * 10 + 60 + 5)).toBe('-10:01:05');
+	});
+
+	it('rounds before splitting so seconds never show :60', () => {
+		expect(formatRemaining(119.6)).toBe('-2:00');
+		// Rounding that carries over the hour boundary switches branches.
+		expect(formatRemaining(3599.6)).toBe('-1:00:00');
+		expect(formatRemaining(-3)).toBe('-0:00');
 	});
 });
