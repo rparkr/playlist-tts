@@ -341,6 +341,17 @@ export async function deleteVoice(id: string): Promise<void> {
 	await db.delete('voices', id);
 }
 
+/** Rename a cloned voice; trims whitespace and keeps the existing name when blank. */
+export async function renameVoice(id: string, newName: string): Promise<VoiceRecord | undefined> {
+	const db = await getDB();
+	const record = await db.get('voices', id);
+	if (!record) return undefined;
+	const clean = newName.trim();
+	if (clean) record.name = clean;
+	await db.put('voices', record);
+	return record;
+}
+
 export async function getVoice(id: string): Promise<VoiceRecord | undefined> {
 	const db = await getDB();
 	return db.get('voices', id);

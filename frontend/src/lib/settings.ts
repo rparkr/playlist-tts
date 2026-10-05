@@ -155,6 +155,75 @@ export function withVoiceForEngine(
 	return next;
 }
 
+/** Slugify a cloned-voice name for the shareable `?voice=` URL parameter. */
+export function voiceSlug(name: string): string {
+	const s = name
+		.toLowerCase()
+		.normalize('NFKD')
+		.replace(/[\u0300-\u036f]/g, '')
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.replace(/-{2,}/g, '-');
+	return s || 'voice';
+}
+
+/**
+ * Check a candidate clone name against built-in voice names
+ * (case-insensitive). Collisions are blocked with an inline warning so the
+ * user picks another name — never auto-suffixed.
+ */
+export function isBuiltinVoiceName(
+	name: string,
+	builtinVoices: readonly { name: string }[]
+): boolean {
+	const clean = name.trim().toLowerCase();
+	if (!clean) return false;
+	return builtinVoices.some((v) => v.name.toLowerCase() === clean);
+}
+
+/**
+ * Serialize a voice selection for the `?voice=` URL parameter: cloned voices
+ * use their slugified name, everything else (built-in server voices, device
+ * voices) already reads well and passes through unchanged.
+ */
+export function voiceUrlParam(
+	voiceId: string,
+	customVoices: readonly { id: string; name: string }[]
+): string {
+	const custom = customVoices.find((v) => v.id === voiceId);
+	if (custom) return voiceSlug(custom.name);
+	return voiceId;
+}
+
+export interface VoiceLookup {
+	builtinVoices: readonly { name: string }[];
+	customVoices: readonly { id: string; name: string }[];
+}
+
+/**
+ * Resolve a `?voice=` URL parameter to a voice ID. Accepts (in order) an
+ * exact custom-voice ID (back-compat with older links), an exact built-in
+ * name, a slugified clone name (`?voice=my-clone`), or an exact clone name.
+ * Returns `fallback` when nothing matches.
+ */
+export function resolveVoiceId(
+	param: string | null | undefined,
+	lookup: VoiceLookup,
+	fallback: string
+): string {
+	if (!param) return fallback;
+	if (lookup.customVoices.some((v) => v.id === param)) return param;
+	const builtin = lookup.builtinVoices.find((v) => v.name === param);
+	if (builtin) return builtin.name;
+	const slug = voiceSlug(param);
+	const bySlug = lookup.customVoices.find((v) => voiceSlug(v.name) === slug);
+	if (bySlug) return bySlug.id;
+	const lower = param.toLowerCase();
+	const byName = lookup.customVoices.find((v) => v.name.toLowerCase() === lower);
+	if (byName) return byName.id;
+	return fallback;
+}
+
 /**
  * Return a copy of `voices` sorted alphabetically by `name`
  * (case-insensitive). Used to keep voice pickers stable with cloned voices

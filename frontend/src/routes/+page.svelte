@@ -12,6 +12,8 @@
 		reapplyPostprocessing,
 		getVoices as getCustomVoices,
 		saveVoice,
+		renameVoice,
+		deleteVoice,
 		migrateFromLocalStorage,
 		savePdf,
 		getPdf,
@@ -49,9 +51,12 @@
 		parseSentenceIndex,
 		parsePostprocessFlags,
 		parseVoiceByEngine,
+		isBuiltinVoiceName,
+		resolveVoiceId,
 		serializePostprocessFlags,
 		serializeVoiceByEngine,
 		voiceForEngine,
+		voiceUrlParam,
 		withVoiceForEngine,
 		resolveWithUrlPrecedence,
 		progressKey,
@@ -200,12 +205,16 @@
 		useBackendTTS = engine === 'pocket';
 		// Per-engine voice: stored map first, legacy single key migrates into
 		// the current engine's slot, URL `voice` wins for the current engine.
+		// The URL carries clone *names* (slugified); stored state keeps IDs.
 		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
 			device: null,
 			pocket: null
 		};
 		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
-		if (voiceParam) storedMap[engine] = voiceParam;
+		if (voiceParam) {
+			const fallbackVoice = storedMap[engine] ?? storedVoice ?? 'alba';
+			storedMap[engine] = resolveVoiceId(voiceParam, { builtinVoices, customVoices }, fallbackVoice);
+		}
 		voiceByEngine = storedMap;
 		selectedVoiceId = voiceForEngine(voiceByEngine, engine, 'alba');
 		// Postprocessing defaults: last-set global prefs until a doc overrides.
@@ -280,7 +289,8 @@
 			url.searchParams.set(URL_PARAMS.doc, activeDoc.slug ?? activeDoc.id);
 			url.searchParams.set(URL_PARAMS.sentence, String(globalIdx));
 			url.searchParams.set(URL_PARAMS.rate, String(synthRate));
-			url.searchParams.set(URL_PARAMS.voice, selectedVoiceId);
+			// Cloned voices are deep-linked by slugified name, not raw ID.
+			url.searchParams.set(URL_PARAMS.voice, voiceUrlParam(selectedVoiceId, customVoices));
 			url.searchParams.set(URL_PARAMS.engine, useBackendTTS ? 'pocket' : 'device');
 			history.replaceState(null, '', url.toString());
 		}
@@ -740,14 +750,71 @@
 			window.speechSynthesis.onvoiceschanged = refreshSynthVoices;
 		}
 	});
+	/**
+	 * Prompt for a clone name, blocking names that collide with built-in
+	 * voices (warn-and-require-rename: no auto-suffix). Returns null when the
+	 * user cancels.
+	 */
+	function promptForVoiceName(base: string, label: string): string | null {
+		const cleanBase = base.trim() || 'voice';
+		const first = prompt(label, cleanBase);
+		if (first === null) return null;
+		let name = first.trim() || cleanBase;
+		while (isBuiltinVoiceName(name, builtinVoices)) {
+			const retry = prompt(
+				`"${name}" is already a built-in voice name. Enter a different name:`,
+				name
+			);
+			if (retry === null) return null;
+			name = retry.trim() || name;
+		}
+		return name;
+	}
+
+	/**
+	 * Rename a cloned voice. Returns an error message when the rename is
+	 * blocked (built-in name collision), null on success.
+	 */
+	async function handleRenameVoice(id: string, newName: string): Promise<string | null> {
+		const clean = newName.trim();
+		if (!clean) return 'Enter a name.';
+		if (isBuiltinVoiceName(clean, builtinVoices)) {
+			return `"${clean}" is already a built-in voice name. Choose another name.`;
+		}
+		const updated = await renameVoice(id, clean);
+		if (!updated) return 'Voice not found.';
+		customVoices = await getCustomVoices();
+		return null;
+	}
+
+	async function handleDeleteVoice(id: string) {
+		const doomed = customVoices.find((v) => v.id === id);
+		if (doomed && !confirm(`Delete cloned voice "${doomed.name}"?`)) return;
+		await deleteVoice(id);
+		customVoices = await getCustomVoices();
+		// Park any slot that pointed at the deleted voice onto a built-in.
+		const fallback = builtinVoices[0]?.name ?? 'alba';
+		voiceByEngine = {
+			device: voiceByEngine.device === id ? fallback : voiceByEngine.device,
+			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket
+		};
+		if (selectedVoiceId === id) {
+			selectedVoiceId = fallback;
+			if (isPlaying && useBackendTTS) playBackend();
+		}
+	}
+
 	async function onVoiceFile(e: Event) {
 		const input = e.target as HTMLInputElement;
 		if (!input.files?.[0]) return;
 		const file = input.files[0];
 		if (file.name.toLowerCase().endsWith('.safetensors')) {
 			const base = file.name.replace(/\.safetensors$/i, '') || 'voice';
-			let name = prompt('Name this voice (from .safetensors):', base) ?? base;
-			name = name.trim() || base;
+			const name = promptForVoiceName(base, 'Name this voice (from .safetensors):');
+			if (name === null) {
+				(input as HTMLInputElement).value = '';
+				return;
+			}
 			const blob = new Blob([await file.arrayBuffer()], { type: 'application/octet-stream' });
 			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
 			await saveVoice(record);
@@ -765,8 +832,8 @@
 			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 			const blob = await resp.blob();
 			const base = file.name.replace(/\.[^.]+$/, '') || 'voice';
-			let name = prompt('Name this voice:', base) ?? base;
-			name = name.trim() || base;
+			const name = promptForVoiceName(base, 'Name this voice:');
+			if (name === null) return;
 			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
@@ -1087,6 +1154,8 @@
 		{synthVoices}
 		{selectedVoiceId}
 		onVoiceChange={handleVoiceChange}
+		onRenameVoice={handleRenameVoice}
+		onDeleteVoice={handleDeleteVoice}
 		{synthRate}
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}

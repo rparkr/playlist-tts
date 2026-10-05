@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+	isBuiltinVoiceName,
 	parseEngine,
 	parseRate,
 	parseSentenceIndex,
 	parsePostprocessFlags,
-	serializePostprocessFlags,
 	parseVoiceByEngine,
+	resolveVoiceId,
+	serializePostprocessFlags,
 	serializeVoiceByEngine,
 	sortVoiceOptions,
 	voiceForEngine,
+	voiceSlug,
+	voiceUrlParam,
 	withVoiceForEngine,
 	resolveWithUrlPrecedence,
 	progressKey
@@ -148,5 +152,47 @@ describe('sortVoiceOptions', () => {
 
 	it('returns an empty array for empty input', () => {
 		expect(sortVoiceOptions([])).toEqual([]);
+	});
+});
+
+describe('voice URL names', () => {
+	const lookup = {
+		builtinVoices: [{ name: 'alba' }, { name: 'mara' }],
+		customVoices: [
+			{ id: 'voice_abc', name: 'My Clone Voice' },
+			{ id: 'voice_xyz', name: 'Norah' }
+		]
+	};
+
+	it('slugifies clone names for URLs', () => {
+		expect(voiceSlug('My Clone Voice')).toBe('my-clone-voice');
+		expect(voiceSlug('  Héllo—World!  ')).toBe('hello-world');
+		expect(voiceSlug('')).toBe('voice');
+	});
+
+	it('serializes clones by slug and passes other voices through', () => {
+		expect(voiceUrlParam('voice_abc', lookup.customVoices)).toBe('my-clone-voice');
+		expect(voiceUrlParam('alba', lookup.customVoices)).toBe('alba');
+		expect(voiceUrlParam('Google US English', lookup.customVoices)).toBe('Google US English');
+	});
+
+	it('resolves slugs, names, IDs, and builtins back to IDs', () => {
+		expect(resolveVoiceId('my-clone-voice', lookup, 'fb')).toBe('voice_abc');
+		expect(resolveVoiceId('My Clone Voice', lookup, 'fb')).toBe('voice_abc');
+		expect(resolveVoiceId('voice_xyz', lookup, 'fb')).toBe('voice_xyz');
+		expect(resolveVoiceId('mara', lookup, 'fb')).toBe('mara');
+	});
+
+	it('falls back when the parameter matches nothing', () => {
+		expect(resolveVoiceId('no-such-voice', lookup, 'fb')).toBe('fb');
+		expect(resolveVoiceId(null, lookup, 'fb')).toBe('fb');
+		expect(resolveVoiceId('', lookup, 'fb')).toBe('fb');
+	});
+
+	it('detects built-in name collisions case-insensitively', () => {
+		expect(isBuiltinVoiceName('Alba', lookup.builtinVoices)).toBe(true);
+		expect(isBuiltinVoiceName('  MARA  ', lookup.builtinVoices)).toBe(true);
+		expect(isBuiltinVoiceName('My Clone Voice', lookup.builtinVoices)).toBe(false);
+		expect(isBuiltinVoiceName('', lookup.builtinVoices)).toBe(false);
 	});
 });

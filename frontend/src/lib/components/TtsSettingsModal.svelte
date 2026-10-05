@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X } from 'lucide-svelte';
+	import { Check, Pencil, Trash2, X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
 	import { sortVoiceOptions } from '$lib/settings';
 
@@ -13,6 +13,8 @@
 		synthVoices: SpeechSynthesisVoice[];
 		selectedVoiceId: string;
 		onVoiceChange: (id: string) => void;
+		onRenameVoice: (id: string, newName: string) => Promise<string | null>;
+		onDeleteVoice: (id: string) => void;
 		synthRate: number;
 		onRateChange: (rate: number) => void;
 		onVoiceFile: (e: Event) => void;
@@ -29,6 +31,8 @@
 		synthVoices,
 		selectedVoiceId,
 		onVoiceChange,
+		onRenameVoice,
+		onDeleteVoice,
 		synthRate,
 		onRateChange,
 		onVoiceFile,
@@ -36,6 +40,32 @@
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
+
+	// Inline rename state for the "My voices" management list.
+	let editingVoiceId: string | null = $state(null);
+	let editName: string = $state('');
+	let renameError: string | null = $state(null);
+
+	function startRename(cv: VoiceRecord) {
+		editingVoiceId = cv.id;
+		editName = cv.name;
+		renameError = null;
+	}
+
+	function cancelRename() {
+		editingVoiceId = null;
+		editName = '';
+		renameError = null;
+	}
+
+	async function saveRename(id: string) {
+		const err = await onRenameVoice(id, editName);
+		if (err) {
+			renameError = err;
+			return;
+		}
+		cancelRename();
+	}
 
 	// Alphabetical pickers with cloned voices pinned in the top optgroup.
 	let sortedBuiltinVoices = $derived(sortVoiceOptions(builtinVoices));
@@ -129,41 +159,41 @@
 						onchange={(e) => onVoiceChange((e.target as HTMLSelectElement).value)}
 						class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
 					>
-						{#if !useBackendTTS}
-							{#if sortedCustomVoices.length}
-								<optgroup label="My voices (requires Pocket TTS)">
-									{#each sortedCustomVoices as cv}
-										<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
-									{/each}
-								</optgroup>
-							{/if}
-							<optgroup label="Device voices">
-								{#each synthVoices as voice, i}
-									<option value={voice.name}>{voice.name} ({voice.lang})</option>
-								{/each}
-								{#if synthVoices.length === 0}
-									<option value="">Default</option>
-								{/if}
-							</optgroup>
-						{:else}
-							{#if sortedCustomVoices.length}
-								<optgroup label="My voices (IndexedDB)">
-									{#each sortedCustomVoices as cv}
-										<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
-									{/each}
-								</optgroup>
-							{/if}
-							<optgroup label="Built-in (server)">
-								{#each sortedBuiltinVoices as v}
-									<option value={v.name}>{v.name}</option>
-								{/each}
-							</optgroup>
-							<optgroup label="Device voices (fallback)">
-								{#each synthVoices as voice}
-									<option value={voice.name}>{voice.name} ({voice.lang})</option>
+					{#if !useBackendTTS}
+						{#if sortedCustomVoices.length}
+							<optgroup label="My voices (requires Pocket TTS)">
+								{#each sortedCustomVoices as cv}
+									<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
 								{/each}
 							</optgroup>
 						{/if}
+						<optgroup label="Device voices">
+							{#each synthVoices as voice, i}
+								<option value={voice.name}>{voice.name} ({voice.lang})</option>
+							{/each}
+							{#if synthVoices.length === 0}
+								<option value="">Default</option>
+							{/if}
+						</optgroup>
+					{:else}
+						{#if sortedCustomVoices.length}
+							<optgroup label="My voices (IndexedDB)">
+								{#each sortedCustomVoices as cv}
+									<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
+								{/each}
+							</optgroup>
+						{/if}
+						<optgroup label="Built-in (server)">
+							{#each sortedBuiltinVoices as v}
+								<option value={v.name}>{v.name}</option>
+							{/each}
+						</optgroup>
+						<optgroup label="Device voices (fallback)">
+							{#each synthVoices as voice}
+								<option value={voice.name}>{voice.name} ({voice.lang})</option>
+							{/each}
+						</optgroup>
+					{/if}
 					</select>
 
 					<div class="text-xs text-slate-400">
@@ -177,6 +207,65 @@
 					/>
 					{#if customVoices.find((v) => v.id === selectedVoiceId)}
 						<div class="text-xs text-sky-400">✓ Cloned voice: {customVoices.find((v) => v.id === selectedVoiceId)?.name}</div>
+					{/if}
+					{#if sortedCustomVoices.length}
+						<div class="flex flex-col gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 p-2.5">
+							<span class="text-xs font-medium text-slate-300">Manage cloned voices</span>
+							{#each sortedCustomVoices as cv (cv.id)}
+								<div class="flex items-center gap-2">
+									{#if editingVoiceId === cv.id}
+										<input
+											type="text"
+											bind:value={editName}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void saveRename(cv.id);
+												if (e.key === 'Escape') cancelRename();
+											}}
+											class="min-w-0 flex-1 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
+											aria-label="Voice name"
+										/>
+										<button
+											onclick={() => void saveRename(cv.id)}
+											aria-label="Save name"
+											title="Save name"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700 text-emerald-400"
+										>
+											<Check size={15} />
+										</button>
+										<button
+											onclick={cancelRename}
+											aria-label="Cancel rename"
+											title="Cancel rename"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400"
+										>
+											<X size={15} />
+										</button>
+									{:else}
+										<span class="min-w-0 flex-1 truncate text-sm text-slate-200">{cv.name}</span>
+										<span class="text-xs text-slate-500 tabular-nums">{(cv.bytes / 1024 / 1024).toFixed(1)} MB</span>
+										<button
+											onclick={() => startRename(cv)}
+											aria-label={`Rename ${cv.name}`}
+											title="Rename"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-slate-200"
+										>
+											<Pencil size={15} />
+										</button>
+										<button
+											onclick={() => onDeleteVoice(cv.id)}
+											aria-label={`Delete ${cv.name}`}
+											title="Delete"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-red-400"
+										>
+											<Trash2 size={15} />
+										</button>
+									{/if}
+								</div>
+								{#if renameError && editingVoiceId === cv.id}
+									<div class="text-xs text-red-400">{renameError}</div>
+								{/if}
+							{/each}
+						</div>
 					{/if}
 				</div>
 
