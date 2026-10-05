@@ -14,6 +14,14 @@ class PostprocessOptions(BaseModel):
     insert_page_markers: bool = True
     # Honored by the LLM engine's strict join; the Docling pipeline ignores it.
     first_page_marker: bool = False
+    # Logical number of physical PDF page 1 (chapter-by-chapter scans).
+    first_page_number: int = Field(default=1, ge=1)
+    # Physical (1-indexed) → logical page overrides (skipped illustrations).
+    page_overrides: dict[int, int] | None = Field(default=None)
+    # Digital-native text fast path (pdfplumber) tuning.
+    use_text_extract: bool = True
+    text_min_chars: int = Field(default=200, ge=0)
+    text_coverage_min: float = Field(default=0.6, ge=0.0, le=1.0)
 
     @field_validator("normalize_uppercase", mode="before")
     @classmethod

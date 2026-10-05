@@ -364,7 +364,40 @@ def ensure_punctuation(markdown: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def insert_page_markers(markdown: str, page_map: list[PageMapItem]) -> str:
+def normalize_page_overrides(raw: dict[int, int] | dict[str, int] | None) -> dict[int, int]:
+    """Coerce page-override keys/values to positive ints (JSON keys arrive as str)."""
+    if not raw:
+        return {}
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            pk, pv = int(k), int(v)
+        except (TypeError, ValueError):
+            continue
+        if pk >= 1 and pv >= 1:
+            out[pk] = pv
+    return out
+
+
+def resolve_logical_page(
+    physical: int,
+    first_page_number: int = 1,
+    page_overrides: dict[int, int] | dict[str, int] | None = None,
+) -> int:
+    """Map a physical PDF page (1-indexed) to its logical `Page N.` number."""
+    overrides = normalize_page_overrides(page_overrides)
+    if physical in overrides:
+        return overrides[physical]
+    base = first_page_number if first_page_number and first_page_number >= 1 else 1
+    return base + physical - 1
+
+
+def insert_page_markers(
+    markdown: str,
+    page_map: list[PageMapItem],
+    first_page_number: int = 1,
+    page_overrides: dict[int, int] | dict[str, int] | None = None,
+) -> str:
     """Insert 'Page N.' markers at page boundaries after sentence completion.
 
     Assumes `page_map` is sorted ascending. Each marker is inserted as a
@@ -380,6 +413,10 @@ def insert_page_markers(markdown: str, page_map: list[PageMapItem]) -> str:
         return markdown
 
     page_map_sorted = sorted(page_map, key=lambda x: x.page)
+    # Logical number for the page following `item`: prefer the next entry's
+    # stored logical number (it already encodes first-page offsets and
+    # per-page overrides); fall back to resolving from physical position.
+    logical_by_pos = [p.page for p in page_map_sorted]
     result = markdown
     # Terminator with optional closing quotes/parens/brackets, followed by
     # whitespace or end-of-string. Using lookahead so match ends right after
@@ -390,7 +427,10 @@ def insert_page_markers(markdown: str, page_map: list[PageMapItem]) -> str:
     # a deferred insertion from overtaking it and reversing marker order.
     next_marker_pos: int | None = None
 
-    for item in reversed(page_map_sorted[:-1]):
+    for pos in range(len(page_map_sorted) - 1, -1, -1):
+        if pos >= len(page_map_sorted) - 1:
+            continue
+        item = page_map_sorted[pos]
         # Use original char_end directly — iterating reversed means later
         # insertions (higher indices) do not shift earlier prefix indices.
         insert_at = item.char_end
@@ -450,7 +490,10 @@ def insert_page_markers(markdown: str, page_map: list[PageMapItem]) -> str:
             clamped = max(0, clamped)
             new_insert_at = clamped
 
-        next_page = item.page + 1
+        if pos + 1 < len(logical_by_pos):
+            next_page = logical_by_pos[pos + 1]
+        else:
+            next_page = resolve_logical_page(pos + 2, first_page_number, page_overrides)
         marker = f"\n\nPage {next_page}.\n\n"
 
         # Idempotency: skip if marker already present near insertion point.
@@ -604,7 +647,58 @@ def parse_markdown_structure(md_text: str) -> list[Section]:
             current_lines.append(line)
 
     flush_section()
+    _fix_flat_headings(sections)
     return sections
+
+
+def _is_chapter_heading(text: str) -> bool:
+    """Return True when a heading looks like an ALL-CAPS chapter title."""
+    letters = re.sub(r"[^A-Za-z]", "", text)
+    return len(letters) >= 4 and letters == letters.upper()
+
+
+def _fix_flat_headings(sections: list[Section]) -> None:
+    """Restructure flat-heading docs into chapters (breadcrumb fix).
+
+    Mirrors the frontend `fixFlatHeadings`: when every section shares one
+    heading level and unique ALL-CAPS headings exist, promote those to
+    level-1 chapters and parent following subsections under the most
+    recent chapter. Repeating callouts (e.g. `KEEP AN EYE OUT.` ×37) never
+    qualify — only headings seen once become chapters.
+    """
+    if len(sections) < 3:
+        return
+    if len({s.level for s in sections}) != 1:
+        return
+    counts: dict[str, int] = {}
+    for s in sections:
+        if not s.heading:
+            continue
+        key = s.heading.strip().lower()
+        counts[key] = counts.get(key, 0) + 1
+    chapter_keys = {
+        s.heading.strip().lower()
+        for s in sections
+        if s.heading
+        and _is_chapter_heading(s.heading)
+        and counts.get(s.heading.strip().lower(), 0) == 1
+    }
+    if not chapter_keys:
+        return
+    current: str | None = None
+    for s in sections:
+        key = (s.heading or "").strip().lower()
+        if s.heading and key in chapter_keys:
+            current = s.heading.strip().rstrip(".")
+            s.titles = [current]
+            s.level = 1
+        elif current and s.heading:
+            own = s.heading.strip().rstrip(".")
+            s.titles = [current] if own.lower() == current.lower() else [current, own]
+            s.level = 2
+        elif current:
+            s.titles = [current, *(s.titles[-1:])]
+            s.level = 2
 
 
 def has_page_breaks(markdown: str) -> bool:
@@ -625,7 +719,11 @@ def _first_sentence_end(text: str) -> int | None:
 
 
 def join_pages_with_markers(
-    pages: list[str], insert_markers: bool
+    pages: list[str],
+    insert_markers: bool,
+    first_page_number: int = 1,
+    page_overrides: dict[int, int] | dict[str, int] | None = None,
+    first_page_marker: bool = False,
 ) -> tuple[str, list[PageMapItem]]:
     """Join per-page texts with `Page N.` markers, tracking exact offsets.
 
@@ -634,23 +732,57 @@ def join_pages_with_markers(
     and the marker is deferred to after that sentence — so `Page N` never
     splits a sentence, but also never lands mid-page inside a column.
     Returns (markdown, page_map) with exact char offsets.
+
+    `page_map[i].page` holds the *logical* number (`first_page_number` +
+    physical - 1 unless overridden); position `i` encodes the physical page.
     """
-    # Strip empty pages from Docling artefacts (e.g. leading/trailing breaks)
-    # while keeping at least one page.
-    non_empty = [p for p in pages if p.strip()]
-    effective = non_empty if non_empty else pages
+    overrides = normalize_page_overrides(page_overrides)
+    keep_alignment = bool(overrides) or (first_page_number or 1) != 1 or first_page_marker
+
+    def _logical(physical: int) -> int:
+        return resolve_logical_page(physical, first_page_number, overrides)
+
+    if keep_alignment:
+        # Keep empty pages (illustrations) so physical↔logical stay aligned.
+        effective = [(p or "").strip("\n") for p in pages]
+        physical_nos = list(range(1, len(effective) + 1))
+    else:
+        # Legacy: strip empty pages from Docling artefacts (e.g.
+        # leading/trailing breaks) while keeping at least one page.
+        non_empty = [p for p in pages if p.strip()]
+        effective = non_empty if non_empty else pages
+        physical_nos = list(range(1, len(effective) + 1))
     total = len(effective)
-    if total <= 1:
+    if total <= 0:
+        return "", [PageMapItem(page=_logical(1), char_start=0, char_end=0, start_line=1)]
+    if total == 1 and not (insert_markers and first_page_marker):
         md = effective[0].strip() if effective else ""
-        return md, [PageMapItem(page=1, char_start=0, char_end=len(md), start_line=1)]
+        logical = _logical(physical_nos[0]) if physical_nos else _logical(1)
+        return md, [PageMapItem(page=logical, char_start=0, char_end=len(md), start_line=1)]
+    if total == 1 and insert_markers and first_page_marker:
+        body = effective[0].strip()
+        logical = _logical(physical_nos[0])
+        md = f"\n\nPage {logical}.\n\n{body}" if body else f"\n\nPage {logical}.\n\n"
+        md = md.strip()
+        # Recompute offsets: marker + body; page covers body only.
+        start = md.find(body) if body else len(md)
+        return md, [
+            PageMapItem(
+                page=logical,
+                char_start=start,
+                char_end=start + len(body),
+                start_line=md[:start].count("\n") + 1,
+            )
+        ]
 
     if not insert_markers:
         md_parts: list[str] = []
         page_map: list[PageMapItem] = []
         offset = 0
-        for i, page in enumerate(effective):
+        for pos, page in enumerate(effective):
+            physical = physical_nos[pos]
             body = page.strip()
-            if i > 0:
+            if pos > 0:
                 md_parts.append("\n\n")
                 offset += 2
             cs = offset
@@ -659,7 +791,9 @@ def join_pages_with_markers(
             ce = offset
             start_line = "".join(md_parts)[:cs].count("\n") + 1 if cs else 1
             page_map.append(
-                PageMapItem(page=i + 1, char_start=cs, char_end=ce, start_line=start_line)
+                PageMapItem(
+                    page=_logical(physical), char_start=cs, char_end=ce, start_line=start_line
+                )
             )
         return "".join(md_parts), page_map
 
@@ -672,14 +806,23 @@ def join_pages_with_markers(
         out_parts.append(text)
         offset_out += len(text)
 
+    first_physical = physical_nos[0]
+    if first_page_marker:
+        _emit(f"\n\nPage {_logical(first_physical)}.\n\n")
     first_body = effective[0].strip()
     _emit(first_body)
     # Page 1 spans from 0 to current offset.
-    page_map_out.append(PageMapItem(page=1, char_start=0, char_end=offset_out, start_line=1))
+    first_cs = offset_out - len(first_body) if first_body else offset_out
+    page_map_out.append(
+        PageMapItem(
+            page=_logical(first_physical), char_start=first_cs, char_end=offset_out, start_line=1
+        )
+    )
 
-    for idx in range(1, total):
-        next_page_num = idx + 1
-        remainder = effective[idx].strip()
+    for pos in range(1, total):
+        physical = physical_nos[pos]
+        next_page_num = _logical(physical)
+        remainder = effective[pos].strip()
         prefix_so_far = "".join(out_parts)
         if _ends_with_terminal(prefix_so_far) or not remainder:
             marker = f"\n\nPage {next_page_num}.\n\n"
@@ -731,7 +874,11 @@ def join_pages_with_markers(
 
 
 def join_pages_strict(
-    pages: list[str], insert_markers: bool, first_page_marker: bool = False
+    pages: list[str],
+    insert_markers: bool,
+    first_page_marker: bool = False,
+    first_page_number: int = 1,
+    page_overrides: dict[int, int] | dict[str, int] | None = None,
 ) -> tuple[str, list[PageMapItem]]:
     """Join per-page texts with `Page N.` markers strictly between pages.
 
@@ -742,10 +889,17 @@ def join_pages_strict(
     page's heading to the prior page. Empty pages are kept (never dropped)
     so numbering stays aligned with the source document.
     Returns (markdown, page_map) with exact char offsets.
+
+    `page_map[i].page` is the logical number for physical page `i + 1`.
     """
+    overrides = normalize_page_overrides(page_overrides)
+
+    def _logical(physical: int) -> int:
+        return resolve_logical_page(physical, first_page_number, overrides)
+
     bodies = [(p or "").strip() for p in pages]
     if not bodies:
-        return "", [PageMapItem(page=1, char_start=0, char_end=0, start_line=1)]
+        return "", [PageMapItem(page=_logical(1), char_start=0, char_end=0, start_line=1)]
 
     out_parts: list[str] = []
     page_map: list[PageMapItem] = []
@@ -757,30 +911,42 @@ def join_pages_strict(
         offset += len(text)
 
     if insert_markers and first_page_marker:
-        _emit("\n\nPage 1.\n\n")
+        _emit(f"\n\nPage {_logical(1)}.\n\n")
     cs = offset
     _emit(bodies[0])
     start_line = "".join(out_parts)[:cs].count("\n") + 1
-    page_map.append(PageMapItem(page=1, char_start=cs, char_end=offset, start_line=start_line))
+    page_map.append(
+        PageMapItem(page=_logical(1), char_start=cs, char_end=offset, start_line=start_line)
+    )
 
-    for page_number, body in enumerate(bodies[1:], start=2):
-        _emit(f"\n\nPage {page_number}.\n\n" if insert_markers else "\n\n")
+    for physical, body in enumerate(bodies[1:], start=2):
+        _emit(f"\n\nPage {_logical(physical)}.\n\n" if insert_markers else "\n\n")
         cs = offset
         _emit(body)
         start_line = "".join(out_parts)[:cs].count("\n") + 1
         page_map.append(
-            PageMapItem(page=page_number, char_start=cs, char_end=offset, start_line=start_line)
+            PageMapItem(
+                page=_logical(physical), char_start=cs, char_end=offset, start_line=start_line
+            )
         )
 
     return "".join(out_parts), page_map
 
 
-def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
+def build_page_map(
+    markdown: str,
+    total_pages: int,
+    first_page_number: int = 1,
+    page_overrides: dict[int, int] | dict[str, int] | None = None,
+) -> list[PageMapItem]:
     """Build pageMap, preferring Docling page-break placeholders when present.
 
     When `markdown` contains `<!-- page break -->` tokens (emitted via
     `export_to_markdown(page_break_placeholder=...)`), boundaries are exact
     per-page offsets. Otherwise falls back to evenly splitting lines.
+
+    `page` holds the logical number (`first_page_number` + physical - 1
+    unless overridden); list position encodes the physical page.
     """
     if _PAGE_BREAK_INLINE_RE.search(markdown):
         raw_pages = _PAGE_BREAK_INLINE_RE.split(markdown)
@@ -790,19 +956,19 @@ def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
         # pages), keep segment count — blank pages carry no text to map.
         page_map: list[PageMapItem] = []
         cursor = 0
-        for seg in raw_pages:
+        for physical, seg in enumerate(raw_pages, start=1):
             seg_start = markdown.find(seg, cursor)
             if seg_start == -1:
                 seg_start = cursor
             seg_end = seg_start + len(seg)
             # Only record non-empty segments as pages; placeholders advance cursor.
             if seg.strip():
-                page_no = len(page_map) + 1
+                logical = resolve_logical_page(physical, first_page_number, page_overrides)
                 # start_line computed on text up to segment start.
                 start_line = markdown[:seg_start].count("\n") + 1
                 page_map.append(
                     PageMapItem(
-                        page=page_no, char_start=seg_start, char_end=seg_end, start_line=start_line
+                        page=logical, char_start=seg_start, char_end=seg_end, start_line=start_line
                     )
                 )
             m = _PAGE_BREAK_INLINE_RE.search(markdown, seg_end)
@@ -813,24 +979,28 @@ def build_page_map(markdown: str, total_pages: int) -> list[PageMapItem]:
             return page_map
         # Fall through to estimator if splitting yielded nothing usable.
     if total_pages <= 1:
-        return [PageMapItem(page=1, char_start=0, char_end=len(markdown), start_line=1)]
+        logical = resolve_logical_page(1, first_page_number, page_overrides)
+        return [PageMapItem(page=logical, char_start=0, char_end=len(markdown), start_line=1)]
 
     lines = markdown.split("\n")
     per_page = max(1, len(lines) // total_pages)
-    page_map: list[PageMapItem] = []
+    page_map = []
     char_offset = 0
-    for page in range(1, total_pages + 1):
-        start_line = (page - 1) * per_page + 1
-        end_line = per_page * page if page < total_pages else len(lines)
+    for physical in range(1, total_pages + 1):
+        logical = resolve_logical_page(physical, first_page_number, page_overrides)
+        start_line = (physical - 1) * per_page + 1
+        end_line = per_page * physical if physical < total_pages else len(lines)
         # Compute char offsets for this slice
         slice_lines = lines[start_line - 1 : end_line]
         slice_text = "\n".join(slice_lines)
         # Include inter-page newlines (2) except first
         cs = char_offset
         ce = cs + len(slice_text)
-        page_map.append(PageMapItem(page=page, char_start=cs, char_end=ce, start_line=start_line))
+        page_map.append(
+            PageMapItem(page=logical, char_start=cs, char_end=ce, start_line=start_line)
+        )
         # +2 for the "\n\n" separator that join will add (approx)
-        char_offset = ce + (2 if page < total_pages else 0)
+        char_offset = ce + (2 if physical < total_pages else 0)
 
     return page_map
 
@@ -861,7 +1031,13 @@ def apply_postprocessing(
             if opts.ensure_punctuation:
                 p = ensure_punctuation(p)
             processed.append(p)
-        md, new_map = join_pages_with_markers(processed, opts.insert_page_markers)
+        md, new_map = join_pages_with_markers(
+            processed,
+            opts.insert_page_markers,
+            opts.first_page_number,
+            opts.page_overrides,
+            opts.first_page_marker,
+        )
         if opts.combine_columns:
             # Catch hyphen breaks straddling a page boundary
             # (`dete-` at end of one page + `rioration` at start of next).
@@ -885,18 +1061,18 @@ def apply_postprocessing(
     # If caller provided accurate page_map, remap proportionally; else estimate.
     if page_map is None:
         # No prior map — build from sections count fallback of 1 page
-        new_map = build_page_map(md, 1)
+        new_map = build_page_map(md, 1, opts.first_page_number, opts.page_overrides)
     else:
         if opts.insert_page_markers and len(page_map) > 1:
-            md = insert_page_markers(md, page_map)
+            md = insert_page_markers(md, page_map, opts.first_page_number, opts.page_overrides)
             # Recompute page_map to reflect inserted markers
             # Keep original page count but re-split
-            new_map = build_page_map(md, len(page_map))
+            new_map = build_page_map(md, len(page_map), opts.first_page_number, opts.page_overrides)
             # Re-parse sections after marker insertion
             sections = parse_markdown_structure(md)
         else:
             # Page map offsets are stale after reflow — re-estimate for sync
             # Preserve page count but recompute line-based offsets
-            new_map = build_page_map(md, len(page_map))
+            new_map = build_page_map(md, len(page_map), opts.first_page_number, opts.page_overrides)
 
     return md, sections, new_map

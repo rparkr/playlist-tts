@@ -234,3 +234,49 @@ def test_join_pages_strict_first_page_marker_single_page():
     md, page_map = join_pages_strict(["Only page."], True, first_page_marker=True)
     assert md == "\n\nPage 1.\n\nOnly page."
     assert [p.page for p in page_map] == [1]
+
+
+def test_resolve_logical_page_offset_and_overrides():
+    """Physical pages map to logical numbers via offset unless overridden."""
+    from backend.app.services.postprocess import resolve_logical_page
+
+    assert resolve_logical_page(1, 1, None) == 1
+    assert resolve_logical_page(1, 5, None) == 5
+    assert resolve_logical_page(3, 5, None) == 7
+    assert resolve_logical_page(3, 5, {3: 9}) == 9
+    assert resolve_logical_page(2, 1, {"2": 8}) == 8
+
+
+def test_join_pages_strict_offset_and_overrides():
+    """Strict join emits logical markers and logical page-map numbers."""
+    from backend.app.services.postprocess import join_pages_strict
+
+    md, pm = join_pages_strict(["P1 here.", "P2 here.", "P3 here."], True, False, 5, {3: 9})
+    assert "Page 6." in md
+    assert "Page 9." in md
+    assert [p.page for p in pm] == [5, 6, 9]
+
+
+def test_join_pages_with_markers_first_page_marker():
+    """Docling path honours the leading Page marker like the LLM path."""
+    from backend.app.services.postprocess import join_pages_with_markers
+
+    md, pm = join_pages_with_markers(["P1 here.", "P2 here."], True, 1, None, True)
+    assert md.startswith("\n\nPage 1.\n\n") or "Page 1." in md
+    assert [p.page for p in pm][0] == 1
+
+
+def test_flat_h2_breadcrumbs_promote_chapters():
+    """All-h2 scans parent subsections under the latest unique ALL-CAPS chapter."""
+    from backend.app.services.postprocess import parse_markdown_structure
+
+    md = (
+        "## ELECTRICAL GRID.\n\nIntro.\n\n"
+        "## KEEP AN EYE OUT.\n\nTip.\n\n"
+        "## COMMUNICATIONS.\n\nIntro.\n\n"
+        "## Radio Antenna Towers.\n\nTowers text.\n"
+    )
+    sections = parse_markdown_structure(md)
+    radio = next(s for s in sections if (s.heading or "") == "Radio Antenna Towers.")
+    assert radio.titles[0].lower().startswith("communications")
+    assert radio.titles[-1].startswith("Radio Antenna")

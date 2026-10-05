@@ -459,7 +459,13 @@ async def convert_pdf_with_llm(
         if opts.ensure_punctuation:
             text = ensure_punctuation(text)
         processed.append(text)
-    md, page_map = join_pages_strict(processed, opts.insert_page_markers, opts.first_page_marker)
+    md, page_map = join_pages_strict(
+        processed,
+        opts.insert_page_markers,
+        opts.first_page_marker,
+        opts.first_page_number,
+        opts.page_overrides,
+    )
     if opts.combine_columns:
         # Catch hyphen breaks straddling a page boundary.
         md = dehyphenate(md)

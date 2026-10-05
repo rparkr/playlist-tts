@@ -152,18 +152,51 @@ async def _run_ocr_job(
     for q in job.event_queues:
         await q.put({"type": "progress", "done": 0, "total": job.progress_total})
 
-    def _do_ocr() -> tuple[str, int, list[PageMapItem]]:
+    def _do_ocr() -> tuple[str, int, list[PageMapItem], str]:
         """Blocking whole-document OCR — runs in threadpool.
 
-        A single `convert()` lets Docling batch pages internally at maximum
+        Tries the digital-native `pdfplumber` fast path first: when embedded
+        text is dense enough (`median_chars > text_min_chars` and coverage
+        above `text_coverage_min`), transcription skips Docling entirely. A
+        single `convert()` lets Docling batch pages internally at maximum
         throughput (~2.6 s/page vs ~12 s/page for per-page converts).
+        Returns (raw_markdown, total_pages, initial_page_map, engine).
         """
+        from backend.app.services.text_extract import (
+            extract_pages_text,
+            should_use_text,
+            text_extract_thresholds,
+        )
+
         total = job.progress_total if job.progress_total > 0 else get_page_count(pdf_path)
         total = total if total > 0 else 1
+        if opts.use_text_extract:
+            try:
+                min_chars, coverage_min = text_extract_thresholds(opts)
+                texts = extract_pages_text(pdf_path)
+                chars = [len(t) for t in texts]
+                if texts and should_use_text(chars, min_chars, coverage_min):
+                    from backend.app.services.postprocess import PAGE_BREAK_PLACEHOLDER
+
+                    sep = f"\n\n{PAGE_BREAK_PLACEHOLDER}\n\n"
+                    raw = sep.join((t or "").strip() for t in texts)
+                    init_map = build_page_map(
+                        raw, len(texts), opts.first_page_number, opts.page_overrides
+                    )
+                    job.progress_done = total
+                    return raw, total, init_map, "text"
+            except Exception:
+                # Fast path is best-effort — fall through to Docling OCR.
+                pass
         converter = create_document_converter()
         md = convert_one_pdf_to_markdown(converter, pdf_path)
         job.progress_done = total
-        return md, total, build_page_map(md, total)
+        return (
+            md,
+            total,
+            build_page_map(md, total, opts.first_page_number, opts.page_overrides),
+            "docling",
+        )
 
     loop = asyncio.get_running_loop()
     try:
@@ -211,9 +244,9 @@ async def _run_ocr_job(
                         f"{elapsed}s (~{done}/{total} pages, ETA {eta}s)[/dim]"
                     )
 
-        md_raw, total, page_map_init = await ocr_task
+        md_raw, total, page_map_init, engine = await ocr_task
         job.progress_done = total
-        console.print(f"[green]OCR {job.job_id} docling done, post-processing...[/green]")
+        console.print(f"[green]OCR {job.job_id} {engine} done, post-processing...[/green]")
 
         # Post-process whole-document markdown (page map re-estimated post-mutation).
         md, sections, page_map = apply_postprocessing(md_raw, opts, page_map_init)
@@ -234,6 +267,7 @@ async def _run_ocr_job(
             "meta": {
                 "pageCount": total,
                 "processingMs": int((time.time() - job.created_at) * 1000),
+                "engine": engine,
             },
         }
         job.status = JobStatus.done
