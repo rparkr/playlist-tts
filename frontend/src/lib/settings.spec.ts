@@ -5,6 +5,7 @@ import {
 	parseSentenceIndex,
 	parsePostprocessFlags,
 	serializePostprocessFlags,
+	sortVoiceOptions,
 	resolveWithUrlPrecedence,
 	progressKey
 } from './settings';
@@ -88,5 +89,18 @@ describe('parseSentenceIndex', () => {
 		expect(parseSentenceIndex('-1')).toBeNull();
 		expect(parseSentenceIndex('x')).toBeNull();
 		expect(parseSentenceIndex(null)).toBeNull();
+	});
+});
+
+describe('sortVoiceOptions', () => {
+	it('sorts alphabetically, case-insensitive, without mutating the input', () => {
+		const input = [{ name: 'Zara' }, { name: 'alba' }, { name: 'Mara' }];
+		const sorted = sortVoiceOptions(input);
+		expect(sorted.map((v) => v.name)).toEqual(['alba', 'Mara', 'Zara']);
+		expect(input.map((v) => v.name)).toEqual(['Zara', 'alba', 'Mara']);
+	});
+
+	it('returns an empty array for empty input', () => {
+		expect(sortVoiceOptions([])).toEqual([]);
 	});
 });

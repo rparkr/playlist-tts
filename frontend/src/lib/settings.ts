@@ -105,3 +105,14 @@ export function serializePostprocessFlags(flags: PostprocessFlags): string {
 export function progressKey(docId: string): string {
 	return `progress_${docId}`;
 }
+
+/**
+ * Return a copy of `voices` sorted alphabetically by `name`
+ * (case-insensitive). Used to keep voice pickers stable with cloned voices
+ * pinned in their own top optgroup.
+ */
+export function sortVoiceOptions<T extends { name: string }>(voices: readonly T[]): T[] {
+	return [...voices].sort((a, b) =>
+		a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+	);
+}

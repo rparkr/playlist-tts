@@ -328,7 +328,12 @@ export async function saveVoice(record: VoiceRecord): Promise<void> {
 
 export async function getVoices(): Promise<VoiceRecord[]> {
 	const db = await getDB();
-	return db.getAll('voices');
+	const voices = await db.getAll('voices');
+	// Keep the picker stable: alphabetical, case-insensitive. The modal pins
+	// these cloned voices in their own top optgroup.
+	return voices.sort((a, b) =>
+		a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+	);
 }
 
 export async function deleteVoice(id: string): Promise<void> {

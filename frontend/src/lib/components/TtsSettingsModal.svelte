@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
+	import { sortVoiceOptions } from '$lib/settings';
 
 	interface Props {
 		open: boolean;
@@ -35,6 +36,10 @@
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
+
+	// Alphabetical pickers with cloned voices pinned in the top optgroup.
+	let sortedBuiltinVoices = $derived(sortVoiceOptions(builtinVoices));
+	let sortedCustomVoices = $derived(sortVoiceOptions(customVoices));
 
 	$effect(() => {
 		// sync when prop changes
@@ -125,6 +130,13 @@
 						class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
 					>
 						{#if !useBackendTTS}
+							{#if sortedCustomVoices.length}
+								<optgroup label="My voices (requires Pocket TTS)">
+									{#each sortedCustomVoices as cv}
+										<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
+									{/each}
+								</optgroup>
+							{/if}
 							<optgroup label="Device voices">
 								{#each synthVoices as voice, i}
 									<option value={voice.name}>{voice.name} ({voice.lang})</option>
@@ -133,26 +145,19 @@
 									<option value="">Default</option>
 								{/if}
 							</optgroup>
-							{#if customVoices.length}
-								<optgroup label="My voices (requires Pocket TTS)">
-									{#each customVoices as cv}
+						{:else}
+							{#if sortedCustomVoices.length}
+								<optgroup label="My voices (IndexedDB)">
+									{#each sortedCustomVoices as cv}
 										<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
 									{/each}
 								</optgroup>
 							{/if}
-						{:else}
 							<optgroup label="Built-in (server)">
-								{#each builtinVoices as v}
+								{#each sortedBuiltinVoices as v}
 									<option value={v.name}>{v.name}</option>
 								{/each}
 							</optgroup>
-							{#if customVoices.length}
-								<optgroup label="My voices (IndexedDB)">
-									{#each customVoices as cv}
-										<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
-									{/each}
-								</optgroup>
-							{/if}
 							<optgroup label="Device voices (fallback)">
 								{#each synthVoices as voice}
 									<option value={voice.name}>{voice.name} ({voice.lang})</option>
