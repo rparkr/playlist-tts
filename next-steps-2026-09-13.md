@@ -19,3 +19,36 @@
 - [ ] Breadcrumbs: for some reason, the top-level one isn't updating (shows "Electrical grid > Radio towers" instead of "Communications > Radio towers"); perhaps because all levels in the `engineering*.pdf` seem to be at `h2` level (that may require post-processing after OCR to correct, or it may come from a setting in Docling)
 - [ ] Enable uploading a PDF along with its Markdown file (pages synced by enumerating the "Page N" lines, verifying the count matches the count of PDF pages, then synchronizing the view between Markdown and PDF pages based on those "Page N" lines)
 - [ ] Stream the OCR content to disk to enable resume in the event the OCR server crashes. For the LLM-based OCR, that would mean capturing the LLM's output and appending to the output file each time another page is completed, rather than holding everything in memory and writing to a file all at once after all pages are complete. For the Docling engine, we would still be appending to the output file, but we would need to figure out if Docling has an option for getting the outputs partway through (perhaps we would need to submit batches of 4 pages at a time and then save the output of those 4 pages at a time).
+- [ ] Process the Markdown text to prevent sentences that are too long for the TTS model. The `pocket-tts` model is designed to handle sequences of 50 tokens at a time; it typically works fine with up to 100 tokens. Beyond that, the output quality degrades to become unintelligible sounds rather than speech and generation time stalls precipitously (e.g., >20 seconds for a 300-token sequence vs. 2-4s for typical 50-chunk sequences). If we have access to the `pocket-tts` tokenizer, we should use that directly and break up chunks that exceed the limit. Otherwise, we can use character or whitespace-delimited word counts as rough heuristics. We should do the chunking in an intelligent way to obtain the best output quality and listening experience, looking for natural breaks in the text sequence, for example: punctuation like commas, semicolons, colons, quote characters, parentheses, etc. For references, here's an example error from `pocket-tts` when the sequence exceeds its supported length: `WARNING:pocket_tts.models.tts_model:Chunk has 70 tokens (max 50), generation may skip words: '“I told him he could have our snacks if he promise...'`
+    - The 50-token limit suffices for most sentences. If a sentence exceeds around 70 tokens, it is likely in error. Here are some examples I've seen:
+        1. Punctuation marks that aren't yet handled by our sentence splitting logic:
+            - **Angled double quote characters** (e.g.,`“` and `”`, or `U+201C` and `U+201D`). Here's an example sentence that had >70 tokens:
+
+                > Will exclaimed, “Bix, what on earth did you say?”
+                > “We made a deal,” she replied, winking. “I told him he could have our snacks if he promised to leave alone the herd of defenseless prosauropods coming through tomorrow…” A deception which Bix modestly characterized as mere tact.
+
+                Notice in that example that there are multiple sentences, but the boundary check groups them together because they end with the angled quote character rather than a standard quote character. Also note that the ellipsis followed by a double quote character seems to be the end of a sentence (the following words, "A deception" starts with a capital "A", indicating a new sentence), but it was grouped with the one that follows. This was possibly an OCR artifact missing the period at the end of that sentence, but we should still have a more robust way to handle punctuation like the angled quotes. Perhaps we can normalize all punctuation to their standard ASCII equivalents (plain straight quotes in this case).
+            
+            - **Angled single quote characters.** (i.e., `’`). These should be normalized to standard straight quote characters: `'`.
+        2. Newline-separated lists that are treated as though they are one sentence, like this:
+
+            > SONGS OF THE SEA TURTLES
+            > HOW TO MAKE GOLD
+            > PALEOZOIC POEMS
+            > LESSONS FROM THE BEE DANCE
+            > THE CARE AND TEACHING OF HUMANS
+            > PERPETUAL MOTION MECHANICS
+            > A COMPENDIUM OF HELPFUL FUNGI
+            > MASTERPIECES OF TERMITE ENGINEERING
+
+            Notice that those are clearly individual items that should be read as if there were individual sentence blocks (each line = one sentence). However, because they have terminal punctuation, they are all collapsed together, like this: `SONGS OF THE SEA TURTLES HOW TO MAKE GOLD PALEOZOIC POEMS LESSONS FROM THE BEE DANCE THE CARE AND TEACHING OF HUMANS PERPETUAL MOTION MECHANICS A COMPENDIUM OF HELPFUL FUNGI MASTERPIECES OF TERMITE ENGINEERING`. That combined "sentence" is too long for the model (and also doesn't make sense) so the output is poor.
+
+            I think we could solve for this by adding intelligent logic for determining when to collapse newlines and when to treat them as separate sentences. That will be nuanced, since we also have paragraphs like the following example, which _should_ be collapsed, since the newlines were exactly replicating page formatting/structure rather than content: 
+
+            > One morning, Norah cheerfully said to me,
+            > "Arthur, it’s time you had some company on your
+            > rambles. Take Melanie and Kalyptra with you."
+            > Melanie is her five-year-old granddaughter, and
+            > ‘Kal’ the Dryosaurus who always accompanies her.
+
+- [ ] **Retain lists in the processed Markdown.** Currently, the web UI strips ordered and unordered lists, which impairs readability by squashing together list items into single sentences. We should preserve numbering for ordered lists and paragraph separation for unordered lists, so that each list item reads as its own sentence.
