@@ -13,6 +13,7 @@ export const LS_KEYS = {
 	activeDocId: 'tts_active_doc_id',
 	rate: 'tts_rate',
 	voice: 'tts_voice',
+	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
 	postprocess: 'tts_postprocess'
 } as const;
@@ -104,6 +105,54 @@ export function serializePostprocessFlags(flags: PostprocessFlags): string {
 
 export function progressKey(docId: string): string {
 	return `progress_${docId}`;
+}
+
+/** Per-engine voice selection: each TTS engine remembers its own voice. */
+export interface VoiceByEngine {
+	device: string | null;
+	pocket: string | null;
+}
+
+/** Parse a stored per-engine voice map; return null when absent/invalid. */
+export function parseVoiceByEngine(value: string | null | undefined): VoiceByEngine | null {
+	if (!value) return null;
+	try {
+		const p = JSON.parse(value) as Partial<VoiceByEngine>;
+		const device = p.device ?? null;
+		const pocket = p.pocket ?? null;
+		if ((device !== null && typeof device !== 'string') || (pocket !== null && typeof pocket !== 'string')) {
+			return null;
+		}
+		return { device, pocket };
+	} catch {
+		return null;
+	}
+}
+
+/** Serialize a per-engine voice map for localStorage. */
+export function serializeVoiceByEngine(map: VoiceByEngine): string {
+	return JSON.stringify(map);
+}
+
+/** Read the stored voice for `engine`, falling back to `fallback`. */
+export function voiceForEngine(
+	map: VoiceByEngine | null | undefined,
+	engine: TtsEngine,
+	fallback: string
+): string {
+	if (engine === 'pocket') return map?.pocket ?? fallback;
+	return map?.device ?? fallback;
+}
+
+/** Return a copy of `map` with `engine`'s voice set to `voiceId`. */
+export function withVoiceForEngine(
+	map: VoiceByEngine | null | undefined,
+	engine: TtsEngine,
+	voiceId: string
+): VoiceByEngine {
+	const next: VoiceByEngine = { device: map?.device ?? null, pocket: map?.pocket ?? null };
+	next[engine] = voiceId;
+	return next;
 }
 
 /**

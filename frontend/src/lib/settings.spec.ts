@@ -5,7 +5,11 @@ import {
 	parseSentenceIndex,
 	parsePostprocessFlags,
 	serializePostprocessFlags,
+	parseVoiceByEngine,
+	serializeVoiceByEngine,
 	sortVoiceOptions,
+	voiceForEngine,
+	withVoiceForEngine,
 	resolveWithUrlPrecedence,
 	progressKey
 } from './settings';
@@ -89,6 +93,48 @@ describe('parseSentenceIndex', () => {
 		expect(parseSentenceIndex('-1')).toBeNull();
 		expect(parseSentenceIndex('x')).toBeNull();
 		expect(parseSentenceIndex(null)).toBeNull();
+	});
+});
+
+describe('voice by engine', () => {
+	it('round-trips through JSON', () => {
+		const map = { device: 'Google US English', pocket: 'alba' };
+		expect(parseVoiceByEngine(serializeVoiceByEngine(map))).toEqual(map);
+	});
+
+	it('rejects absent/invalid payloads', () => {
+		expect(parseVoiceByEngine(null)).toBeNull();
+		expect(parseVoiceByEngine('not-json')).toBeNull();
+		expect(parseVoiceByEngine('{"device": 42}')).toBeNull();
+	});
+
+	it('reads each engine slot with fallback', () => {
+		const map = { device: 'a', pocket: 'b' };
+		expect(voiceForEngine(map, 'device', 'fb')).toBe('a');
+		expect(voiceForEngine(map, 'pocket', 'fb')).toBe('b');
+		expect(voiceForEngine({ device: null, pocket: null }, 'pocket', 'fb')).toBe('fb');
+		expect(voiceForEngine(null, 'device', 'fb')).toBe('fb');
+	});
+
+	it('sets one slot without touching the other', () => {
+		const next = withVoiceForEngine({ device: 'a', pocket: 'b' }, 'pocket', 'c');
+		expect(next).toEqual({ device: 'a', pocket: 'c' });
+	});
+
+	it('keeps separate selections across engine toggles', () => {
+		// Simulate: pick device voice, toggle to pocket (carries over), pick a
+		// pocket voice, toggle back — the device voice is restored.
+		let map = { device: null as string | null, pocket: null as string | null };
+		map = withVoiceForEngine(map, 'device', 'Google US English');
+		let current = voiceForEngine(map, 'device', 'alba');
+		// toggle to pocket (no stored pocket voice yet → carries current over)
+		const pocketFirst = voiceForEngine(map, 'pocket', current);
+		map = withVoiceForEngine(map, 'pocket', pocketFirst);
+		// user picks a pocket voice
+		current = 'my-clone';
+		map = withVoiceForEngine(map, 'pocket', current);
+		// toggle back to device → original device voice restored
+		expect(voiceForEngine(map, 'device', current)).toBe('Google US English');
 	});
 });
 

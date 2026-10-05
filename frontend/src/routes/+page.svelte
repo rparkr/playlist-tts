@@ -48,9 +48,15 @@
 		parseRate,
 		parseSentenceIndex,
 		parsePostprocessFlags,
+		parseVoiceByEngine,
 		serializePostprocessFlags,
+		serializeVoiceByEngine,
+		voiceForEngine,
+		withVoiceForEngine,
 		resolveWithUrlPrecedence,
-		progressKey
+		progressKey,
+		type TtsEngine,
+		type VoiceByEngine
 	} from '$lib/settings';
 
 	// --- State ---
@@ -79,6 +85,8 @@
 	let useBackendTTS: boolean = $state(false);
 	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
+	// Per-engine voice memory: each TTS engine remembers its own selection.
+	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null });
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
 
@@ -188,10 +196,18 @@
 		const storedVoice = localStorage.getItem(LS_KEYS.voice);
 		const storedEngine = localStorage.getItem(LS_KEYS.engine);
 		synthRate = resolveWithUrlPrecedence(rateParam, storedRate, 1.0, parseRate);
-		if (voiceParam) selectedVoiceId = voiceParam;
-		else if (storedVoice) selectedVoiceId = storedVoice;
 		const engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
 		useBackendTTS = engine === 'pocket';
+		// Per-engine voice: stored map first, legacy single key migrates into
+		// the current engine's slot, URL `voice` wins for the current engine.
+		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
+			device: null,
+			pocket: null
+		};
+		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
+		if (voiceParam) storedMap[engine] = voiceParam;
+		voiceByEngine = storedMap;
+		selectedVoiceId = voiceForEngine(voiceByEngine, engine, 'alba');
 		// Postprocessing defaults: last-set global prefs until a doc overrides.
 		const storedPostprocess = parsePostprocessFlags(localStorage.getItem(LS_KEYS.postprocess));
 		if (storedPostprocess) {
@@ -248,6 +264,7 @@
 		}
 		localStorage.setItem(LS_KEYS.rate, String(synthRate));
 		localStorage.setItem(LS_KEYS.voice, selectedVoiceId);
+		localStorage.setItem(LS_KEYS.voiceByEngine, serializeVoiceByEngine(voiceByEngine));
 		localStorage.setItem(LS_KEYS.engine, useBackendTTS ? 'pocket' : 'device');
 		localStorage.setItem(
 			LS_KEYS.postprocess,
@@ -688,9 +705,26 @@
 
 	function handleVoiceChange(id: string) {
 		selectedVoiceId = id;
+		// Remember the choice under the current engine so toggling engines
+		// restores each engine's last voice.
+		const engine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
+		voiceByEngine = withVoiceForEngine(voiceByEngine, engine, id);
 		// Cache keys are voice-scoped, so just restart the chain: the new
 		// voice synthesizes from the current sentence, nothing earlier.
 		if (isPlaying && useBackendTTS) playBackend();
+	}
+
+	function handleEngineChange(useBackend: boolean) {
+		// Park the current selection under the old engine before switching.
+		const fromEngine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
+		const toEngine: TtsEngine = useBackend ? 'pocket' : 'device';
+		voiceByEngine = withVoiceForEngine(voiceByEngine, fromEngine, selectedVoiceId);
+		useBackendTTS = useBackend;
+		// Restore the other engine's last voice; the first toggle carries the
+		// current selection over so nothing unexpectedly resets to a default.
+		const next = voiceForEngine(voiceByEngine, toEngine, selectedVoiceId);
+		voiceByEngine = withVoiceForEngine(voiceByEngine, toEngine, next);
+		selectedVoiceId = next;
 	}
 
 	// Voice handling
@@ -719,6 +753,7 @@
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
+			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 			(input as HTMLInputElement).value = '';
 			return;
@@ -736,6 +771,7 @@
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
+			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 		} catch (err: any) {
 			showToast(`Voice clone failed: ${err.message}`);
@@ -1045,7 +1081,7 @@
 		open={showTtsSettings}
 		onClose={() => (showTtsSettings = false)}
 		{useBackendTTS}
-		onEngineChange={(v) => (useBackendTTS = v)}
+		onEngineChange={handleEngineChange}
 		{builtinVoices}
 		{customVoices}
 		{synthVoices}
