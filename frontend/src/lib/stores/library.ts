@@ -6,6 +6,7 @@ import {
 	stripPageMarkers,
 	type PostprocessOptions
 } from '$lib/markdown/postprocess';
+import type { ItemSource, ItemSourceKind, Playlist, PlaylistItem } from '$lib/playlists/model';
 
 export interface Doc {
 	id: string;
@@ -30,6 +31,8 @@ interface OCRTTSDB extends DBSchema {
 	docs: { key: string; value: Doc };
 	voices: { key: string; value: VoiceRecord };
 	pdfs: { key: string; value: PdfRecord };
+	playlists: { key: string; value: Playlist };
+	items: { key: string; value: PlaylistItem; indexes: { 'by-playlist': string } };
 }
 
 export interface VoiceRecord {
@@ -52,7 +55,7 @@ export interface PdfRecord {
 }
 
 const DB_NAME = 'ocr-tts';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 function getDB() {
 	return openDB<OCRTTSDB>(DB_NAME, DB_VERSION, {
@@ -66,6 +69,17 @@ function getDB() {
 			}
 			if (!db.objectStoreNames.contains('pdfs')) {
 				db.createObjectStore('pdfs', { keyPath: 'docId' });
+			}
+			// Phase 3 playlist library (IndexedDB-only MVP): docs/voices/pdfs
+			// stay as-is; playlists order items via `itemIds`, items link to
+			// docs via `docId`. No seeding — existing docs stay unlisted
+			// until the user adds them to a playlist.
+			if (!db.objectStoreNames.contains('playlists')) {
+				db.createObjectStore('playlists', { keyPath: 'id' });
+			}
+			if (!db.objectStoreNames.contains('items')) {
+				const store = db.createObjectStore('items', { keyPath: 'id' });
+				store.createIndex('by-playlist', 'playlistId', { unique: false });
 			}
 		}
 	});
@@ -405,3 +419,210 @@ export async function getPdfSizes(): Promise<Record<string, number>> {
 		return {};
 	}
 }
+
+// Playlists + items (Phase 3 library, IndexedDB-only). `playlist.itemIds`
+// is the order source of truth; item rows carry the payload.
+
+function newId(prefix: string): string {
+	return `${prefix}_` + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+/** Create a playlist with an empty item list. */
+export async function createPlaylist(name: string): Promise<Playlist> {
+	const clean = name.trim() || 'Untitled playlist';
+	const db = await getDB();
+	const now = Date.now();
+	const playlist: Playlist = {
+		id: newId('pl'),
+		name: clean,
+		itemIds: [],
+		createdAt: now,
+		updatedAt: now,
+		lastListenedAt: null
+	};
+	await db.put('playlists', playlist);
+	return playlist;
+}
+
+/** All playlists in overview order (most-recently-listened first). */
+export async function getPlaylists(): Promise<Playlist[]> {
+	const db = await getDB();
+	try {
+		const all = await db.getAll('playlists');
+		return all.sort((a, b) => {
+			const la = a.lastListenedAt ?? -1;
+			const lb = b.lastListenedAt ?? -1;
+			if (la !== lb) return lb - la;
+			return b.updatedAt - a.updatedAt;
+		});
+	} catch {
+		return [];
+	}
+}
+
+export async function getPlaylist(id: string): Promise<Playlist | undefined> {
+	const db = await getDB();
+	try {
+		return await db.get('playlists', id);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Rename a playlist; blank names keep the existing name. */
+export async function renamePlaylist(id: string, name: string): Promise<Playlist | undefined> {
+	const db = await getDB();
+	const playlist = await db.get('playlists', id);
+	if (!playlist) return undefined;
+	const clean = name.trim();
+	if (clean) playlist.name = clean;
+	playlist.updatedAt = Date.now();
+	await db.put('playlists', playlist);
+	return playlist;
+}
+
+/** Delete a playlist and cascade-delete its items (docs are kept). */
+export async function deletePlaylist(id: string): Promise<void> {
+	const db = await getDB();
+	const tx = db.transaction(['playlists', 'items'], 'readwrite');
+	await tx.objectStore('playlists').delete(id);
+	const index = tx.objectStore('items').index('by-playlist');
+	for (const key of await index.getAllKeys(id)) {
+		await tx.objectStore('items').delete(key);
+	}
+	await tx.done;
+}
+
+/** Mark a playlist as listened-to now (drives overview resume order). */
+export async function touchPlaylistListened(id: string): Promise<void> {
+	const db = await getDB();
+	const playlist = await db.get('playlists', id);
+	if (!playlist) return;
+	playlist.lastListenedAt = Date.now();
+	playlist.updatedAt = playlist.lastListenedAt;
+	await db.put('playlists', playlist);
+}
+
+/** Items of a playlist in card order (`playlist.itemIds` first). */
+export async function getPlaylistItems(playlistId: string): Promise<PlaylistItem[]> {
+	const db = await getDB();
+	const playlist = await db.get('playlists', playlistId);
+	if (!playlist) return [];
+	let rows: PlaylistItem[];
+	try {
+		rows = await db.getAllFromIndex('items', 'by-playlist', playlistId);
+	} catch {
+		const all = await db.getAll('items');
+		rows = all.filter((i) => i.playlistId === playlistId);
+	}
+	const byId = new Map(rows.map((i) => [i.id, i]));
+	const ordered = playlist.itemIds.map((id) => byId.get(id)).filter(Boolean) as PlaylistItem[];
+	// Orphan rows (missing from `itemIds` after a crash) trail at the end.
+	for (const row of rows) {
+		if (!playlist.itemIds.includes(row.id)) ordered.push(row);
+	}
+	return ordered;
+}
+
+export interface NewPlaylistItem {
+	title: string;
+	source: ItemSource;
+	docId: string;
+	totalSentences: number;
+	progress?: number;
+}
+
+/** Append a doc-backed item to a playlist. */
+export async function addPlaylistItem(
+	playlistId: string,
+	init: NewPlaylistItem
+): Promise<PlaylistItem | undefined> {
+	const db = await getDB();
+	const playlist = await db.get('playlists', playlistId);
+	if (!playlist) return undefined;
+	const now = Date.now();
+	const item: PlaylistItem = {
+		id: newId('it'),
+		playlistId,
+		title: init.title.trim() || 'Untitled',
+		source: init.source,
+		docId: init.docId,
+		progress: Math.max(0, init.progress ?? 0),
+		totalSentences: Math.max(0, init.totalSentences),
+		createdAt: now,
+		updatedAt: now
+	};
+	const tx = db.transaction(['playlists', 'items'], 'readwrite');
+	await tx.objectStore('items').put(item);
+	playlist.itemIds = [...playlist.itemIds, item.id];
+	playlist.updatedAt = now;
+	await tx.objectStore('playlists').put(playlist);
+	await tx.done;
+	return item;
+}
+
+/** Rename an item (playlist-scoped; the underlying doc title is untouched). */
+export async function renamePlaylistItem(id: string, title: string): Promise<PlaylistItem | undefined> {
+	const db = await getDB();
+	const item = await db.get('items', id);
+	if (!item) return undefined;
+	const clean = title.trim();
+	if (clean) item.title = clean;
+	item.updatedAt = Date.now();
+	await db.put('items', item);
+	return item;
+}
+
+/** Remove an item from its playlist (the underlying doc is kept). */
+export async function deletePlaylistItem(id: string): Promise<void> {
+	const db = await getDB();
+	const item = await db.get('items', id);
+	if (!item) return;
+	const tx = db.transaction(['playlists', 'items'], 'readwrite');
+	await tx.objectStore('items').delete(id);
+	const playlist = await tx.objectStore('playlists').get(item.playlistId);
+	if (playlist) {
+		playlist.itemIds = playlist.itemIds.filter((itemId) => itemId !== id);
+		playlist.updatedAt = Date.now();
+		await tx.objectStore('playlists').put(playlist);
+	}
+	await tx.done;
+}
+
+/** Persist a card reorder (drag, or up/down fallback buttons). */
+export async function movePlaylistItem(
+	playlistId: string,
+	itemId: string,
+	toIndex: number
+): Promise<Playlist | undefined> {
+	const db = await getDB();
+	const playlist = await db.get('playlists', playlistId);
+	if (!playlist || !playlist.itemIds.includes(itemId)) return undefined;
+	const from = playlist.itemIds.indexOf(itemId);
+	const next = [...playlist.itemIds];
+	const [moved] = next.splice(from, 1);
+	next.splice(Math.max(0, Math.min(toIndex, next.length)), 0, moved);
+	playlist.itemIds = next;
+	playlist.updatedAt = Date.now();
+	await db.put('playlists', playlist);
+	return playlist;
+}
+
+/** Persist playback progress on an item (sentence index + cached totals). */
+export async function updatePlaylistItemProgress(
+	id: string,
+	progress: number,
+	totalSentences?: number
+): Promise<PlaylistItem | undefined> {
+	const db = await getDB();
+	const item = await db.get('items', id);
+	if (!item) return undefined;
+	item.progress = Math.max(0, progress);
+	if (totalSentences !== undefined) item.totalSentences = Math.max(0, totalSentences);
+	item.updatedAt = Date.now();
+	await db.put('items', item);
+	return item;
+}
+
+/** Re-export playlist model types for UI layers. */
+export type { ItemSource, ItemSourceKind, Playlist, PlaylistItem };
