@@ -5,7 +5,7 @@ The frontend persists the result in IndexedDB as a playlist item. Runs
 fine on scale-to-zero hosts (Cloud Run) since nothing is stored server-side.
 
 `trafilatura.fetch_url` has no timeout/size knobs, so the download uses
-`httpx` directly (20s timeout, ~5MB cap, custom UA) and `trafilatura` only
+`httpx2` directly (20s timeout, ~5MB cap, custom UA) and `trafilatura` only
 for extraction.
 """
 
@@ -14,7 +14,7 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 import trafilatura
 from trafilatura.metadata import extract_metadata
 
@@ -97,7 +97,7 @@ async def _download_html(url: str) -> str:
     """Download page HTML with timeout and size cap."""
     try:
         async with (
-            httpx.AsyncClient(
+            httpx2.AsyncClient(
                 timeout=FETCH_TIMEOUT_SECONDS,
                 follow_redirects=True,
                 max_redirects=5,
@@ -128,9 +128,9 @@ async def _download_html(url: str) -> str:
             raw = b"".join(chunks)
     except ArticleFetchError:
         raise
-    except httpx.TimeoutException:
+    except httpx2.TimeoutException:
         raise ArticleFetchError("Fetch timed out after 20s.", 504) from None
-    except httpx.RequestError as e:
+    except httpx2.RequestError as e:
         raise ArticleFetchError(f"Fetch failed: {e}.", 502) from None
     charset = "utf-8"
     if "charset=" in content_type:
