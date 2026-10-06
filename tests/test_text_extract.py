@@ -1,4 +1,4 @@
-"""Tests for digital-native PDF fast path (`pdfplumber` text routing)."""
+"""Tests for digital-native PDF fast path (`pypdf` text routing)."""
 
 from pathlib import Path
 

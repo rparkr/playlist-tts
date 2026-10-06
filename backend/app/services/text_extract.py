@@ -1,4 +1,4 @@
-"""Digital-native PDF fast path — `pdfplumber` text extraction.
+"""Digital-native PDF fast path — `pypdf` text extraction.
 
 Scanned PDFs carry little or no embedded text (hidden OCR layers, headers,
 watermarks yielding 50–150 junk chars), so a plain `extract_text` pass would
@@ -46,7 +46,7 @@ def text_extract_thresholds(opts: PostprocessOptions) -> tuple[int, float]:
 
 
 def extract_pages_text(pdf_path: Path) -> list[str]:
-    """Extract embedded text per PDF page in PDF order via `pdfplumber`.
+    """Extract embedded text per PDF page in PDF order via `pypdf`.
 
     Args:
         pdf_path: path to the input PDF file.
@@ -54,15 +54,23 @@ def extract_pages_text(pdf_path: Path) -> list[str]:
     Returns:
         One string per PDF page (possibly empty), in PDF order.
     """
-    import pdfplumber
+    import pypdf
 
     texts: list[str] = []
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for page in pdf.pages:
-            try:
-                texts.append(page.extract_text() or "")
-            except Exception:
-                texts.append("")
+    reader = pypdf.PdfReader(pdf_path)
+    for page in reader.pages:
+        try:
+            # `extraction_mode="plain"` extracts text in the order
+            # in which it was saved in the document (the same order
+            # that text is selected when clicking and dragging on
+            # PDF text using a mouse cursor). This is better than "layout"
+            # mode because it usually preserves reading order quite well,
+            # rather than document structure (e.g., two-column layouts use
+            # first-then-second-column reading order even though the
+            # structural layout has the two side by side).
+            texts.append(page.extract_text(extraction_mode="plain") or "")
+        except Exception:
+            texts.append("")
     return texts
 
 

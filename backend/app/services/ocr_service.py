@@ -155,7 +155,7 @@ async def _run_ocr_job(
     def _do_ocr() -> tuple[str, int, list[PageMapItem], str]:
         """Blocking whole-document OCR — runs in threadpool.
 
-        Tries the digital-native `pdfplumber` fast path first: when embedded
+        Tries the digital-native `pypdf` fast path first: when embedded
         text is dense enough (`median_chars > text_min_chars` and coverage
         above `text_coverage_min`), transcription skips Docling entirely. A
         single `convert()` lets Docling batch pages internally at maximum
