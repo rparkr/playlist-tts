@@ -17,6 +17,7 @@ dependencies = [
     # python-multipart is required for file upload in FastAPI
     "python-multipart>=0.0.9",
     "rich>=15.0.0",
+    "trafilatura>=2.3.0",
     "typer>=0.26.8",
     "uvicorn[standard]>=0.34.0",
 ]

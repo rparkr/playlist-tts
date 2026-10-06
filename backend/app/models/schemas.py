@@ -125,3 +125,22 @@ class TTSJobStatusResponse(BaseModel):
     progress: dict[str, int] = Field(default_factory=lambda: {"done": 0, "total": 0})
     error: str | None = None
     output: str | None = Field(default=None, description="Download filename once the job is done")
+
+
+class FetchArticleRequest(BaseModel):
+    """Request for POST /api/fetch/article."""
+
+    url: str = Field(description="Article URL (http/https only)")
+
+
+class FetchArticleResponse(BaseModel):
+    """Extracted article Markdown plus metadata for playlist item cards."""
+
+    markdown: str
+    title: str | None = None
+    author: str | None = None
+    site: str | None = None
+    date: str | None = None
+    excerpt: str | None = None
+    url: str
+    domain: str
