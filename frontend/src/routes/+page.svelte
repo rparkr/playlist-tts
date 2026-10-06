@@ -1666,12 +1666,6 @@
 			})();
 		}
 	}
-	async function showPdfPane() {
-		leftPane = 'pdf';
-		leftVisible = true;
-		await tick();
-		await renderPdfPage();
-	}
 	function handleHeaderUpload() {
 		// Header uploads are listen-now: the doc opens standalone.
 		pendingPlaylistId = null;
