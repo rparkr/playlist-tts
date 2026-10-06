@@ -14,6 +14,12 @@ import { fetchTTSWavStream } from './backendStream';
 export interface SentencePlayerCallbacks {
 	/** Fired when a sentence starts sounding — use to sync the highlight. */
 	onSentenceStart?: (idx: number) => void;
+	/** Fired when a sentence sounds to completion (never on seek/pause abort).
+	 *
+	 * `secondsAt1x` is the wall-clock sounding duration divided by the speech
+	 * rate in effect when the sentence started — feed it to ETA stats.
+	 */
+	onSentenceComplete?: (idx: number, chars: number, secondsAt1x: number) => void;
 	/** Fired when playback runs past the last sentence. */
 	onEnded?: () => void;
 	onError?: (message: string) => void;
@@ -374,20 +380,27 @@ export class BackendSentencePlayer {
 				audio.src = url;
 				audio.load();
 			}
-			audio.currentTime = 0;
-			audio.playbackRate = this.rate;
-			this.setLoading(false);
-			try {
-				await audio.play();
-			} catch (e) {
-				if (gen !== this.generation || !this.running) return;
-				this.running = false;
-				this.cb.onError?.(e instanceof Error ? e.message : String(e));
-				return;
-			}
-			await this.waitForCurrentAudioEnd(gen);
+		audio.currentTime = 0;
+		audio.playbackRate = this.rate;
+		this.setLoading(false);
+		const soundedAt = Date.now();
+		const rateAtStart = this.rate;
+		try {
+			await audio.play();
+		} catch (e) {
 			if (gen !== this.generation || !this.running) return;
-			this.idx = target + 1;
+			this.running = false;
+			this.cb.onError?.(e instanceof Error ? e.message : String(e));
+			return;
+		}
+		await this.waitForCurrentAudioEnd(gen);
+		if (gen !== this.generation || !this.running) return;
+		// Natural completion only (aborts return above): record pace for ETA.
+		const secondsAt1x = (Date.now() - soundedAt) / 1000 / Math.max(0.25, rateAtStart);
+		if (Number.isFinite(secondsAt1x) && secondsAt1x > 0 && text.length > 0) {
+			this.cb.onSentenceComplete?.(target, text.length, secondsAt1x);
+		}
+		this.idx = target + 1;
 		}
 	}
 }

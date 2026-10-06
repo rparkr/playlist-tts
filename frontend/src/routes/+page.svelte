@@ -37,6 +37,7 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
 	import LibraryModal from '$lib/components/LibraryModal.svelte';
@@ -356,13 +357,18 @@
 		}
 	});
 
-	// Remaining time heuristic: 150 wpm at 1.0x
+	// Remaining time: measured chars/sec per voice+engine when available,
+	// cold-starting at ~150wpm until the first samples land.
 	let remainingText: string = $derived.by(() => {
 		const all = getGlobalSentences(sections);
 		if (all.length === 0) return '';
-		const remaining = all.slice(globalIdx).join(' ');
-		const words = remaining.trim().split(/\s+/).filter(Boolean).length;
-		const secs = words / (150 / 60) / synthRate;
+		const remainingChars = all.slice(globalIdx).join(' ').length;
+		const secs = estimateRemainingSeconds(
+			remainingChars,
+			selectedVoiceId,
+			useBackendTTS ? 'pocket' : 'device',
+			synthRate
+		);
 		return formatRemaining(secs);
 	});
 
@@ -1027,6 +1033,15 @@
 			sentencePlayer.setCallbacks({
 				onSentenceStart: (idx) => {
 					globalIdx = idx;
+				},
+				onSentenceComplete: (_idx, chars, secondsAt1x) => {
+					// Refine ETA stats for the voice+engine that sounded it.
+					recordEtaSample(
+						selectedVoiceId,
+						useBackendTTS ? 'pocket' : 'device',
+						chars,
+						secondsAt1x
+					);
 				},
 				onEnded: () => {
 					isPlaying = false;

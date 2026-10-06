@@ -216,3 +216,49 @@ describe('BackendSentencePlayer seeking', () => {
 		expect(player.currentIndex).toBe(0);
 	});
 });
+
+describe('BackendSentencePlayer completion timing', () => {
+	let player: BackendSentencePlayer;
+	let completed: { idx: number; chars: number; secondsAt1x: number }[];
+
+	beforeEach(() => {
+		audios = [];
+		completed = [];
+		fetchMock.mockClear();
+		vi.stubGlobal('Audio', MockAudio);
+		player = new BackendSentencePlayer();
+		player.setCallbacks({
+			onSentenceComplete: (idx, chars, secondsAt1x) =>
+				completed.push({ idx, chars, secondsAt1x })
+		});
+	});
+
+	afterEach(async () => {
+		player.destroy();
+		vi.unstubAllGlobals();
+		await sleep(300);
+	});
+
+	it('reports chars and 1.0x-normalized seconds on natural completion', async () => {
+		void player.play(['Alpha.'], 0, 'v', 'v', null, 2.0);
+		await vi.waitFor(() => expect(audio().src).toBe('url:Alpha.'));
+		audio().__ended();
+		await vi.waitFor(() => expect(completed.length).toBe(1));
+		expect(completed[0].idx).toBe(0);
+		expect(completed[0].chars).toBe('Alpha.'.length);
+		// Wall duration divided by the 2.0x rate — small but positive.
+		expect(completed[0].secondsAt1x).toBeGreaterThan(0);
+		expect(completed[0].secondsAt1x).toBeLessThan(5);
+	});
+
+	it('does not report aborted sentences', async () => {
+		void player.play(['Alpha.', 'Bravo.'], 0, 'v', 'v', null, 1);
+		await vi.waitFor(() => expect(audio().src).toBe('url:Alpha.'));
+		// Seek away before Alpha ends: its chain is invalidated, so no sample.
+		void player.seek(1);
+		await vi.waitFor(() => expect(audio().src).toBe('url:Bravo.'));
+		audio().__ended();
+		await vi.waitFor(() => expect(completed.length).toBe(1));
+		expect(completed[0].idx).toBe(1);
+	});
+});
