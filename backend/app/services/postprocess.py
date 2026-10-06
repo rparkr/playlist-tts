@@ -657,6 +657,19 @@ def _is_chapter_heading(text: str) -> bool:
     return len(letters) >= 4 and letters == letters.upper()
 
 
+def _display_title(text: str) -> str:
+    """Breadcrumb display form: Title Case for ALL-CAPS headings, kept otherwise.
+
+    Mirrors the frontend `displayTitle`: `COMMUNICATIONS.` → `Communications`
+    while `Radio Antenna Towers.` keeps its case (trailing dots stripped).
+    """
+    clean = text.strip().rstrip(".")
+    letters = re.sub(r"[^A-Za-z]", "", clean)
+    if len(letters) >= 4 and letters == letters.upper():
+        return clean.title()
+    return clean
+
+
 def _fix_flat_headings(sections: list[Section]) -> None:
     """Restructure flat-heading docs into chapters (breadcrumb fix).
 
@@ -689,11 +702,11 @@ def _fix_flat_headings(sections: list[Section]) -> None:
     for s in sections:
         key = (s.heading or "").strip().lower()
         if s.heading and key in chapter_keys:
-            current = s.heading.strip().rstrip(".")
+            current = _display_title(s.heading)
             s.titles = [current]
             s.level = 1
         elif current and s.heading:
-            own = s.heading.strip().rstrip(".")
+            own = _display_title(s.heading)
             s.titles = [current] if own.lower() == current.lower() else [current, own]
             s.level = 2
         elif current:

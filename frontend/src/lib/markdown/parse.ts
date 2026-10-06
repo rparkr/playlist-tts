@@ -232,6 +232,23 @@ function isChapterHeading(text: string): boolean {
 	return letters.length >= 4 && letters === letters.toUpperCase();
 }
 
+/** Breadcrumb display form: Title Case for ALL-CAPS headings, kept otherwise.
+ *
+ * Mirrors backend `_display_title`: `COMMUNICATIONS.` → `Communications`
+ * while `Radio Antenna Towers.` keeps its case (trailing dots stripped).
+ */
+function displayTitle(text: string): string {
+	const clean = text.trim().replace(/\.+$/, '');
+	const letters = clean.replace(/[^A-Za-z]/g, '');
+	if (letters.length >= 4 && letters === letters.toUpperCase()) {
+		return clean
+			.toLowerCase()
+			.split(/([\W_]+)/)
+			.map((tok) => (/^[a-z]/.test(tok) ? tok[0].toUpperCase() + tok.slice(1) : tok))
+			.join('');
+	}
+	return clean;
+}
 /** Restructure flat-heading docs (e.g. all-`h2` scans) into chapters.
  *
  * Docling often emits every heading at one level, which leaves the
@@ -263,11 +280,11 @@ export function fixFlatHeadings(sections: Section[]): void {
 	for (const s of sections) {
 		const key = (s.heading ?? '').trim().toLowerCase();
 		if (s.heading && chapterKeys.has(key)) {
-			currentChapter = s.heading.trim().replace(/\.+$/, '');
+			currentChapter = displayTitle(s.heading);
 			s.titles = [currentChapter];
 			s.level = 1;
 		} else if (currentChapter && s.heading) {
-			const own = s.heading.trim().replace(/\.+$/, '');
+			const own = displayTitle(s.heading);
 			s.titles = own.toLowerCase() === currentChapter.toLowerCase() ? [currentChapter] : [currentChapter, own];
 			s.level = 2;
 		} else if (currentChapter) {

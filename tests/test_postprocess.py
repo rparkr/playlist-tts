@@ -278,5 +278,4 @@ def test_flat_h2_breadcrumbs_promote_chapters():
     )
     sections = parse_markdown_structure(md)
     radio = next(s for s in sections if (s.heading or "") == "Radio Antenna Towers.")
-    assert radio.titles[0].lower().startswith("communications")
-    assert radio.titles[-1].startswith("Radio Antenna")
+    assert radio.titles == ["Communications", "Radio Antenna Towers"]

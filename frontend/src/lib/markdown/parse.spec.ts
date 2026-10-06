@@ -150,6 +150,6 @@ describe('flat-h2 breadcrumbs', () => {
 		const md = '## ELECTRICAL GRID.\n\nIntro.\n\n## COMMUNICATIONS.\n\nIntro.\n\n## Radio Antenna Towers.\n\nTowers.';
 		const sections = parseMarkdownStructure(md);
 		const radio = sections.find((s) => s.heading === 'Radio Antenna Towers.');
-		expect(radio?.titles[0].toLowerCase()).toContain('communications');
+		expect(radio?.titles).toEqual(['Communications', 'Radio Antenna Towers']);
 	});
 });
