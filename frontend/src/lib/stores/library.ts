@@ -624,5 +624,22 @@ export async function updatePlaylistItemProgress(
 	return item;
 }
 
+/** Remove every playlist item pointing at a deleted doc (order fixup included). */
+export async function deleteItemsByDocId(docId: string): Promise<string[]> {
+	const db = await getDB();
+	let all: PlaylistItem[];
+	try {
+		all = await db.getAll('items');
+	} catch {
+		return [];
+	}
+	const affected = new Set<string>();
+	for (const item of all.filter((i) => i.docId === docId)) {
+		affected.add(item.playlistId);
+		await deletePlaylistItem(item.id);
+	}
+	return [...affected];
+}
+
 /** Re-export playlist model types for UI layers. */
 export type { ItemSource, ItemSourceKind, Playlist, PlaylistItem };
