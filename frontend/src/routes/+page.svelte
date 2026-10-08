@@ -21,6 +21,7 @@
 		getPdfSizes,
 		createPlaylist,
 		getPlaylists,
+		getAllItems,
 		renamePlaylist,
 		deletePlaylist,
 		touchPlaylistListened,
@@ -55,7 +56,6 @@
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
-	import LibraryModal from '$lib/components/LibraryModal.svelte';
 	import Overview, {
 		type OverviewPlaylistStat,
 		type OverviewSearchHit
@@ -68,6 +68,7 @@
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
 	import { formatEta, formatRemaining, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
+	import { applyPostprocessing } from '$lib/markdown/postprocess';
 	import { domainOf, isPdfUrl, sourceLabel } from '$lib/playlists/model';
 	import {
 		LS_KEYS,
@@ -106,6 +107,28 @@
 	// reaction belongs to that manual navigation, so it must not overwrite
 	// the explicitly chosen page (missing-marker snap-back, #75).
 	let pdfManualNav = false;
+	// Horizontal pane split (#56): left-pane width percent, persisted.
+	let paneSplit: number = $state(50);
+	let readerGridEl: HTMLElement | null = $state(null);
+	let paneResizing = false;
+
+	function paneResizeStart(e: PointerEvent) {
+		paneResizing = true;
+		(e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
+	}
+	function paneResizeMove(e: PointerEvent) {
+		if (!paneResizing || !readerGridEl) return;
+		const rect = readerGridEl.getBoundingClientRect();
+		if (rect.width <= 0) return;
+		paneSplit = Math.max(25, Math.min(75, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+	}
+	function paneResizeEnd() {
+		if (!paneResizing) return;
+		paneResizing = false;
+		try {
+			localStorage.setItem(LS_KEYS.paneSplit, String(paneSplit));
+		} catch {}
+	}
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
 	let ocrStartAt: number | null = $state(null);
@@ -131,6 +154,9 @@
 	let optPageMarkers: boolean = $state(true);
 	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
+	/** Extraction engine for the staging bar: auto routes text-vs-OCR, `llm`
+	 * posts to the vision-LLM endpoint instead of `/api/ocr/jobs`. */
+	let optEngine: 'auto' | 'text' | 'docling' | 'llm' = $state('auto');
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
 	let settingsHydrated: boolean = $state(false);
@@ -150,6 +176,8 @@
 			insert_page_markers: optPageMarkers,
 			first_page_marker: optFirstPageMarker,
 			first_page_number: optFirstPageNumber,
+			// The LLM endpoint shares the schema; it ignores `engine`.
+			engine: optEngine === 'llm' ? 'auto' : optEngine,
 			page_overrides: Object.keys(pageOverrides).length > 0 ? { ...pageOverrides } : null
 		};
 	}
@@ -187,7 +215,6 @@
 	let markdownPaneRef: any = $state(null);
 
 	// UI state per plan
-	let showLibrary = $state(false);
 	let showTtsSettings = $state(false);
 	let showPostprocess = $state(false);
 	// Phase 3: overview view + tri-mode left pane (PDF | Playlist | Library).
@@ -207,12 +234,15 @@
 	let libraryStats: Record<string, LibraryPlaylistStat> = $state({});
 	let overviewStats: OverviewPlaylistStat[] = $state([]);
 	let overviewSearch: OverviewSearchHit[] = $state([]);
+	/** Docs not referenced by any playlist item (library unassigned section). */
+	let unassignedDocs: Doc[] = $state([]);
 	/** New docs (OCR / upload / fetch / paste) land in this playlist when set. */
 	let pendingPlaylistId: string | null = $state(null);
 	/** Listen-now URL / paste dialogs from the overview page. */
 	let urlDialogOpen = $state(false);
 	let pasteDialogOpen = $state(false);
 	let listenUrlValue: string = $state('');
+	let listenPasteTitle: string = $state('');
 	let listenPasteValue: string = $state('');
 
 	let pdfInputEl: HTMLInputElement | null = $state(null);
@@ -335,6 +365,10 @@
 		await refreshPlaylistData();
 		// Fresh profiles (no restored doc) land on the overview page.
 		if (!activeDoc) view = 'overview';
+		try {
+			const split = parseInt(localStorage.getItem(LS_KEYS.paneSplit) ?? '', 10);
+			if (Number.isFinite(split)) paneSplit = Math.max(25, Math.min(75, split));
+		} catch {}
 		settingsHydrated = true;
 	});
 
@@ -749,6 +783,84 @@
 		return text;
 	}
 
+	/** OCR endpoint base for an engine choice (`llm` has its own router). */
+	function ocrJobBase(engine: string): string {
+		return engine === 'llm' ? `${API_BASE}/api/ocr/llm/jobs` : `${API_BASE}/api/ocr/jobs`;
+	}
+
+	function beginOcrProgress() {
+		isOcrRunning = true;
+		ocrProgress = { done: 0, total: 0 };
+		ocrStartAt = Date.now();
+		ocrEtaSeconds = null;
+		ocrEtaAnchoredAt = null;
+		ocrNow = Date.now();
+	}
+
+	function clearOcrProgress() {
+		isOcrRunning = false;
+		ocrProgress = null;
+		ocrStartAt = null;
+		ocrEtaSeconds = null;
+		ocrEtaAnchoredAt = null;
+	}
+
+	/** Submit a PDF OCR job and wait for its result (SSE with polling fallback).
+	 *
+	 * Updates the shared progress state so the progress pane animates.
+	 * Returns the job `result` payload (`markdown`, `raw_markdown`, …).
+	 */
+	async function runOcrJobToResult(
+		file: Blob,
+		filename: string,
+		postprocessJson: string,
+		base: string
+	): Promise<any> {
+		const fd = new FormData();
+		// Pass filename explicitly so the backend always sees it,
+		// even if the File object was wrapped/proxied by state.
+		fd.append('file', file, filename);
+		fd.append('postprocess', postprocessJson);
+		const resp = await fetch(base, { method: 'POST', body: fd });
+		if (!resp.ok) throw new Error(await parseErrorResponse(resp));
+		const { job_id } = await resp.json();
+		const es = new EventSource(`${base}/${job_id}/events`);
+		await new Promise<any>((resolve, reject) => {
+			es.onmessage = (ev) => {
+				try {
+					const data = JSON.parse(ev.data);
+					if (data.type === 'progress' || data.type === 'keepalive') {
+						ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
+						anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
+					} else if (data.type === 'done') {
+						es.close();
+						resolve(data);
+					} else if (data.type === 'error') {
+						es.close();
+						reject(new Error(data.error));
+					}
+				} catch {}
+			};
+			es.onerror = () => {};
+		}).catch(async () => {
+			for (let i = 0; i < 120; i++) {
+				await new Promise((r) => setTimeout(r, 2000));
+				const r = await fetch(`${base}/${job_id}`);
+				if (!r.ok) continue;
+				const j = await r.json();
+				ocrProgress = { done: j.progress.done, total: j.progress.total };
+				anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
+				if (j.status === 'done') return j;
+				if (j.status === 'error') throw new Error(j.error);
+			}
+			throw new Error('OCR poll timeout');
+		});
+		const r = await fetch(`${base}/${job_id}`);
+		const job = await r.json();
+		if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
+		return job.result;
+	}
+
 	async function runOcr() {
 		if (!pdfFile) {
 			showToast('Select a PDF first');
@@ -759,57 +871,19 @@
 		if (fileToUpload.size > 100 * 1024 * 1024) {
 			showToast(`Large PDF (${(fileToUpload.size / 1024 / 1024).toFixed(1)} MB) — processing may take a while`);
 		}
-		isOcrRunning = true;
-		ocrProgress = { done: 0, total: 0 };
-		ocrStartAt = Date.now();
-		ocrEtaSeconds = null;
-		ocrEtaAnchoredAt = null;
-		ocrNow = Date.now();
+		if (isOcrRunning) {
+			showToast('Extraction already running');
+			return;
+		}
+		beginOcrProgress();
 		let ocrSucceeded = false;
 		try {
-			const fd = new FormData();
-			// Pass filename explicitly so the backend always sees it,
-			// even if the File object was wrapped/proxied by state.
-			fd.append('file', fileToUpload, fileToUpload.name || 'upload.pdf');
-			fd.append('postprocess', JSON.stringify(currentPostprocessOpts()));
-			const resp = await fetch(`${API_BASE}/api/ocr/jobs`, { method: 'POST', body: fd });
-			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
-			const { job_id } = await resp.json();
-			const es = new EventSource(`${API_BASE}/api/ocr/jobs/${job_id}/events`);
-			await new Promise<any>((resolve, reject) => {
-				es.onmessage = (ev) => {
-					try {
-						const data = JSON.parse(ev.data);
-						if (data.type === 'progress' || data.type === 'keepalive') {
-							ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
-							anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
-						} else if (data.type === 'done') {
-							es.close();
-							resolve(data);
-						} else if (data.type === 'error') {
-							es.close();
-							reject(new Error(data.error));
-						}
-					} catch {}
-				};
-				es.onerror = () => {};
-			}).catch(async () => {
-				for (let i = 0; i < 120; i++) {
-					await new Promise((r) => setTimeout(r, 2000));
-					const r = await fetch(`${API_BASE}/api/ocr/jobs/${job_id}`);
-					if (!r.ok) continue;
-					const j = await r.json();
-					ocrProgress = { done: j.progress.done, total: j.progress.total };
-					anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
-					if (j.status === 'done') return j;
-					if (j.status === 'error') throw new Error(j.error);
-				}
-				throw new Error('OCR poll timeout');
-			});
-			const r = await fetch(`${API_BASE}/api/ocr/jobs/${job_id}`);
-			const job = await r.json();
-			if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
-			const result = job.result;
+			const result = await runOcrJobToResult(
+				fileToUpload,
+				fileToUpload.name || 'upload.pdf',
+				JSON.stringify(currentPostprocessOpts()),
+				ocrJobBase(optEngine)
+			);
 			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
 			// Prefer raw backend output so re-render stays client-side/offline.
 			// Fall back to processed markdown for older backends.
@@ -851,11 +925,7 @@
 		} catch (e: any) {
 			showToast(`OCR failed: ${e.message}`);
 		} finally {
-			isOcrRunning = false;
-			ocrProgress = null;
-			ocrStartAt = null;
-			ocrEtaSeconds = null;
-			ocrEtaAnchoredAt = null;
+			clearOcrProgress();
 		}
 		// Load the preview only after the progress pane is gone — while OCR
 		// runs the PdfPane (and its canvas) is unmounted, so rendering then
@@ -863,6 +933,82 @@
 		if (ocrSucceeded && pdfUrl) {
 			await tick();
 			await loadPdf();
+		}
+	}
+
+	/** Re-extract a playlist item's cached PDF with a chosen engine.
+	 *
+	 * Runs the same job flow as initial OCR, then swaps the doc's text in
+	 * place (title, playlist items, and cached PDF are kept). Progress
+	 * reuses the OCR progress pane.
+	 */
+	async function handleReprocessItem(
+		itemId: string,
+		engine: 'auto' | 'text' | 'docling' | 'llm'
+	) {
+		const item = playlistItems.find((i) => i.id === itemId);
+		if (!item) return;
+		const doc = await getDoc(item.docId);
+		if (!doc) {
+			showToast('Document not found');
+			return;
+		}
+		const pdf = await getPdf(item.docId);
+		if (!pdf?.blob) {
+			showToast('No cached PDF for this item');
+			return;
+		}
+		if (
+			!confirm(`Re-extract "${item.title}" with ${engine}? This replaces the current text.`)
+		)
+			return;
+		if (isOcrRunning) {
+			showToast('Extraction already running');
+			return;
+		}
+		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+		sentencePlayer?.stop();
+		isPlaying = false;
+		beginOcrProgress();
+		try {
+			const opts = { ...currentPostprocessOpts(), engine: engine === 'llm' ? 'auto' : engine };
+			const result = await runOcrJobToResult(
+				pdf.blob,
+				pdf.name || 'document.pdf',
+				JSON.stringify(opts),
+				ocrJobBase(engine)
+			);
+			const rawMarkdown = result.raw_markdown ?? result.markdown;
+			const rawPageMap = result.raw_page_map ?? result.page_map;
+			const rendered = applyPostprocessing(rawMarkdown, opts, rawPageMap ?? null);
+			const updated: Doc = {
+				...doc,
+				markdown: rendered.markdown,
+				sections: rendered.sections,
+				pageMap: rendered.pageMap,
+				rawMarkdown,
+				rawPageMap,
+				postprocess: opts,
+				updatedAt: Date.now()
+			};
+			await saveDoc(updated);
+			docs = await getAllDocs();
+			const total = getGlobalSentences(rendered.sections).length;
+			await updatePlaylistItemProgress(itemId, 0, total);
+			if (activeDoc?.id === doc.id) {
+				activeDoc = updated;
+				markdownDraft = updated.markdown;
+				renderBaseline = updated.markdown;
+				globalIdx = 0;
+				isEditing = false;
+				await loadCachedPdf(doc.id);
+			}
+			await refreshPlaylistData();
+			showToast('Re-extraction complete');
+		} catch (e: any) {
+			showToast(`Re-extract failed: ${e?.message ?? e}`);
+		} finally {
+			clearOcrProgress();
 		}
 	}
 
@@ -949,8 +1095,20 @@
 		}
 		playlistItems = activePlaylistId ? await getPlaylistItems(activePlaylistId) : [];
 		if (activeItemId && !playlistItems.some((i) => i.id === activeItemId)) activeItemId = null;
+		await refreshUnassigned();
 		await refreshItemStats();
 		await refreshLibraryStats();
+	}
+
+	/** Docs not referenced by any playlist item. */
+	async function refreshUnassigned() {
+		try {
+			const all = await getAllItems();
+			const referenced = new Set(all.map((i) => i.docId));
+			unassignedDocs = docs.filter((d) => !referenced.has(d.id));
+		} catch {
+			unassignedDocs = [];
+		}
 	}
 
 	/** Per-card progress + ETA stats for the open playlist's items. */
@@ -1011,6 +1169,7 @@
 
 	async function refreshOverview() {
 		playlists = await getPlaylists();
+		await refreshUnassigned();
 		await refreshLibraryStats();
 		overviewStats = playlists.map((p) => {
 			const s = libraryStats[p.id];
@@ -1041,6 +1200,16 @@
 					detail: `${p.name} · ${sourceLabel(it.source)}`
 				});
 			}
+		}
+		for (const d of unassignedDocs) {
+			idx.push({
+				playlistId: '',
+				playlistName: '',
+				itemId: null,
+				docId: d.id,
+				title: d.title,
+				detail: 'Not in a playlist'
+			});
 		}
 		overviewSearch = idx;
 	}
@@ -1201,7 +1370,7 @@
 		}
 	}
 
-	async function handlePasteText(targetPlaylistId: string | null, text: string) {
+	async function handlePasteText(targetPlaylistId: string | null, text: string, title?: string) {
 		const clean = text.trim();
 		if (!clean) return;
 		const firstLine =
@@ -1209,10 +1378,10 @@
 				.split('\n')
 				.map((l) => l.trim())
 				.find((l) => l.length > 0) ?? 'Pasted text';
-		const title = firstLine.replace(/^#+\s*/, '').slice(0, 80) || 'Pasted text';
+		const docTitle = title?.trim() || firstLine.replace(/^#+\s*/, '').slice(0, 80) || 'Pasted text';
 		pendingPlaylistId = targetPlaylistId;
 		try {
-			const doc = await createDoc(title, clean, undefined, currentPostprocessOpts());
+			const doc = await createDoc(docTitle, clean, undefined, currentPostprocessOpts());
 			await placeNewDoc(doc, { kind: 'markdown-paste' });
 			showToast(targetPlaylistId ? 'Pasted text added to playlist' : 'Pasted text opened');
 		} catch (e: unknown) {
@@ -1265,6 +1434,22 @@
 		await deletePlaylistItem(id);
 		if (activeItemId === id) activeItemId = null;
 		await refreshPlaylistData();
+	}
+
+	async function handleBulkDeletePlaylistItems(ids: string[]) {
+		if (ids.length === 0) return;
+		if (
+			!confirm(
+				`Remove ${ids.length} ${ids.length === 1 ? 'item' : 'items'} from the playlist? (Documents are kept.)`
+			)
+		)
+			return;
+		for (const id of ids) {
+			await deletePlaylistItem(id);
+			if (activeItemId === id) activeItemId = null;
+		}
+		await refreshPlaylistData();
+		showToast(`Removed ${ids.length} ${ids.length === 1 ? 'item' : 'items'}`);
 	}
 
 	async function handleMovePlaylistItem(id: string, dir: -1 | 1) {
@@ -1694,8 +1879,32 @@
 		pendingPlaylistId = null;
 		pdfInputEl?.click();
 	}
-	function handleMenuClick() {
-		showLibrary = true;
+	function handleLibraryButton() {
+		if (activeDoc) {
+			view = 'reader';
+			leftPane = 'library';
+			leftVisible = true;
+		} else {
+			view = 'overview';
+			void refreshOverview();
+		}
+	}
+
+	async function handleAddUnassignedToPlaylist(docId: string, playlistId: string) {
+		const d = docs.find((x) => x.id === docId) ?? (await getDoc(docId));
+		if (!d) {
+			showToast('Document not found');
+			return;
+		}
+		const source: ItemSource =
+			pdfSizes[docId] !== undefined ? { kind: 'pdf-upload' } : { kind: 'markdown-upload' };
+		const item = await attachDocAsItem(playlistId, d, source);
+		if (item) showToast('Added to playlist');
+	}
+
+	async function handleOpenUnassignedDoc(docId: string) {
+		await openDoc(docId);
+		view = 'reader';
 	}
 
 	// Postprocessing apply — offline client-side re-render, preserving user edits.
@@ -1783,7 +1992,7 @@
 </svelte:head>
 
 <div class="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} leftPaneVisible={leftVisible} onLogoClick={handleLogoClick} onUploadClick={handleHeaderUpload} onMenuClick={handleMenuClick} onToggleLeftPane={handleToggleLeftPane} />
+	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} leftPaneVisible={leftVisible} onLogoClick={handleLogoClick} onLibraryClick={handleLibraryButton} onToggleLeftPane={handleToggleLeftPane} />
 
 	<input bind:this={pdfInputEl} type="file" accept="application/pdf" onchange={onPdfSelected} class="hidden" />
 	<input bind:this={mdInputEl} type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onchange={onMarkdownSelected} class="hidden" />
@@ -1800,6 +2009,7 @@
 				onResume={handleResumePlaylist}
 				onOpenPlaylist={handleOpenPlaylist}
 				onOpenItem={(pid, iid) => openPlaylistItem(pid, iid)}
+				onOpenDoc={handleOpenUnassignedDoc}
 				onShowLibrary={() => {
 					view = 'reader';
 					leftPane = 'library';
@@ -1835,6 +2045,20 @@
 						}}
 						class="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
 					/>
+				</label>
+				<label class="flex items-center gap-2 text-xs text-slate-300">
+					Engine
+					<select
+						bind:value={optEngine}
+						aria-label="Extraction engine"
+						title="auto tries text extraction first, then OCR"
+						class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
+					>
+						<option value="auto">auto</option>
+						<option value="text">text extraction</option>
+						<option value="docling">OCR: docling</option>
+						<option value="llm">OCR: LLM</option>
+					</select>
 				</label>
 				<div class="flex items-center gap-2">
 					<button onclick={triggerMarkdownUpload} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
@@ -1884,8 +2108,22 @@
 				{/if}
 			</div>
 		{:else if activeDoc}
-			<div class="{leftVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0 flex flex-col'}">
+			<div
+				bind:this={readerGridEl}
+				style:--left-pct={`${paneSplit}%`}
+				class="{leftVisible ? 'pane-split relative grid gap-4 items-stretch md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0 flex flex-col'}"
+			>
 				{#if leftVisible}
+					<button
+						class="pane-handle hidden md:block"
+						style:left={`${paneSplit}%`}
+						onpointerdown={paneResizeStart}
+						onpointermove={paneResizeMove}
+						onpointerup={paneResizeEnd}
+						onpointercancel={paneResizeEnd}
+						aria-label="Resize panes"
+						title="Drag to resize panes"
+					></button>
 					{#if leftPane === 'pdf'}
 						<PdfPane
 							{pdfUrl}
@@ -1911,14 +2149,16 @@
 							}}
 							onRenameItem={handleRenamePlaylistItem}
 							onDeleteItem={handleDeletePlaylistItem}
+							onBulkDelete={handleBulkDeletePlaylistItems}
 							onMoveItem={handleMovePlaylistItem}
 							onDropItem={handleDropPlaylistItem}
 							onShowPdf={handleShowItemPdf}
 							onClearItemPdf={handleClearItemPdf}
+							onReprocessItem={handleReprocessItem}
 							onOpenLibrary={() => (leftPane = 'library')}
 							onUploadPdf={handlePlaylistPdfUpload}
 							onUploadMarkdown={handlePlaylistMarkdownUpload}
-							onPasteText={(text) => handlePasteText(activePlaylistId, text)}
+							onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
 							onFetchUrl={(url) => handleFetchUrl(activePlaylistId, url)}
 							onAddCurrentDoc={handleAddCurrentDoc}
 						/>
@@ -1927,10 +2167,19 @@
 							{playlists}
 							stats={libraryStats}
 							{activePlaylistId}
+							unassigned={unassignedDocs.map((d) => ({
+								id: d.id,
+								title: d.title,
+								hasPdf: pdfSizes[d.id] !== undefined
+							}))}
 							onOpenPlaylist={handleOpenPlaylist}
 							onCreatePlaylist={handleCreatePlaylist}
 							onRenamePlaylist={handleRenamePlaylist}
 							onDeletePlaylist={handleDeletePlaylist}
+							onOpenDoc={handleOpenUnassignedDoc}
+							onRenameDoc={renameDoc}
+							onDeleteDoc={deleteDocHandler}
+							onAddDocToPlaylist={handleAddUnassignedToPlaylist}
 						/>
 					{/if}
 				{/if}
@@ -1960,24 +2209,21 @@
 					<button onclick={handleHeaderUpload} class="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded-md font-medium">
 						Upload PDF
 					</button>
-					<button onclick={triggerMarkdownUpload} class="inline-flex items-center gap-2 border border-slate-600 hover:bg-slate-800 text-slate-200 px-5 py-2 rounded-md font-medium">
-						Upload Markdown
-					</button>
-				</div>
-				<button onclick={() => (showLibrary = true)} class="text-sm text-slate-400 hover:text-slate-200 underline">
-					Open library ({docs.length} {docs.length === 1 ? 'doc' : 'docs'})
-				</button>
-				<button
-					onclick={() => {
-						view = 'overview';
-						void refreshOverview();
-					}}
-					class="text-sm text-slate-400 hover:text-slate-200 underline"
-				>
-					Go to overview
+				<button onclick={triggerMarkdownUpload} class="inline-flex items-center gap-2 border border-slate-600 hover:bg-slate-800 text-slate-200 px-5 py-2 rounded-md font-medium">
+					Upload Markdown
 				</button>
 			</div>
-		{/if}
+			<button
+				onclick={() => {
+					view = 'overview';
+					void refreshOverview();
+				}}
+				class="text-sm text-slate-400 hover:text-slate-200 underline"
+			>
+				Go to overview
+			</button>
+		</div>
+	{/if}
 	</main>
 
 	<PlayerBar
@@ -1992,18 +2238,6 @@
 		onNextSection={nextSection}
 		onSeek={seekTo}
 		onSettings={() => (showTtsSettings = true)}
-	/>
-
-	<LibraryModal
-		open={showLibrary}
-		{docs}
-		activeDocId={activeDoc?.id ?? null}
-		pdfSizes={pdfSizes}
-		onClose={() => (showLibrary = false)}
-		onSelect={openDoc}
-		onDelete={deleteDocHandler}
-		onRename={renameDoc}
-		onClearPdf={clearCachedPdf}
 	/>
 
 	{#if urlDialogOpen}
@@ -2076,15 +2310,23 @@
 			<form
 				onsubmit={(e) => {
 					e.preventDefault();
+					const t = listenPasteTitle;
 					const v = listenPasteValue;
+					listenPasteTitle = '';
 					listenPasteValue = '';
 					pasteDialogOpen = false;
-					void handlePasteText(null, v);
+					void handlePasteText(null, v, t);
 				}}
 				class="relative w-full max-w-md bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col gap-3"
 			>
 				<h2 class="text-base font-semibold text-slate-100">Paste text</h2>
 				<p class="text-xs text-slate-400">Paste Markdown or plain text to listen to right away.</p>
+				<input
+					bind:value={listenPasteTitle}
+					placeholder="Title (optional — first line used otherwise)"
+					aria-label="Pasted text title"
+					class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
+				/>
 				<textarea
 					bind:value={listenPasteValue}
 					rows={8}
@@ -2152,4 +2394,38 @@
 
 <style>
 	:global(body) { margin: 0; }
+	/* Horizontal pane resize (#56): two columns on md+ sized by --left-pct,
+	 * stacked on narrow screens. Unlayered so it wins over utilities. */
+	@media (min-width: 768px) {
+		.pane-split {
+			grid-template-columns: var(--left-pct, 50%) minmax(0, 1fr);
+		}
+	}
+	.pane-handle {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 14px;
+		margin-left: -7px;
+		cursor: col-resize;
+		z-index: 10;
+		background: transparent;
+		border: 0;
+		padding: 0;
+		touch-action: none;
+	}
+	.pane-handle::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 6px;
+		width: 2px;
+		background: transparent;
+		transition: background 0.15s;
+	}
+	.pane-handle:hover::after,
+	.pane-handle:active::after {
+		background: rgb(14 165 233 / 0.6);
+	}
 </style>

@@ -624,6 +624,16 @@ export async function updatePlaylistItemProgress(
 	return item;
 }
 
+/** Every playlist item (for unassigned-doc computation and search). */
+export async function getAllItems(): Promise<PlaylistItem[]> {
+	const db = await getDB();
+	try {
+		return await db.getAll('items');
+	} catch {
+		return [];
+	}
+}
+
 /** Remove every playlist item pointing at a deleted doc (order fixup included). */
 export async function deleteItemsByDocId(docId: string): Promise<string[]> {
 	const db = await getDB();

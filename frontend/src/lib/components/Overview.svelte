@@ -17,6 +17,8 @@ export interface OverviewSearchHit {
 	playlistId: string;
 	playlistName: string;
 	itemId: string | null;
+	/** Set for docs outside any playlist (opens standalone). */
+	docId?: string | null;
 	title: string;
 	detail: string;
 }
@@ -27,6 +29,7 @@ interface Props {
 	onResume: (playlistId: string) => void;
 	onOpenPlaylist: (playlistId: string) => void;
 	onOpenItem: (playlistId: string, itemId: string) => void;
+	onOpenDoc: (docId: string) => void;
 	onShowLibrary: () => void;
 	onCreatePlaylist: () => void;
 	onUploadPdf: () => void;
@@ -41,6 +44,7 @@ let {
 	onResume,
 	onOpenPlaylist,
 	onOpenItem,
+	onOpenDoc,
 	onShowLibrary,
 	onCreatePlaylist,
 	onUploadPdf,
@@ -81,10 +85,13 @@ function percent(s: OverviewPlaylistStat): number {
 		<section>
 			<h2 class="text-lg font-semibold text-slate-100 mb-3">Results</h2>
 			<div class="flex flex-col gap-2">
-				{#each hits as hit (hit.itemId ?? hit.playlistId)}
+				{#each hits as hit (hit.docId ?? hit.itemId ?? hit.playlistId)}
 					<button
-						onclick={() =>
-							hit.itemId ? onOpenItem(hit.playlistId, hit.itemId) : onOpenPlaylist(hit.playlistId)}
+						onclick={() => {
+							if (hit.docId) onOpenDoc(hit.docId);
+							else if (hit.itemId) onOpenItem(hit.playlistId, hit.itemId);
+							else onOpenPlaylist(hit.playlistId);
+						}}
 						class="text-left bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg px-4 py-2.5 transition-colors"
 					>
 						<div class="text-sm font-medium text-slate-100 truncate">{hit.title}</div>

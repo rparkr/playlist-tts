@@ -15,7 +15,8 @@ export const LS_KEYS = {
 	voice: 'tts_voice',
 	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
-	postprocess: 'tts_postprocess'
+	postprocess: 'tts_postprocess',
+	paneSplit: 'tts_pane_split'
 } as const;
 
 export const URL_PARAMS = {

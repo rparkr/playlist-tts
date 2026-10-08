@@ -12,7 +12,8 @@ import {
 	X,
 	ClipboardPaste,
 	LibraryBig,
-	FileStack
+	FileStack,
+	RefreshCw
 } from 'lucide-svelte';
 import type { Playlist, PlaylistItem } from '$lib/playlists/model';
 import { sourceLabel } from '$lib/playlists/model';
@@ -25,6 +26,15 @@ export interface PlaylistItemStat {
 	hasPdf: boolean;
 }
 
+export type ReprocessEngine = 'auto' | 'text' | 'docling' | 'llm';
+
+const ENGINES: { value: ReprocessEngine; label: string }[] = [
+	{ value: 'auto', label: 'auto' },
+	{ value: 'text', label: 'text extraction' },
+	{ value: 'docling', label: 'OCR: docling' },
+	{ value: 'llm', label: 'OCR: LLM' }
+];
+
 interface Props {
 	playlist: Playlist | null;
 	items: PlaylistItem[];
@@ -35,14 +45,16 @@ interface Props {
 	onSelectItem: (id: string) => void;
 	onRenameItem: (id: string, title: string) => void;
 	onDeleteItem: (id: string) => void;
+	onBulkDelete: (ids: string[]) => void;
 	onMoveItem: (id: string, dir: -1 | 1) => void;
 	onDropItem: (id: string, targetId: string) => void;
 	onShowPdf: (id: string) => void;
 	onClearItemPdf: (id: string) => void;
+	onReprocessItem: (id: string, engine: ReprocessEngine) => void;
 	onOpenLibrary: () => void;
 	onUploadPdf: () => void;
 	onUploadMarkdown: () => void;
-	onPasteText: (text: string) => void;
+	onPasteText: (title: string, text: string) => void;
 	onFetchUrl: (url: string) => void;
 	onAddCurrentDoc: () => void;
 }
@@ -56,10 +68,12 @@ let {
 	onSelectItem,
 	onRenameItem,
 	onDeleteItem,
+	onBulkDelete,
 	onMoveItem,
 	onDropItem,
 	onShowPdf,
 	onClearItemPdf,
+	onReprocessItem,
 	onOpenLibrary,
 	onUploadPdf,
 	onUploadMarkdown,
@@ -72,10 +86,27 @@ let menuOpen: boolean = $state(false);
 let urlFormOpen: boolean = $state(false);
 let pasteFormOpen: boolean = $state(false);
 let urlValue: string = $state('');
+let pasteTitle: string = $state('');
 let pasteValue: string = $state('');
 let editingId: string | null = $state(null);
 let editValue: string = $state('');
 let dragId: string | null = $state(null);
+// Edit mode (header pencil): checkboxes + per-row rename/reorder/reprocess,
+// bulk delete. Normal mode stays decluttered: tap a card to open it.
+let editMode: boolean = $state(false);
+let selected: string[] = $state([]);
+let reprocessId: string | null = $state(null);
+
+// Drop selections for items that left the playlist (deletes, switches).
+$effect(() => {
+	const ids = new Set(items.map((i) => i.id));
+	selected = selected.filter((id) => ids.has(id));
+	if (editingId && !ids.has(editingId)) {
+		editingId = null;
+		editValue = '';
+	}
+	if (reprocessId && !ids.has(reprocessId)) reprocessId = null;
+});
 
 function openMenu() {
 	menuOpen = !menuOpen;
@@ -97,10 +128,12 @@ function submitUrl() {
 function submitPaste() {
 	const text = pasteValue.trim();
 	if (!text) return;
+	const title = pasteTitle.trim();
+	pasteTitle = '';
 	pasteValue = '';
 	pasteFormOpen = false;
 	menuOpen = false;
-	onPasteText(text);
+	onPasteText(title, text);
 }
 
 function startEdit(item: PlaylistItem) {
@@ -112,6 +145,10 @@ function commitEdit() {
 	if (editingId && editValue.trim()) onRenameItem(editingId, editValue.trim());
 	editingId = null;
 	editValue = '';
+}
+
+function toggleSelect(id: string) {
+	selected = selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id];
 }
 
 function itemPercent(id: string): number {
@@ -140,11 +177,25 @@ function itemPercent(id: string): number {
 					class="w-8 h-8 flex items-center justify-center rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100">
 					<Plus size={16} />
 				</button>
+				<button onclick={() => { editMode = !editMode; selected = []; reprocessId = null; }} aria-label={editMode ? 'Done editing' : 'Edit playlist'}
+					title={editMode ? 'Done editing' : 'Edit playlist (rename, reorder, reprocess, delete)'}
+					class="w-8 h-8 flex items-center justify-center rounded-md text-slate-100 {editMode ? 'bg-sky-600 hover:bg-sky-500' : 'bg-slate-700 hover:bg-slate-600'}">
+					{#if editMode}<Check size={16} />{:else}<Pencil size={16} />{/if}
+				</button>
 				<button onclick={onOpenLibrary} aria-label="Open library" title="Open library"
 					class="w-8 h-8 flex items-center justify-center rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100">
 					<LibraryBig size={16} />
 				</button>
 			</div>
+			{#if editMode && selected.length > 0}
+				<div class="mt-2 flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-2 py-1.5">
+					<span class="flex-1 text-xs text-slate-200">{selected.length} selected</span>
+					<button onclick={() => { onBulkDelete(selected); selected = []; }}
+						class="inline-flex items-center gap-1 text-xs px-3 py-1 rounded-md bg-red-600 hover:bg-red-500 text-white font-medium">
+						<Trash2 size={13} /> Delete
+					</button>
+				</div>
+			{/if}
 			{#if menuOpen}
 				<div class="mt-2 flex flex-col gap-2 rounded-lg border border-slate-600 bg-slate-900/60 p-2">
 					<div class="grid grid-cols-2 gap-2">
@@ -175,6 +226,8 @@ function itemPercent(id: string): number {
 					{/if}
 					{#if pasteFormOpen}
 						<form onsubmit={(e) => { e.preventDefault(); submitPaste(); }} class="flex flex-col gap-2">
+							<input bind:value={pasteTitle} placeholder="Title (optional — first line used otherwise)" aria-label="Pasted text title"
+								class="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-sky-500" />
 							<textarea bind:value={pasteValue} rows={4} placeholder="Paste Markdown or plain text…" aria-label="Paste text"
 								class="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-sky-500"></textarea>
 							<button type="submit" class="self-end text-xs px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">Add as item</button>
@@ -194,7 +247,7 @@ function itemPercent(id: string): number {
 						role="option"
 						tabindex="0"
 						aria-selected={activeItemId === item.id}
-						draggable="true"
+						draggable={editMode ? 'true' : 'false'}
 						ondragstart={() => (dragId = item.id)}
 						ondragover={(e) => e.preventDefault()}
 						ondrop={() => { if (dragId && dragId !== item.id) onDropItem(dragId, item.id); dragId = null; }}
@@ -202,6 +255,11 @@ function itemPercent(id: string): number {
 						class="bg-slate-700/60 hover:bg-slate-700 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors {activeItemId === item.id ? 'border-sky-500' : 'border-transparent'} {dragId === item.id ? 'opacity-50' : ''}"
 					>
 						<div class="flex items-center gap-2">
+							{#if editMode}
+								<input type="checkbox" checked={selected.includes(item.id)} onchange={() => toggleSelect(item.id)}
+									onclick={(e) => e.stopPropagation()} aria-label="Select {item.title}"
+									class="w-4 h-4 shrink-0 accent-sky-500" />
+							{/if}
 							{#if editingId === item.id}
 								<input bind:value={editValue}
 									onkeydown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') { editingId = null; editValue = ''; } }}
@@ -227,35 +285,52 @@ function itemPercent(id: string): number {
 										</div>
 									{/if}
 								</button>
-								<div class="flex flex-col items-center gap-0.5 shrink-0">
-									<button onclick={(e) => { e.stopPropagation(); onMoveItem(item.id, -1); }} disabled={i === 0} aria-label="Move up"
-										class="w-6 h-5 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 disabled:opacity-30">
-										<ArrowUp size={12} />
-									</button>
-									<button onclick={(e) => { e.stopPropagation(); onMoveItem(item.id, 1); }} disabled={i === items.length - 1} aria-label="Move down"
-										class="w-6 h-5 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 disabled:opacity-30">
-										<ArrowDown size={12} />
-									</button>
-								</div>
-								<div class="flex items-center gap-1 shrink-0">
-									{#if s?.hasPdf}
-										<button onclick={(e) => { e.stopPropagation(); onShowPdf(item.id); }} aria-label="Show PDF" title="Show PDF side-by-side"
-											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 hover:text-sky-300">
-											<FileText size={14} />
+								{#if editMode}
+									<div class="flex flex-col items-center gap-0.5 shrink-0">
+										<button onclick={(e) => { e.stopPropagation(); onMoveItem(item.id, -1); }} disabled={i === 0} aria-label="Move up"
+											class="w-6 h-5 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 disabled:opacity-30">
+											<ArrowUp size={12} />
 										</button>
-									{/if}
-									<button onclick={(e) => { e.stopPropagation(); startEdit(item); }} aria-label="Rename"
-										class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300">
-										<Pencil size={14} />
-									</button>
-									<button onclick={(e) => { e.stopPropagation(); onDeleteItem(item.id); }} aria-label="Delete"
-										class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-500/20 text-slate-300 hover:text-red-400">
-										<Trash2 size={14} />
-									</button>
-								</div>
+										<button onclick={(e) => { e.stopPropagation(); onMoveItem(item.id, 1); }} disabled={i === items.length - 1} aria-label="Move down"
+											class="w-6 h-5 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 disabled:opacity-30">
+											<ArrowDown size={12} />
+										</button>
+									</div>
+									<div class="flex items-center gap-1 shrink-0">
+										{#if s?.hasPdf}
+											<button onclick={(e) => { e.stopPropagation(); onShowPdf(item.id); }} aria-label="Show PDF" title="Show PDF side-by-side"
+												class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 hover:text-sky-300">
+												<FileText size={14} />
+											</button>
+											<button onclick={(e) => { e.stopPropagation(); reprocessId = reprocessId === item.id ? null : item.id; }} aria-label="Re-extract PDF" title="Re-extract with another engine"
+												class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300 hover:text-amber-300">
+												<RefreshCw size={14} />
+											</button>
+										{/if}
+										<button onclick={(e) => { e.stopPropagation(); startEdit(item); }} aria-label="Rename"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-600 text-slate-300">
+											<Pencil size={14} />
+										</button>
+										<button onclick={(e) => { e.stopPropagation(); onDeleteItem(item.id); }} aria-label="Delete"
+											class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-500/20 text-slate-300 hover:text-red-400">
+											<Trash2 size={14} />
+										</button>
+									</div>
+								{/if}
 							{/if}
 						</div>
-						{#if s?.hasPdf && editingId !== item.id}
+						{#if editMode && reprocessId === item.id}
+							<div class="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
+								<span class="text-[11px] text-amber-200/90 mr-1">Re-extract with:</span>
+								{#each ENGINES as eng (eng.value)}
+									<button onclick={(e) => { e.stopPropagation(); reprocessId = null; onReprocessItem(item.id, eng.value); }}
+										class="text-[11px] px-2 py-0.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">
+										{eng.label}
+									</button>
+								{/each}
+							</div>
+						{/if}
+						{#if editMode && s?.hasPdf && editingId !== item.id && reprocessId !== item.id}
 							<button onclick={(e) => { e.stopPropagation(); onClearItemPdf(item.id); }}
 								class="mt-1 text-[11px] text-slate-500 hover:text-amber-300 underline">
 								Remove cached PDF to save storage
