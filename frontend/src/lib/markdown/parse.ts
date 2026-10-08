@@ -9,6 +9,32 @@ export interface Section {
 	paragraphs: string[][];
 	/** Own heading text for this section (the last `#` heading before its body), if any. */
 	heading: string | null;
+	/** Render blocks aligned with `paragraphs` (plus unspeakable blocks like
+	 * code/hr with `paraIdx: null`). Absent on docs stored before the
+	 * rich renderer — the viewer falls back to plain spans then. */
+	blocks: BlockMeta[];
+}
+
+/** Structural block kinds for the rich renderer. */
+export type BlockKind =
+	| 'heading'
+	| 'paragraph'
+	| 'list-item'
+	| 'blockquote'
+	| 'table'
+	| 'code'
+	| 'hr';
+
+export interface BlockMeta {
+	kind: BlockKind;
+	/** Raw markdown source for this block (rendered by the block renderer). */
+	raw: string;
+	/** Index into `Section.paragraphs`, or null for unspeakable blocks. */
+	paraIdx: number | null;
+	/** Heading level for `heading` blocks. */
+	level?: number;
+	/** True for ordered-list items (renderer groups `<ol>` runs). */
+	ordered?: boolean;
 }
 
 export interface PageMapItem {
@@ -27,11 +53,37 @@ function cleanForSentences(text: string): string {
 	t = t.replace(/`([^`]+)`/g, '$1');
 	t = t.replace(/^\s*>\s*/gm, '');
 	t = t.replace(/^\s*[-*_]{3,}\s*$/gm, '');
+	// Reference definitions carry no spoken text (`[label]: url` lines).
+	t = t.replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, '');
+	// Images contribute no spoken words (alt text is renderer-only for now).
+	t = t.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
+	// Reference-style links keep their label.
+	t = t.replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1');
 	t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-	t = t.replace(/(\*\*|__|\*|_|~~)/g, '');
+	// Real HTML tags (`<eos>`, `<div>`); kept text like `<3` or `a < b`
+	// never matches (tag names start with a letter, `<` needs `>`).
+	t = t.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^>]*>/g, '');
+	// Paired emphasis only — lone `*`/`_` (footnote stars like `A4B*`,
+	// snake_case, multiplication) stay so rendered text still matches.
+	// Pairs need non-space adjacency (`* ja*` is literal text, not emphasis).
+	t = t.replace(/\*\*(\S[^*\n]*?\S|\S)\*\*/g, '$1');
+	t = t.replace(/(?<!\w)\*(\S[^*\n]*?\S|\S)\*(?!\w)/g, '$1');
+	t = t.replace(/__(\S[^_\n]*?\S|\S)__/g, '$1');
+	t = t.replace(/(?<!\w)_(\S[^_\n]*?\S|\S)_(?!\w)/g, '$1');
+	t = t.replace(/~~(\S[^~\n]*?\S|\S)~~/g, '$1');
+	// List markers: unordered at any indent (paragraph blocks never contain
+	// `- ` lines — the splitter assigns those to items — so nested markers
+	// strip safely); ordered at block start or when indented (a `2. Model`
+	// plain-text heading at column 0 keeps its number, matching the render).
+	t = t.replace(/^\s*[-*+]\s+\[[ xX]\]\s+/, '');
+	t = t.replace(/^[ \t]+[-*+]\s+\[[ xX]\]\s+/gm, '');
 	t = t.replace(/^\s*[-*+]\s+/gm, '');
-	t = t.replace(/^\s*\d+\.\s+/gm, '');
+	t = t.replace(/^\s*\d{1,3}[.)]\s+/, '');
+	t = t.replace(/^[ \t]+\d{1,3}[.)]\s+/gm, '');
 	t = t.replace(/^#{1,6}\s+/gm, '');
+	// Collapse internal whitespace (newlines, double spaces from stripped
+	// markup) so stored sentences match rendered text exactly.
+	t = t.replace(/\s+/g, ' ');
 	return t.trim();
 }
 
@@ -46,18 +98,155 @@ export function chunkTextIntoSentences(text: string): string[] {
 	return parts;
 }
 
-/** Split body lines into blank-line-separated paragraph blocks. */
-function splitParagraphBlocks(lines: string[]): string[] {
-	const blocks: string[] = [];
+const LIST_ITEM_RE = /^(\s*)([-*+]|\d{1,3}[.)])(\s+|\s*$)/;
+const TABLE_ROW_RE = /^\s*\|/;
+const HR_RE = /^\s*([-*_]\s*){3,}\s*$/;
+const BLOCKQUOTE_RE = /^\s*>/;
+const INDENTED_RE = /^(?:\t| {4})/;
+
+/** De-indent isolated indented lines (trafilatura centers titles with tabs).
+ *
+ * A single tab/space-indented line surrounded by blanks is a centered
+ * title, not code — fully left-trim so it renders (and speaks) as prose.
+ * Isolation guarantees it cannot be nested content. Multi-line runs stay
+ * untouched (real indented code).
+ */
+export function normalizeIndentedLines(lines: string[]): string[] {
+	const out = [...lines];
+	let inFence = false;
+	for (let i = 0; i < out.length; i++) {
+		if (CODE_FENCE_RE.test(out[i])) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		if (!INDENTED_RE.test(out[i]) || out[i].trim() === '') continue;
+		const prevBlank = i === 0 || out[i - 1].trim() === '';
+		const nextBlank = i === out.length - 1 || out[i + 1].trim() === '';
+		if (prevBlank && nextBlank) out[i] = out[i].trimStart();
+	}
+	return out;
+}
+
+interface RawBlock {
+	kind: BlockKind;
+	lines: string[];
+	ordered?: boolean;
+	level?: number;
+}
+
+/** Split lines into structural blocks (fence/list/table/heading aware).
+ *
+ * Each Markdown list item becomes its own `list-item` block so it reads as
+ * its own sentence group; fenced code and `hr` carry no sentences.
+ */
+export function splitBlocks(lines: string[]): RawBlock[] {
+	const blocks: RawBlock[] = [];
+	const input = normalizeIndentedLines(lines);
 	let buf: string[] = [];
+	let bufKind: 'paragraph' | 'table' | 'blockquote' | null = null;
+	let inFence = false;
+	let fenceBuf: string[] = [];
+	/** Open list item collecting continuation lines (null outside a list run). */
+	let openItem: RawBlock | null = null;
+	let listBaseIndent = 0;
+
 	const flush = () => {
-		const text = buf.join('\n').trim();
-		if (text) blocks.push(text);
+		if (buf.length > 0 && bufKind) {
+			const text = buf.join('\n').trim();
+			if (text) blocks.push({ kind: bufKind, lines: [...buf] });
+		}
 		buf = [];
+		bufKind = null;
 	};
-	for (const line of lines) {
-		if (line.trim() === '') flush();
-		else buf.push(line);
+	const closeItem = () => {
+		openItem = null;
+	};
+
+	for (const line of input) {
+		if (CODE_FENCE_RE.test(line)) {
+			flush();
+			closeItem();
+			if (!inFence) {
+				inFence = true;
+				fenceBuf = [line];
+			} else {
+				inFence = false;
+				fenceBuf.push(line);
+				blocks.push({ kind: 'code', lines: fenceBuf });
+				fenceBuf = [];
+			}
+			continue;
+		}
+		if (inFence) {
+			fenceBuf.push(line);
+			continue;
+		}
+		if (line.trim() === '') {
+			flush();
+			closeItem();
+			continue;
+		}
+		const heading = HEADING_RE.exec(line.trim());
+		if (heading) {
+			flush();
+			closeItem();
+			blocks.push({ kind: 'heading', lines: [line.trim()], level: heading[1].length });
+			continue;
+		}
+		if (HR_RE.test(line)) {
+			flush();
+			closeItem();
+			blocks.push({ kind: 'hr', lines: [line.trim()] });
+			continue;
+		}
+		if (TABLE_ROW_RE.test(line)) {
+			closeItem();
+			if (bufKind !== 'table') flush();
+			bufKind = 'table';
+			buf.push(line);
+			continue;
+		}
+		const listMatch = LIST_ITEM_RE.exec(line);
+		if (listMatch) {
+			const ordered = /^\d/.test(listMatch[2]);
+			const itemNumber = ordered ? parseInt(listMatch[2], 10) : 0;
+			// CommonMark: an ordered item only interrupts a paragraph when it
+			// starts with 1 (so `2.3. Encoder…` mid-paragraph stays prose).
+			// Unordered markers always interrupt.
+			if (bufKind === 'paragraph' && ordered && itemNumber !== 1) {
+				buf.push(line);
+				continue;
+			}
+			flush();
+			const indent = listMatch[1].replace(/\t/g, '    ').length;
+			if (openItem === null || indent <= listBaseIndent) {
+				// New top-level item: one block per item for sentence parity.
+				openItem = { kind: 'list-item', lines: [line], ordered };
+				blocks.push(openItem);
+				listBaseIndent = indent;
+			} else {
+				// Nested item / continuation belongs to the open item.
+				openItem.lines.push(line);
+			}
+			continue;
+		}
+		if (openItem !== null) {
+			// Indented non-item lines continue the open item; anything else
+			// ends the list run. (Lazy continuations stay with the item.)
+			if (/^\s/.test(line)) openItem.lines.push(line);
+			else closeItem();
+		}
+		if (openItem !== null) continue;
+		if (BLOCKQUOTE_RE.test(line)) {
+			if (bufKind !== 'blockquote') flush();
+			bufKind = 'blockquote';
+			buf.push(line);
+			continue;
+		}
+		if (bufKind !== 'paragraph') flush();
+		bufKind = 'paragraph';
+		buf.push(line);
 	}
 	flush();
 	return blocks;
@@ -76,15 +265,59 @@ export function parseMarkdownStructure(mdText: string): Section[] {
 		const hasBody = currentLines.join('').trim().length > 0;
 		if (!pendingHeading && !hasBody) return;
 		const paragraphs: string[][] = [];
+		const blocks: BlockMeta[] = [];
+		const pushSentences = (text: string): number | null => {
+			const sentences = chunkTextIntoSentences(text);
+			if (sentences.length === 0) return null;
+			const idx = paragraphs.length;
+			paragraphs.push(sentences);
+			return idx;
+		};
 		if (pendingHeading) {
 			const headingSentences = chunkTextIntoSentences(pendingHeading);
 			// Keep raw title if cleaning stripped everything (e.g. symbols only)
-			if (headingSentences.length > 0) paragraphs.push(headingSentences);
-			else if (pendingHeading.trim()) paragraphs.push([pendingHeading.trim()]);
+			const sentences =
+				headingSentences.length > 0
+					? headingSentences
+					: pendingHeading.trim()
+						? [pendingHeading.trim()]
+						: [];
+			if (sentences.length > 0) {
+				const level = currentLevel || 1;
+				blocks.push({
+					kind: 'heading',
+					raw: `${'#'.repeat(Math.min(6, level))} ${pendingHeading.trim()}`,
+					paraIdx: paragraphs.length,
+					level
+				});
+				paragraphs.push(sentences);
+			}
 		}
-		for (const block of splitParagraphBlocks(currentLines)) {
-			const sentences = chunkTextIntoSentences(block);
-			if (sentences.length > 0) paragraphs.push(sentences);
+		for (const block of splitBlocks(currentLines)) {
+			const raw = block.lines.join('\n');
+			if (block.kind === 'code' || block.kind === 'hr') {
+				blocks.push({ kind: block.kind, raw, paraIdx: null });
+				continue;
+			}
+			if (block.kind === 'heading') {
+				// ATX headings inside the body (same-level siblings after the
+				// section heading was consumed): keep them as heading blocks.
+				const title = raw.replace(/^#{1,6}\s+/, '');
+				const paraIdx = pushSentences(title);
+				if (paraIdx !== null) {
+					blocks.push({ kind: 'heading', raw, paraIdx, level: block.level ?? 2 });
+				}
+				continue;
+			}
+			// Always emit: blocks with no sentences (image-only paragraphs)
+			// still render visual content, just without sentence spans.
+			const paraIdx = pushSentences(raw);
+			blocks.push({
+				kind: block.kind,
+				raw,
+				paraIdx,
+				...(block.kind === 'list-item' ? { ordered: block.ordered ?? false } : {})
+			});
 		}
 		const chunks = paragraphs.flat();
 		if (chunks.length === 0) {
@@ -99,7 +332,8 @@ export function parseMarkdownStructure(mdText: string): Section[] {
 			level: currentLevel || 1,
 			chunks,
 			paragraphs,
-			heading: pendingHeading
+			heading: pendingHeading,
+			blocks
 		});
 		currentLines = [];
 		pendingHeading = null;

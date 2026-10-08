@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
+	import DOMPurify from 'dompurify';
 	import { Pencil, Check, X, Settings, EllipsisVertical } from 'lucide-svelte';
 	import type { Section } from '$lib/markdown/parse';
 	import {
@@ -7,6 +8,10 @@
 		getSectionParagraphs,
 		isHeadingParagraph
 	} from '$lib/markdown/parse';
+	import {
+		SENTENCE_ATTR,
+		renderSectionBlocks
+	} from '$lib/markdown/render';
 
 	interface Props {
 		markdownDraft: string;
@@ -51,6 +56,76 @@
 	let showOverflow = $state(false);
 
 	let totalSentences = $derived(getGlobalSentences(sections).length);
+
+	// Rich rendering (#57): sections parsed with block structure render
+	// through `marked` with sentence spans injected; legacy docs stored
+	// before blocks existed keep the plain-span path below.
+	let useRich = $derived(
+		sections.length > 0 && sections.every((s) => (s.blocks?.length ?? 0) > 0)
+	);
+
+	let richHtml: string = $derived.by(() => {
+		if (!useRich) return '';
+		// Prerender/SSR has no DOM; content only appears post-mount anyway.
+		if (typeof document === 'undefined' || typeof window === 'undefined') return '';
+		let html = '';
+		let g = 0;
+		for (const sec of sections) {
+			const out = renderSectionBlocks(sec.blocks, getSectionParagraphs(sec), g);
+			html += out.html;
+			g = out.nextIdx;
+		}
+		return DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'rel'] });
+	});
+
+	const ACTIVE_CLASS = 'tts-active';
+
+	function syncActiveHighlight(idx: number) {
+		const viewer = viewerEl;
+		if (!viewer) return;
+		for (const el of viewer.querySelectorAll(`.${ACTIVE_CLASS}`)) {
+			el.classList.remove(ACTIVE_CLASS);
+		}
+		if (idx < 0) return;
+		for (const el of viewer.querySelectorAll(`[${SENTENCE_ATTR}="${idx}"]`)) {
+			el.classList.add(ACTIVE_CLASS);
+		}
+	}
+
+	function handleRichClick(e: MouseEvent) {
+		const t = e.target as HTMLElement;
+		// Real links open normally; never seek from them.
+		if (t.closest('a')) return;
+		if (t.closest('button, input, select, textarea')) return;
+		const sp = t.closest(`[${SENTENCE_ATTR}]`);
+		if (sp) onSentenceClick?.(Number(sp.getAttribute(SENTENCE_ATTR)));
+	}
+
+	function handleRichKey(e: KeyboardEvent) {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		const t = e.target as HTMLElement;
+		if (t.closest('a')) return;
+		const sp = t.closest(`[${SENTENCE_ATTR}]`);
+		if (sp) {
+			e.preventDefault();
+			onSentenceClick?.(Number(sp.getAttribute(SENTENCE_ATTR)));
+		}
+	}
+
+	/** Delegated click/key handling for injected spans (an action, so the
+	 * static container carries no inline handlers for a11y). */
+	function richInteractions(node: HTMLElement) {
+		const click = (e: MouseEvent) => handleRichClick(e);
+		const key = (e: KeyboardEvent) => handleRichKey(e);
+		node.addEventListener('click', click);
+		node.addEventListener('keydown', key);
+		return {
+			destroy() {
+				node.removeEventListener('click', click);
+				node.removeEventListener('keydown', key);
+			}
+		};
+	}
 
 	function isActive(sentIdx: number): boolean {
 		return sentIdx === globalIdx;
@@ -108,13 +183,18 @@
 
 	// Keep the active sentence in view during playback and slider seeks.
 	// The view stays put while the active sentence is visible; once it moves
-	// off-page, scroll so it lands at the top of the viewer.
+	// off-page, scroll so it lands at the top of the viewer. Also syncs the
+	// rich-renderer highlight (injected spans are plain DOM, not Svelte).
 	$effect(() => {
 		const idx = globalIdx;
 		const viewer = viewerEl;
+		// Depend on the rendered output so fresh nodes get highlighted.
+		void richHtml;
+		void useRich;
 		if (isEditing || !viewer || totalSentences === 0) return;
+		syncActiveHighlight(idx);
 		requestAnimationFrame(() => {
-			const el = viewer.querySelector(`[data-sentence-idx="${idx}"]`) as HTMLElement | null;
+			const el = viewer.querySelector(`[${SENTENCE_ATTR}="${idx}"]`) as HTMLElement | null;
 			if (!el) return;
 			const viewerRect = viewer.getBoundingClientRect();
 			const elRect = el.getBoundingClientRect();
@@ -251,6 +331,18 @@
 				class="w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500"
 				placeholder="Markdown…"
 			></textarea>
+		{:else if useRich}
+			<div
+				role="document"
+				class="p-5 prose prose-invert prose-sm max-w-none prose-p:leading-relaxed"
+				use:richInteractions
+			>
+				{#if sections.length === 0}
+					<p class="text-slate-400">No content yet.</p>
+				{:else}
+					{@html richHtml}
+				{/if}
+			</div>
 		{:else}
 			<div class="p-5 prose prose-invert prose-sm max-w-none prose-p:leading-relaxed">
 				{#if sections.length === 0}
@@ -297,3 +389,30 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* Sentence spans are injected as raw HTML (`{@html}`), so their styles
+	 * must be global — Svelte scoping does not reach injected nodes.
+	 * Mirrors the legacy `sentenceClass` look (pill highlight when active).
+	 */
+	:global(.tts-sent) {
+		border-radius: 0.25rem;
+		padding-left: 0.125rem;
+		padding-right: 0.125rem;
+		transition: background-color 0.15s;
+		scroll-margin-top: 0.5rem;
+		cursor: pointer;
+	}
+	:global(.tts-sent:hover) {
+		background-color: rgb(51 65 85 / 0.4);
+	}
+	:global(.tts-sent.tts-active) {
+		background-color: rgb(14 165 233 / 0.2);
+		box-shadow: 0 0 0 1px rgb(14 165 233 / 0.3);
+		color: rgb(224 242 254);
+	}
+	:global(.tts-sent:focus-visible) {
+		outline: 1px solid rgb(14 165 233 / 0.6);
+		outline-offset: 1px;
+	}
+</style>
