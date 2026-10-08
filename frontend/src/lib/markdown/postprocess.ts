@@ -15,6 +15,8 @@ export interface PostprocessOptions {
 	ensure_punctuation: boolean;
 	insert_page_markers: boolean;
 	first_page_marker?: boolean;
+	/** Extraction engine override for `/api/ocr/jobs` (`llm` routes to `/api/ocr/llm`). */
+	engine?: 'auto' | 'text' | 'docling' | 'llm';
 	/** Logical number of physical PDF page 1 (chapter scans). */
 	first_page_number?: number;
 	/** Physical (1-indexed) → logical page overrides (skipped illustrations). */
@@ -30,7 +32,7 @@ export const DEFAULT_POSTPROCESS: PostprocessOptions = {
 	normalize_uppercase: false,
 	ensure_punctuation: false,
 	insert_page_markers: true,
-	first_page_marker: false,
+	first_page_marker: true,
 	first_page_number: 1,
 	page_overrides: null,
 	use_text_extract: true,
@@ -453,7 +455,7 @@ export function joinPagesWithMarkers(
 ): { markdown: string; pageMap: PageMapItem[] } {
 	const firstPageNumber = joinOpts?.firstPageNumber ?? 1;
 	const pageOverrides = joinOpts?.pageOverrides ?? null;
-	const firstPageMarker = joinOpts?.firstPageMarker ?? false;
+	const firstPageMarker = joinOpts?.firstPageMarker ?? true;
 	const overrides = normalizePageOverrides(pageOverrides);
 	const keepAlignment =
 		Object.keys(overrides).length > 0 || firstPageNumber !== 1 || firstPageMarker;

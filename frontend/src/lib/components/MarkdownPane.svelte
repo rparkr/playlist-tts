@@ -125,28 +125,33 @@
 		});
 	});
 
-	// Preserve scroll across the viewer↔editor swap so editing a 100-page
-	// doc lands at the same position instead of jumping to the top. The
-	// outer scroll container persists; only its content height changes, so a
-	// scroll *fraction* transfers across modes. Captures before the swap and
-	// restores after Svelte swaps the inner content.
-	let prevEditing = false;
-	$effect(() => {
-		if (isEditing === prevEditing) return;
+	// Preserve scroll across the viewer↔editor swap so editing a long doc
+	// lands at the same position instead of jumping to the top. The outer
+	// scroll container persists, but the editor (`h-full` textarea) is much
+	// shorter than rendered prose: without compensation the browser clamps
+	// `scrollTop` to 0 when entering edit mode, and there are no sentence
+	// spans to anchor to when leaving it.
+	//
+	// Capture must happen pre-swap (the parent calls `prepareEditSwap`
+	// before flipping `isEditing`): on entering, pin the textarea's
+	// min-height to the pre-swap scroll height (keeping the scroll range
+	// stable); on exit, just carry the textarea's fraction over. The
+	// transition effect below only restores the captured fraction post-swap.
+	let pendingFraction: number | null = null;
+	let editorMinHeight: string | null = $state(null);
+
+	export function prepareEditSwap(entering: boolean): void {
 		const scroller = viewerEl;
-		const entering = isEditing && !prevEditing;
-		prevEditing = isEditing;
-		if (!scroller) return;
-		// Capture the pre-swap fraction, biasing toward the active sentence
-		// when it is currently visible (the common playback-follow case).
-		let fraction: number;
+		if (!scroller) {
+			pendingFraction = 0;
+			return;
+		}
 		const maxBefore = scroller.scrollHeight - scroller.clientHeight;
 		const active = scroller.querySelector(
 			`[data-sentence-idx="${globalIdx}"]`
 		) as HTMLElement | null;
-		if (active && !entering) {
-			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
-		} else if (active && entering) {
+		let fraction: number;
+		if (active && entering) {
 			const viewerRect = scroller.getBoundingClientRect();
 			const elRect = active.getBoundingClientRect();
 			const absTop = scroller.scrollTop + (elRect.top - viewerRect.top);
@@ -154,13 +159,25 @@
 		} else {
 			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
 		}
-		fraction = Math.max(0, Math.min(1, fraction));
+		pendingFraction = Math.max(0, Math.min(1, fraction));
+		// Keep the scroll range stable across the swap; cleared on save/cancel.
+		editorMinHeight = entering && scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
+	}
+
+	let prevEditing = false;
+	$effect(() => {
+		if (isEditing === prevEditing) return;
+		prevEditing = isEditing;
+		const fraction = pendingFraction;
+		pendingFraction = null;
+		if (fraction === null) return;
 		void tick().then(() => {
 			requestAnimationFrame(() => {
 				const el = viewerEl;
 				if (!el) return;
 				const maxAfter = el.scrollHeight - el.clientHeight;
 				if (maxAfter <= 0) return;
+				// Assigning scrollTop cancels any in-flight smooth follow-scroll.
 				el.scrollTop = fraction * maxAfter;
 			});
 		});
@@ -230,6 +247,7 @@
 				bind:this={editorEl}
 				value={markdownDraft}
 				oninput={(e) => onDraftChange((e.target as HTMLTextAreaElement).value)}
+				style={editorMinHeight ? `min-height: ${editorMinHeight};` : ''}
 				class="w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500"
 				placeholder="Markdown…"
 			></textarea>

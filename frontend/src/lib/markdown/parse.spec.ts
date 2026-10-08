@@ -121,9 +121,11 @@ describe('findPageMarkerIndex', () => {
 		expect(sentences[findPageMarkerIndex(sentences, 2)]).toBe('Page 2.');
 	});
 
-	it('returns -1 for page 1 and missing markers', () => {
+	it('resolves Page 1 markers like any other page', () => {
+		expect(findPageMarkerIndex(['Page 1.', 'Intro.'], 1)).toBe(0);
 		expect(findPageMarkerIndex(['Page 2.'], 1)).toBe(-1);
 		expect(findPageMarkerIndex(['Just text.'], 3)).toBe(-1);
+		expect(findPageMarkerIndex(['Page 1.'], 0)).toBe(-1);
 	});
 });
 

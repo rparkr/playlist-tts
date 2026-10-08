@@ -102,6 +102,10 @@
 	let pdfDoc: any = $state.raw(null);
 	let pdfPageNum: number = $state(1);
 	let pdfTotalPages: number = $state(0);
+	// Set by the PDF prev/next buttons: the next Markdown→PDF follow
+	// reaction belongs to that manual navigation, so it must not overwrite
+	// the explicitly chosen page (missing-marker snap-back, #75).
+	let pdfManualNav = false;
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
 	let ocrStartAt: number | null = $state(null);
@@ -125,7 +129,7 @@
 	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
-	let optFirstPageMarker: boolean = $state(false);
+	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
@@ -396,6 +400,10 @@
 	$effect(() => {
 		const idx = globalIdx;
 		const sens = sections;
+		const manual = pdfManualNav;
+		pdfManualNav = false;
+		// Manual PDF paging owns the viewer until playback/seek moves on.
+		if (manual) return;
 		if (!leftVisible || leftPane !== 'pdf' || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
 		const sentences = getGlobalSentences(sens);
 		if (sentences.length === 0) return;
@@ -667,7 +675,7 @@
 	// true page lengths made that visible.
 	const viewer = markdownPaneRef?.getViewerEl?.();
 	const scrolledToMarker = (() => {
-		if (isEditing || !viewer || pdfPageNum <= 1) return false;
+		if (isEditing || !viewer || pdfPageNum < 1) return false;
 		const idx = findPageMarkerIndex(getGlobalSentences(sections), pdfPageNum);
 		if (idx === -1) return false;
 		const node = viewer.querySelector(`[data-sentence-idx="${idx}"]`) as HTMLElement | null;
@@ -695,6 +703,7 @@
 	function nextPdfPage() {
 		if (pdfPageNum < pdfTotalPages) {
 			pdfPageNum++;
+			pdfManualNav = true;
 			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
 		}
@@ -702,12 +711,18 @@
 	function prevPdfPage() {
 		if (pdfPageNum > 1) {
 			pdfPageNum--;
+			pdfManualNav = true;
 			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
 		}
 	}
 
-	/** PDF→Markdown sync (#1): move the reader to the new PDF page's marker. */
+	/** PDF→Markdown sync (#1): move the reader to the new PDF page's marker.
+	 *
+	 * Physical page 1 has no marker in legacy docs (markers started at
+	 * Page 2): seek doc start instead of resolving to the Page-2 marker,
+	 * which used to snap the viewer straight back to page 2.
+	 */
 	function syncMarkdownToPdfPage(physical: number) {
 		if (isEditing || pdfPendingOcr) return;
 		const sentences = getGlobalSentences(sections);
@@ -717,6 +732,9 @@
 		if (markerIdx !== -1 && markerIdx !== globalIdx) {
 			if (isPlaying || useBackendTTS) seekTo(markerIdx);
 			else globalIdx = markerIdx;
+		} else if (markerIdx === -1 && physical === 1 && globalIdx !== 0) {
+			if (isPlaying || useBackendTTS) seekTo(0);
+			else globalIdx = 0;
 		}
 	}
 
@@ -1349,9 +1367,12 @@
 		if (!activeDoc) return;
 		if (!isEditing) {
 			editBackup = markdownDraft;
+			// Capture scroll pre-swap so edit mode lands at the same view.
+			markdownPaneRef?.prepareEditSwap?.(true);
 			isEditing = true;
 		} else {
 			// shouldn't happen because save/cancel handle
+			markdownPaneRef?.prepareEditSwap?.(false);
 			isEditing = false;
 		}
 	}
@@ -1361,6 +1382,7 @@
 			clearTimeout(saveDebounce);
 			saveDebounce = null;
 		}
+		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 		activeDoc.markdown = markdownDraft;
 		activeDoc.sections = parseMarkdownStructure(markdownDraft);
@@ -1374,6 +1396,7 @@
 			saveDebounce = null;
 		}
 		markdownDraft = editBackup;
+		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {

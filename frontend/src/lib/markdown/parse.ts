@@ -194,10 +194,12 @@ export function getGlobalSentences(sections: Section[]): string[] {
  *
  * Used for exact PDF→Markdown sync: scrolling to the marker element is
  * precise regardless of how text-heavy each page is, unlike line- or
- * character-proportional estimates.
+ * character-proportional estimates. Page 1 resolves like any other page
+ * (new docs always carry a `Page 1.` marker; legacy docs without one fall
+ * back to doc start at the call site).
  */
 export function findPageMarkerIndex(sentences: string[], page: number): number {
-	if (page <= 1) return -1;
+	if (!Number.isInteger(page) || page < 1) return -1;
 	const want = `Page ${page}.`;
 	return sentences.findIndex((s) => s.trim() === want);
 }
