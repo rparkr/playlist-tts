@@ -170,12 +170,19 @@ async def _run_ocr_job(
 
         total = job.progress_total if job.progress_total > 0 else get_page_count(pdf_path)
         total = total if total > 0 else 1
-        if opts.use_text_extract:
+        force_text = opts.engine == "text"
+        skip_text = opts.engine == "docling"
+        if opts.use_text_extract and not skip_text:
             try:
                 min_chars, coverage_min = text_extract_thresholds(opts)
                 texts = extract_pages_text(pdf_path)
+                if force_text and not texts:
+                    raise ValueError(
+                        "Text extraction forced but the PDF has no usable text layer. "
+                        "Use auto or Docling OCR instead."
+                    )
                 chars = [len(t) for t in texts]
-                if texts and should_use_text(chars, min_chars, coverage_min):
+                if texts and (force_text or should_use_text(chars, min_chars, coverage_min)):
                     from backend.app.services.postprocess import PAGE_BREAK_PLACEHOLDER
 
                     sep = f"\n\n{PAGE_BREAK_PLACEHOLDER}\n\n"
@@ -185,6 +192,14 @@ async def _run_ocr_job(
                     )
                     job.progress_done = total
                     return raw, total, init_map, "text"
+                if force_text:
+                    raise ValueError(
+                        "Text extraction forced but the PDF has no usable text layer "
+                        f"(median {sorted(chars)[len(chars) // 2] if chars else 0} chars/page, "
+                        f"minimum {min_chars}). Use auto or Docling OCR instead."
+                    )
+            except ValueError:
+                raise
             except Exception:
                 # Fast path is best-effort — fall through to Docling OCR.
                 pass

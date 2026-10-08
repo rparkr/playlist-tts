@@ -60,6 +60,25 @@ def test_fetch_article_endpoint(monkeypatch):
     assert data["domain"] == "example.com"
 
 
+def test_article_markdown_leads_with_h1_title():
+    """The title leads as `# h1` so listeners hear the article name first."""
+    cleaned = article_service._clean_article_markdown(
+        "Wind farms consist of turbines.\n\nMore text here.", "Wind Farms"
+    )
+    assert cleaned.startswith("# Wind Farms\n\n")
+    assert "Wind farms consist of turbines." in cleaned
+
+
+def test_article_markdown_drops_empty_headings_and_blank_runs():
+    """Trafilatura's stray `#` + whitespace and 3+ newline runs are tidied."""
+    cleaned = article_service._clean_article_markdown(
+        "# \n\t\n\t\tWind Farms\n\n\n\nBody text here.", "Wind Farms"
+    )
+    assert "\n\n\n" not in cleaned
+    assert not any(ln.startswith("#") and not ln[1:].strip() for ln in cleaned.split("\n"))
+    assert cleaned.startswith("# Wind Farms\n\nBody text here.")
+
+
 def test_fetch_article_endpoint_unreadable(monkeypatch):
     """Empty extraction surfaces as 422."""
     monkeypatch.setattr(article_service, "validate_url", lambda url: url)

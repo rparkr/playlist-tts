@@ -736,7 +736,7 @@ def join_pages_with_markers(
     insert_markers: bool,
     first_page_number: int = 1,
     page_overrides: dict[int, int] | dict[str, int] | None = None,
-    first_page_marker: bool = False,
+    first_page_marker: bool = True,
 ) -> tuple[str, list[PageMapItem]]:
     """Join per-page texts with `Page N.` markers, tracking exact offsets.
 
@@ -889,7 +889,7 @@ def join_pages_with_markers(
 def join_pages_strict(
     pages: list[str],
     insert_markers: bool,
-    first_page_marker: bool = False,
+    first_page_marker: bool = True,
     first_page_number: int = 1,
     page_overrides: dict[int, int] | dict[str, int] | None = None,
 ) -> tuple[str, list[PageMapItem]]:

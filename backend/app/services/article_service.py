@@ -10,6 +10,7 @@ for extraction.
 """
 
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -141,6 +142,31 @@ async def _download_html(url: str) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
+def _clean_article_markdown(markdown: str, title: str | None) -> str:
+    """Tidy `trafilatura` output for the reader.
+
+    - Drop empty ATX headings (`#` followed by whitespace only) — trafilatura
+      emits these around extracted titles, leaving stray `#` + blank lines.
+    - Collapse 3+ newlines to a paragraph break.
+    - Ensure the article title leads as an `# h1` so listeners hear the
+      article name when it starts (and to tell consecutive items apart).
+    - Drop a leading body line that duplicates the title.
+    """
+    lines = [ln for ln in markdown.split("\n") if not _EMPTY_HEADING_RE.match(ln)]
+    text = _BLANK_RUN_RE.sub("\n\n", "\n".join(lines)).strip()
+    if title:
+        first, _, rest = text.partition("\n")
+        if first.strip().strip("#").strip().lower() == title.strip().lower():
+            text = rest.strip()
+        if not text.startswith(f"# {title}"):
+            text = f"# {title}\n\n{text}" if text else f"# {title}"
+    return text
+
+
+_EMPTY_HEADING_RE = re.compile(r"^#{1,6}\s*$")
+_BLANK_RUN_RE = re.compile(r"\n{3,}")
+
+
 def _extract_markdown(html: str, url: str) -> ArticleResult:
     """Run `trafilatura` extraction and metadata parsing (sync, CPU-bound)."""
     markdown = trafilatura.extract(
@@ -160,11 +186,15 @@ def _extract_markdown(html: str, url: str) -> ArticleResult:
         meta = extract_metadata(html, default_url=url)
     except Exception:
         meta = None
+    title = getattr(meta, "title", None) or None
+    cleaned = _clean_article_markdown(markdown, title)
+    if not cleaned:
+        raise ArticleFetchError("No readable article content found at that URL.", 422)
     domain = urlparse(url).hostname or ""
-    excerpt_source = markdown.strip().replace("\n", " ")
+    excerpt_source = cleaned.replace("\n", " ")
     return ArticleResult(
-        markdown=markdown.strip(),
-        title=getattr(meta, "title", None) or None,
+        markdown=cleaned,
+        title=title,
         author=getattr(meta, "author", None) or None,
         site=getattr(meta, "sitename", None) or None,
         date=getattr(meta, "date", None) or None,

@@ -1,6 +1,7 @@
 """Pydantic schemas for OCR, parse, and TTS contracts."""
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,8 +13,13 @@ class PostprocessOptions(BaseModel):
     normalize_uppercase: bool = False
     ensure_punctuation: bool = False
     insert_page_markers: bool = True
-    # Honored by the LLM engine's strict join; the Docling pipeline ignores it.
-    first_page_marker: bool = False
+    # Emit a `Page N.` marker for the first page too (default on: the PDF
+    # viewer needs it for back-navigation to page 1).
+    first_page_marker: bool = True
+    # Extraction engine override for `/api/ocr/jobs`: `auto` keeps the
+    # text-fast-path/Docling routing, `text` forces `pypdf` extraction,
+    # `docling` forces Docling OCR. The LLM engine lives on `/api/ocr/llm`.
+    engine: Literal["auto", "text", "docling"] = "auto"
     # Logical number of physical PDF page 1 (chapter-by-chapter scans).
     first_page_number: int = Field(default=1, ge=1)
     # Physical (1-indexed) → logical page overrides (skipped illustrations).
