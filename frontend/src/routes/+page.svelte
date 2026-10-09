@@ -53,6 +53,7 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
@@ -416,15 +417,27 @@
 		selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
 	);
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
+	// Speakable TTS view over the live sections (#63): re-derived on open and
+	// on every edit (saved or debounced), so the player always speaks the
+	// current text. Highlight/seek stay in global-sentence space via the
+	// chunk→sentence map — the renderer's `data-sentence-idx` never changes.
+	let tts = $derived(deriveTts(sections));
 	let currentSectionIdx: number = $derived(globalToSectionChunk(sections, globalIdx).sectionIdx);
 	let currentSection: Section | null = $derived(sections[currentSectionIdx] ?? null);
 	let breadcrumbs: string = $derived(currentSection ? currentSection.titles.join(' > ') : '');
 
 	// Keep the backend player's snapshot aligned with the live sections, so
 	// edits (saved or not) replace what TTS speaks from the next sentence on
-	// and deleted sentences can never sound after a pause/seek/resume.
+	// and deleted sentences can never sound after a pause/seek/resume. The
+	// snapshot holds derived speakable chunks; a paused player re-parks on
+	// the chunk for the current sentence, while a running chain picks the
+	// new text up from the next chunk.
 	$effect(() => {
-		sentencePlayer?.updateSentences(getGlobalSentences(sections));
+		const texts = tts.texts;
+		const player = sentencePlayer;
+		if (!player) return;
+		player.updateSentences(texts);
+		if (!player.isRunning) void player.seek(chunkForSentence(tts, globalIdx));
 	});
 
 	// Two-way Markdown→PDF sync (#1): as the current sentence crosses a
@@ -1731,7 +1744,11 @@
 			sentencePlayer = new BackendSentencePlayer();
 			sentencePlayer.setCallbacks({
 				onSentenceStart: (idx) => {
-					globalIdx = idx;
+					// Backend index is derived-chunk space; map back so the
+					// highlight and PDF sync stay on global sentences.
+					// Code-comment chunks map to nothing — keep position.
+					const g = tts.chunks[idx]?.sentenceIndices[0];
+					if (g !== undefined) globalIdx = g;
 				},
 				onSentenceComplete: (_idx, chars, secondsAt1x) => {
 					// Refine ETA stats for the voice+engine that sounded it.
@@ -1771,23 +1788,23 @@
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start backend playback from `globalIdx` — one sentence per request. */
+	/** Start backend playback from `globalIdx` — one speakable chunk per request. */
 	function playBackend() {
 		if (!activeDoc) return;
-		const all = getGlobalSentences(sections);
-		if (all.slice(globalIdx).every((s) => !s.trim())) {
+		const texts = tts.texts;
+		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
 			isPlaying = false;
 			return;
 		}
 		const { voiceKey, voiceId, blob } = resolveBackendVoice();
 		isBackendGenerating = true;
-		void getSentencePlayer().play(all, globalIdx, voiceKey, voiceId, blob, synthRate);
+		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
 		const all = getGlobalSentences(sections);
 		if (globalIdx >= all.length) { isPlaying = false; return; }
-		const text = all[globalIdx];
+		const text = speakable(all[globalIdx]);
 		let voice: SpeechSynthesisVoice | null = null;
 		if (!customVoices.some((v) => v.id === selectedVoiceId)) {
 			voice = synthVoices.find((v) => String(synthVoices.indexOf(v)) === selectedVoiceId) ?? synthVoices.find((v) => v.name === selectedVoiceId) ?? null;
@@ -1827,8 +1844,9 @@
 		globalIdx = next;
 		if (useBackendTTS) {
 			// When paused this just parks the resume position; when playing it
-			// aborts in-flight requests and starts at the new sentence.
-			void sentencePlayer?.seek(next);
+			// aborts in-flight requests and starts at the new sentence. The
+			// player works in derived-chunk space, so map the global index.
+			void sentencePlayer?.seek(chunkForSentence(tts, next));
 		} else if (isPlaying) {
 			cancelSpeech();
 			playWebSpeechCorrect();
@@ -1964,7 +1982,7 @@
 	}
 	async function saveAudioFile() {
 		if (!activeDoc) return;
-		const text = getGlobalSentences(sections).join(' ');
+		const text = tts.texts.join(' ');
 		const custom = customVoices.find((v) => v.id === selectedVoiceId);
 		const blob = custom?.blob ?? null;
 		const voiceUrl = custom ? null : selectedVoiceId;
