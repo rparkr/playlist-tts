@@ -150,3 +150,22 @@ class FetchArticleResponse(BaseModel):
     excerpt: str | None = None
     url: str
     domain: str
+
+
+class EpubImage(BaseModel):
+    """One image binary referenced from converted ePub Markdown (base64)."""
+
+    path: str = Field(
+        description="Image path relative to the OPF directory, as referenced in Markdown"
+    )
+    media_type: str = Field(default="image/png")
+    data_b64: str = Field(description="Raw image bytes, base64-encoded")
+
+
+class ConvertEpubResponse(BaseModel):
+    """Response for POST /api/convert/epub."""
+
+    markdown: str
+    title: str | None = None
+    author: str | None = None
+    images: list[EpubImage] = Field(default_factory=list)
