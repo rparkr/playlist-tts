@@ -7,6 +7,11 @@
  *
  * Base playback needs 6 files (~125MB). The voice-cloning encoder
  * (`encoder.onnx`, ~73MB) downloads lazily on first clone.
+ *
+ * NOTE: verified empirically (2026-10-11, headless Chromium harness) that
+ * the sherpa-onnx WASM pocket build crashes (`null function` in
+ * `_SherpaOnnxCreateOfflineTts`) when `encoder` is empty — the encoder is
+ * therefore NOT lazy: all 7 files (~198MB) download up front.
  */
 
 export interface BrowserModelFile {
@@ -14,8 +19,6 @@ export interface BrowserModelFile {
 	name: string;
 	/** Exact byte size, for progress totals and integrity checks. */
 	bytes: number;
-	/** True for the cloning encoder (lazy, not part of base setup). */
-	lazy?: boolean;
 }
 
 /** Pinned model repo + revision (stable download URLs). */
@@ -28,16 +31,14 @@ export const BASE_MODEL_FILES: BrowserModelFile[] = [
 	{ name: 'text_conditioner.onnx', bytes: 16388343 },
 	{ name: 'lm_flow.int8.onnx', bytes: 9962530 },
 	{ name: 'vocab.json', bytes: 69478 },
-	{ name: 'token_scores.json', bytes: 123616 }
+	{ name: 'token_scores.json', bytes: 123616 },
+	{ name: 'encoder.onnx', bytes: 72713165 }
 ];
 
-export const ENCODER_FILE: BrowserModelFile = {
-	name: 'encoder.onnx',
-	bytes: 72713165,
-	lazy: true
-};
+/** The cloning encoder lives in the base set (init crashes without it). */
+export const ENCODER_FILE: BrowserModelFile = BASE_MODEL_FILES[6];
 
-export const ALL_MODEL_FILES: BrowserModelFile[] = [...BASE_MODEL_FILES, ENCODER_FILE];
+export const ALL_MODEL_FILES: BrowserModelFile[] = BASE_MODEL_FILES;
 
 export const BROWSER_TTS_CACHE = 'ocr-tts-browser-tts-v1';
 

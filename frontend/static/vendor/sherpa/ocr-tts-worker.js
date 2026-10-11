@@ -21,6 +21,10 @@
 let tts = null;
 let cancelledId = -1;
 
+// We supply model files ourselves (FS.writeFile in `init`), so skip the
+// vendored glue's preloaded `.data` bundle fetch (see PROVENANCE.md).
+globalThis.__ocrSkipPreload = true;
+
 self.Module = {
   // Resolve the .wasm next to this worker script.
   locateFile: (path, dir) => dir + path,
@@ -57,7 +61,8 @@ self.onmessage = async (e) => {
         tts = null;
       }
       for (const f of msg.files) {
-        Module.FS.writeFile('/' + f.name, new Uint8Array(f.data));
+        // `FS` is the Emscripten global from the glue script (not Module.FS).
+        FS.writeFile('/' + f.name, new Uint8Array(f.data));
       }
       tts = createOfflineTts(Module, pocketConfig(!!msg.withEncoder));
       self.postMessage({ type: 'tts-ready', sampleRate: tts.sampleRate });
@@ -100,6 +105,7 @@ self.onmessage = async (e) => {
       type: 'error',
       id: msg && typeof msg.id === 'number' ? msg.id : null,
       message: err && err.message ? err.message : String(err),
+      stack: err && err.stack ? String(err.stack) : null,
     });
   }
 };

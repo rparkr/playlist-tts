@@ -12,17 +12,17 @@ import {
 } from './browserModels';
 
 describe('browser model manifest', () => {
-	it('pins 6 base files plus the lazy encoder', () => {
+	it('pins all 7 files including the cloning encoder', () => {
 		expect(BASE_MODEL_FILES.map((f) => f.name)).toEqual([
 			'lm_main.int8.onnx',
 			'decoder.int8.onnx',
 			'text_conditioner.onnx',
 			'lm_flow.int8.onnx',
 			'vocab.json',
-			'token_scores.json'
+			'token_scores.json',
+			'encoder.onnx'
 		]);
 		expect(ALL_MODEL_FILES).toHaveLength(7);
-		expect(ALL_MODEL_FILES.filter((f) => f.lazy).map((f) => f.name)).toEqual(['encoder.onnx']);
 	});
 
 	it('builds pinned HF resolve URLs', () => {
@@ -31,10 +31,10 @@ describe('browser model manifest', () => {
 		);
 	});
 
-	it('sums progress denominators (base + encoder byte-exact)', () => {
-		expect(totalBytes(BASE_MODEL_FILES)).toBe(125578664);
+	it('sums progress denominators (full bundle byte-exact)', () => {
+		expect(totalBytes(BASE_MODEL_FILES)).toBe(198291829);
 		expect(totalBytes(ALL_MODEL_FILES)).toBe(198291829);
-		expect(formatBytes(totalBytes(BASE_MODEL_FILES))).toBe('119.8 MB');
+		expect(formatBytes(totalBytes(BASE_MODEL_FILES))).toBe('189.1 MB');
 	});
 });
 

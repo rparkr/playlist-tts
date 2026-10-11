@@ -1,17 +1,14 @@
 /** Browser pocket-tts engine — main-thread owner of the WASM worker.
  *
- * Lifecycle: `ensureReady()` downloads base models (cache-first, with
- * progress), spawns `static/vendor/sherpa/ocr-tts-worker.js`, transfers
- * the bytes, and awaits `tts-ready`. `ensureEncoder()` lazily adds voice
- * cloning by downloading `encoder.onnx` and re-initializing the instance.
- * `generate()` synthesizes one TTS chunk; callers schedule playback
- * (see the sentence player) and feed per-voice/engine ETA stats as usual.
+ * Lifecycle: `ensureReady()` downloads all 7 model files (cache-first,
+ * with progress), spawns `static/vendor/sherpa/ocr-tts-worker.js`,
+ * transfers the bytes, and awaits `tts-ready`. `generate()` synthesizes
+ * one TTS chunk; callers schedule playback (see the sentence player) and
+ * feed per-voice/engine ETA stats as usual.
  */
 
 import {
 	BASE_MODEL_FILES,
-	ENCODER_FILE,
-	areModelsCached,
 	downloadModelFile,
 	totalBytes,
 	type DownloadProgress
@@ -83,7 +80,6 @@ export class BrowserTtsEngine {
 	private worker: Worker | null = null;
 	private pending = new Map<number, PendingGenerate>();
 	private readyPromise: Promise<void> | null = null;
-	private hasEncoder = false;
 	private runtimeReadyResolve: (() => void) | null = null;
 	private modelBufs = new Map<string, ArrayBuffer>();
 
@@ -98,19 +94,6 @@ export class BrowserTtsEngine {
 			throw e;
 		});
 		return this.readyPromise;
-	}
-
-	/** Download the cloning encoder and re-init (lazy; keeps base fast). */
-	async ensureEncoder(onProgress?: (p: DownloadProgress) => void): Promise<void> {
-		await this.ensureReady();
-		if (this.hasEncoder) return;
-		this.status = 'downloading';
-		const data = await downloadModelFile(ENCODER_FILE.name, onProgress);
-		this.modelBufs.set(ENCODER_FILE.name, data);
-		this.status = 'initializing';
-		await this.initInstance(true);
-		this.hasEncoder = true;
-		this.status = 'ready';
 	}
 
 	private async setup(onProgress?: (p: DownloadProgress) => void): Promise<void> {
@@ -129,7 +112,7 @@ export class BrowserTtsEngine {
 		this.status = 'initializing';
 		this.spawnWorker();
 		await this.waitForRuntime();
-		await this.initInstance(false);
+		await this.initInstance();
 		this.status = 'ready';
 	}
 
@@ -149,10 +132,8 @@ export class BrowserTtsEngine {
 		});
 	}
 
-	private async initInstance(withEncoder: boolean): Promise<void> {
-		const names = withEncoder
-			? [...BASE_MODEL_FILES.map((f) => f.name), ENCODER_FILE.name]
-			: BASE_MODEL_FILES.map((f) => f.name);
+	private async initInstance(): Promise<void> {
+		const names = BASE_MODEL_FILES.map((f) => f.name);
 		const files: { name: string; data: ArrayBuffer }[] = [];
 		for (const name of names) {
 			const buf = this.modelBufs.get(name);
@@ -163,19 +144,11 @@ export class BrowserTtsEngine {
 			this.initResolve = resolve;
 			this.initReject = reject;
 		});
-		// Buffers transfer (neuter) — re-fetch from cache if we init again.
+		// Buffers transfer (neuter) — the worker owns them after this.
 		const transfers = files.map((f) => f.data);
-		this.worker?.postMessage({ type: 'init', files, withEncoder }, transfers);
+		this.worker?.postMessage({ type: 'init', files, withEncoder: true }, transfers);
 		this.modelBufs.clear();
-		try {
-			await done;
-		} finally {
-			// Re-cache bytes for future re-inits (worker neuters transfers).
-			for (const f of [...BASE_MODEL_FILES.map((x) => x.name), ENCODER_FILE.name]) {
-				const cached = await downloadModelFile(f).catch(() => null);
-				if (cached) this.modelBufs.set(f, cached);
-			}
-		}
+		await done;
 	}
 
 	private initResolve: (() => void) | null = null;
@@ -268,7 +241,6 @@ export class BrowserTtsEngine {
 		this.pending.clear();
 		this.worker?.terminate();
 		this.worker = null;
-		this.hasEncoder = false;
 		if (this.status === 'ready') this.status = 'idle';
 	}
 }
