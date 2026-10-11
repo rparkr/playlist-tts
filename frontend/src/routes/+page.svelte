@@ -53,8 +53,16 @@
 		selectSections,
 		type Section
 	} from '$lib/markdown/parse';
-	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
+	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import {
+		BrowserTtsEngine,
+		builtinVoiceWavUrl,
+		encodeWavBlob,
+		resolveReferenceVoice,
+		type BrowserReferenceVoice
+	} from '$lib/tts/browserTts';
+	import { areModelsCached, BASE_MODEL_FILES, type DownloadProgress } from '$lib/tts/browserModels';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
@@ -143,7 +151,7 @@
 
 	let globalIdx: number = $state(0);
 	let isPlaying: boolean = $state(false);
-	let useBackendTTS: boolean = $state(false);
+	let ttsEngine: TtsEngine = $state('device');
 	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	// Per-engine voice memory: each TTS engine remembers its own selection.
@@ -289,6 +297,7 @@
 		await migrateFromLocalStorage();
 		await refreshDocs();
 		await loadBuiltinVoices();
+		void refreshBrowserReady();
 		if (typeof window !== 'undefined' && window.speechSynthesis) {
 			const load = () => {};
 			window.speechSynthesis.onvoiceschanged = load;
@@ -306,7 +315,7 @@
 		const storedEngine = localStorage.getItem(LS_KEYS.engine);
 		synthRate = resolveWithUrlPrecedence(rateParam, storedRate, 1.0, parseRate);
 		const engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
-		useBackendTTS = engine === 'pocket';
+		ttsEngine = engine;
 		// Per-engine voice: stored map first, legacy single key migrates into
 		// the current engine's slot, URL `voice` wins for the current engine.
 		// The URL carries clone *names* (slugified); stored state keeps IDs.
@@ -392,7 +401,7 @@
 		localStorage.setItem(LS_KEYS.rate, String(synthRate));
 		localStorage.setItem(LS_KEYS.voice, selectedVoiceId);
 		localStorage.setItem(LS_KEYS.voiceByEngine, serializeVoiceByEngine(voiceByEngine));
-		localStorage.setItem(LS_KEYS.engine, useBackendTTS ? 'pocket' : 'device');
+		localStorage.setItem(LS_KEYS.engine, ttsEngine);
 		localStorage.setItem(
 			LS_KEYS.postprocess,
 			serializePostprocessFlags({
@@ -411,7 +420,7 @@
 			url.searchParams.set(URL_PARAMS.rate, String(synthRate));
 			// Cloned voices are deep-linked by slugified name, not raw ID.
 			url.searchParams.set(URL_PARAMS.voice, voiceUrlParam(selectedVoiceId, customVoices));
-			url.searchParams.set(URL_PARAMS.engine, useBackendTTS ? 'pocket' : 'device');
+			url.searchParams.set(URL_PARAMS.engine, ttsEngine);
 			history.replaceState(null, '', url.toString());
 		}
 	});
@@ -477,7 +486,7 @@
 		const secs = estimateRemainingSeconds(
 			remainingChars,
 			selectedVoiceId,
-			useBackendTTS ? 'pocket' : 'device',
+			ttsEngine,
 			synthRate
 		);
 		return formatRemaining(secs);
@@ -857,10 +866,10 @@
 		const logical = physicalToLogical(physical, activeDoc?.pageMap);
 		const markerIdx = findPageMarkerIndex(sentences, logical);
 		if (markerIdx !== -1 && markerIdx !== globalIdx) {
-			if (isPlaying || useBackendTTS) seekTo(markerIdx);
+			if (isPlaying || ttsEngine !== 'device') seekTo(markerIdx);
 			else globalIdx = markerIdx;
 		} else if (markerIdx === -1 && physical === 1 && globalIdx !== 0) {
-			if (isPlaying || useBackendTTS) seekTo(0);
+			if (isPlaying || ttsEngine !== 'device') seekTo(0);
 			else globalIdx = 0;
 		}
 	}
@@ -1206,7 +1215,7 @@
 
 	/** Per-card progress + ETA stats for the open playlist's items. */
 	async function refreshItemStats() {
-		const engine = useBackendTTS ? 'pocket' : 'device';
+		const engine = ttsEngine;
 		const next: Record<string, PlaylistItemStat> = {};
 		for (const item of playlistItems) {
 			const d = await getDoc(item.docId);
@@ -1233,7 +1242,7 @@
 	}
 
 	async function refreshLibraryStats() {
-		const engine = useBackendTTS ? 'pocket' : 'device';
+		const engine = ttsEngine;
 		const next: Record<string, LibraryPlaylistStat> = {};
 		for (const p of playlists) {
 			const items = await getPlaylistItems(p.id);
@@ -1310,9 +1319,9 @@
 	/** Start (or resume) playback from the current sentence. */
 	function startPlayback() {
 		isPlaying = true;
-		if (useBackendTTS) {
+		if (ttsEngine !== 'device') {
 			if (sentencePlayer?.canResume()) void sentencePlayer.resume();
-			else playBackend();
+			else playSentencePlayer();
 		} else playWebSpeechCorrect();
 	}
 
@@ -1698,7 +1707,7 @@
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {
-		if (isPlaying || useBackendTTS) seekTo(idx);
+		if (isPlaying || ttsEngine !== 'device') seekTo(idx);
 		else globalIdx = idx;
 	}
 
@@ -1706,23 +1715,24 @@
 		selectedVoiceId = id;
 		// Remember the choice under the current engine so toggling engines
 		// restores each engine's last voice.
-		const engine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
-		voiceByEngine = withVoiceForEngine(voiceByEngine, engine, id);
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, id);
 		// Cache keys are voice-scoped, so just restart the chain: the new
 		// voice synthesizes from the current sentence, nothing earlier.
-		if (isPlaying && useBackendTTS) playBackend();
+		if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
 	}
 
-	function handleEngineChange(useBackend: boolean) {
+	function handleEngineChange(engine: TtsEngine) {
 		// Park the current selection under the old engine before switching.
-		const fromEngine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
-		const toEngine: TtsEngine = useBackend ? 'pocket' : 'device';
-		voiceByEngine = withVoiceForEngine(voiceByEngine, fromEngine, selectedVoiceId);
-		useBackendTTS = useBackend;
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		// Stop any running chain — audio must never bleed across engines.
+		cancelSpeech();
+		sentencePlayer?.stop();
+		isPlaying = false;
+		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
 		// current selection over so nothing unexpectedly resets to a default.
-		const next = voiceForEngine(voiceByEngine, toEngine, selectedVoiceId);
-		voiceByEngine = withVoiceForEngine(voiceByEngine, toEngine, next);
+		const next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, next);
 		selectedVoiceId = next;
 	}
 
@@ -1790,7 +1800,7 @@
 		};
 		if (selectedVoiceId === id) {
 			selectedVoiceId = fallback;
-			if (isPlaying && useBackendTTS) playBackend();
+			if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
 		}
 	}
 
@@ -1810,7 +1820,7 @@
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
-			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
+			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 			(input as HTMLInputElement).value = '';
 			return;
@@ -1824,11 +1834,12 @@
 			const base = file.name.replace(/\.[^.]+$/, '') || 'voice';
 			const name = promptForVoiceName(base, 'Name this voice:');
 			if (name === null) return;
-			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
+			const wavBytes = new Blob([await file.arrayBuffer()], { type: file.type || 'audio/wav' });
+			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, wavBlob: wavBytes, createdAt: Date.now() };
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
-			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
+			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 		} catch (err: any) {
 			showToast(`Voice clone failed: ${err.message}`);
@@ -1839,6 +1850,76 @@
 
 	// Player
 	let isBackendGenerating: boolean = $state(false);
+
+	// Browser pocket-tts engine (WASM): module singleton plus download
+	// progress/error state for the settings modal's explicit download.
+	let browserEngine: BrowserTtsEngine | null = null;
+	let browserReady = $state(false);
+	let browserBusy = $state(false);
+	let browserDl: DownloadProgress | null = $state(null);
+	let browserError: string | null = $state(null);
+
+	function getBrowserEngine(): BrowserTtsEngine {
+		if (!browserEngine) browserEngine = new BrowserTtsEngine();
+		return browserEngine;
+	}
+
+	async function refreshBrowserReady() {
+		try {
+			browserReady = await areModelsCached(BASE_MODEL_FILES);
+		} catch {
+			browserReady = false;
+		}
+	}
+
+	async function downloadBrowserModels() {
+		browserError = null;
+		browserBusy = true;
+		try {
+			await getBrowserEngine().ensureReady((p) => {
+				browserDl = p;
+			});
+			browserReady = true;
+			showToast('Browser voice model ready');
+		} catch (e: unknown) {
+			browserError = (e as Error)?.message ?? String(e);
+			showToast(`Model download failed: ${browserError}`);
+		} finally {
+			browserBusy = false;
+		}
+	}
+
+	/** Clone reference for the browser engine: uploaded wav, else built-in. */
+	async function resolveBrowserReference(): Promise<BrowserReferenceVoice | null> {
+		const custom = customVoices.find((v) => v.id === selectedVoiceId);
+		if (custom) {
+			if (custom.wavBlob) {
+				return resolveReferenceVoice(`clone:${custom.id}`, () =>
+					Promise.resolve(custom.wavBlob as Blob)
+				);
+			}
+			showToast(`"${custom.name}" predates browser cloning — using alba`);
+		}
+		const builtin =
+			builtinVoices.find((v) => v.name === selectedVoiceId) ??
+			builtinVoices.find((v) => v.name === 'alba');
+		const url = builtin?.origin ? builtinVoiceWavUrl(builtin.origin) : null;
+		const name = builtin?.name ?? 'alba';
+		if (!url) {
+			showToast('No reference audio for the selected voice');
+			return null;
+		}
+		try {
+			return await resolveReferenceVoice(`builtin:${name}`, async () => {
+				const resp = await fetch(url);
+				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+				return resp.blob();
+			});
+		} catch (e: unknown) {
+			showToast(`Voice download failed: ${(e as Error)?.message ?? e}`);
+			return null;
+		}
+	}
 
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
@@ -1855,7 +1936,7 @@
 					// Refine ETA stats for the voice+engine that sounded it.
 					recordEtaSample(
 						selectedVoiceId,
-						useBackendTTS ? 'pocket' : 'device',
+						ttsEngine,
 						chars,
 						secondsAt1x
 					);
@@ -1872,7 +1953,7 @@
 					})();
 				},
 				onError: (msg) => {
-					showToast(`Backend TTS failed: ${msg}`);
+					showToast(`${ttsEngine === 'browser' ? 'Browser TTS' : 'Backend TTS'} failed: ${msg}`);
 					isPlaying = false;
 				},
 				onLoadingChange: (loading) => {
@@ -1889,8 +1970,12 @@
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start backend playback from `globalIdx` — one speakable chunk per request. */
-	function playBackend() {
+	/** Start sentence-player playback — server pocket or browser WASM. */
+	function playSentencePlayer() {
+		if (ttsEngine === 'browser') {
+			void playBrowser();
+			return;
+		}
 		if (!activeDoc) return;
 		const texts = tts.texts;
 		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
@@ -1898,8 +1983,57 @@
 			return;
 		}
 		const { voiceKey, voiceId, blob } = resolveBackendVoice();
+		getSentencePlayer().setFetchAudio(fetchTTSWavStream);
 		isBackendGenerating = true;
 		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
+	}
+
+	/** Start browser-WASM playback from `globalIdx` (model + voice first). */
+	async function playBrowser() {
+		if (!activeDoc) return;
+		const texts = tts.texts;
+		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
+			isPlaying = false;
+			return;
+		}
+		const engine = getBrowserEngine();
+		if (engine.status !== 'ready') {
+			try {
+				await engine.ensureReady((p) => {
+					browserDl = p;
+				});
+				browserReady = true;
+				browserError = null;
+			} catch (e: unknown) {
+				browserError = (e as Error)?.message ?? String(e);
+				isPlaying = false;
+				showToast('Browser voice model not ready — download it in TTS settings');
+				showTtsSettings = true;
+				return;
+			}
+		}
+		const reference = await resolveBrowserReference();
+		if (!reference) {
+			isPlaying = false;
+			return;
+		}
+		const player = getSentencePlayer();
+		player.setFetchAudio(async (text) => {
+			// Synthesize at 1x; the player element applies `synthRate` so
+			// ETA stats stay comparable with the server engine.
+			const audio = await engine.generate(text, { speed: 1.0, reference });
+			return { url: URL.createObjectURL(encodeWavBlob(audio.samples, audio.sampleRate)) };
+		});
+		const { voiceKey } = resolveBackendVoice();
+		isBackendGenerating = true;
+		void player.play(
+			texts,
+			chunkForSentence(tts, globalIdx),
+			`browser::${voiceKey}`,
+			null,
+			null,
+			synthRate
+		);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
@@ -1943,7 +2077,7 @@
 		const total = getGlobalSentences(sections).length;
 		const next = Math.max(0, Math.min(idx, total - 1));
 		globalIdx = next;
-		if (useBackendTTS) {
+		if (ttsEngine !== 'device') {
 			// When paused this just parks the resume position; when playing it
 			// aborts in-flight requests and starts at the new sentence. The
 			// player works in derived-chunk space, so map the global index.
@@ -1960,7 +2094,7 @@
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx < sections.length - 1) {
 			const target = sectionChunkToGlobal(sections, sectionIdx + 1, 0);
-			if (isPlaying || useBackendTTS) seekTo(target);
+			if (isPlaying || ttsEngine !== 'device') seekTo(target);
 			else globalIdx = target;
 		}
 	}
@@ -1968,7 +2102,7 @@
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx > 0) {
 			const target = sectionChunkToGlobal(sections, sectionIdx - 1, 0);
-			if (isPlaying || useBackendTTS) seekTo(target);
+			if (isPlaying || ttsEngine !== 'device') seekTo(target);
 			else globalIdx = target;
 		}
 	}
@@ -2476,7 +2610,7 @@
 	<TtsSettingsModal
 		open={showTtsSettings}
 		onClose={() => (showTtsSettings = false)}
-		{useBackendTTS}
+		{ttsEngine}
 		onEngineChange={handleEngineChange}
 		{builtinVoices}
 		{customVoices}
@@ -2489,6 +2623,11 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
+		{browserReady}
+		browserDownloading={browserBusy}
+		browserProgress={browserDl}
+		{browserError}
+		onDownloadBrowser={downloadBrowserModels}
 	/>
 
 	<PostprocessingModal
