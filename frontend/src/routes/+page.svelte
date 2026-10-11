@@ -97,7 +97,7 @@
 	// --- State ---
 	let docs: Doc[] = $state([]);
 	let customVoices: VoiceRecord[] = $state([]);
-	let builtinVoices: { name: string }[] = $state([]);
+	let builtinVoices: { name: string; origin?: string }[] = $state([]);
 	let activeDoc: Doc | null = $state(null);
 	let pdfSizes: Record<string, number> = $state({});
 	let markdownDraft: string = $state('');
@@ -147,7 +147,7 @@
 	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	// Per-engine voice memory: each TTS engine remembers its own selection.
-	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null });
+	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null, browser: null });
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
 
@@ -275,7 +275,10 @@
 			const r = await fetch(`${API_BASE}/api/tts/voices`);
 			if (r.ok) {
 				const data = await r.json();
-				builtinVoices = data.voices ?? [{ name: 'alba' }];
+				// Keep `origin` (hf://…) — the browser engine fetches it for cloning.
+				builtinVoices = (data.voices ?? [{ name: 'alba' }]).map(
+					(v: { name: string; origin?: string }) => ({ name: v.name, origin: v.origin })
+				);
 			} else builtinVoices = [{ name: 'alba' }];
 		} catch {
 			builtinVoices = [{ name: 'alba' }];
@@ -309,7 +312,8 @@
 		// The URL carries clone *names* (slugified); stored state keeps IDs.
 		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
 			device: null,
-			pocket: null
+			pocket: null,
+			browser: null
 		};
 		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
 		if (voiceParam) {
@@ -1781,7 +1785,8 @@
 		const fallback = builtinVoices[0]?.name ?? 'alba';
 		voiceByEngine = {
 			device: voiceByEngine.device === id ? fallback : voiceByEngine.device,
-			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket
+			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket,
+			browser: voiceByEngine.browser === id ? fallback : voiceByEngine.browser
 		};
 		if (selectedVoiceId === id) {
 			selectedVoiceId = fallback;

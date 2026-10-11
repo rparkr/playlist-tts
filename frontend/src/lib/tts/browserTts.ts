@@ -27,6 +27,59 @@ export interface BrowserAudio {
 	sampleRate: number;
 }
 
+/** Encode float32 mono PCM as a 16-bit WAV blob (player cache entries). */
+export function encodeWavBlob(samples: Float32Array, sampleRate: number): Blob {
+	const n = samples.length;
+	const buf = new ArrayBuffer(44 + n * 2);
+	const view = new DataView(buf);
+	const writeAscii = (offset: number, text: string) => {
+		for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+	};
+	writeAscii(0, 'RIFF');
+	view.setUint32(4, 36 + n * 2, true);
+	writeAscii(8, 'WAVE');
+	writeAscii(12, 'fmt ');
+	view.setUint32(16, 16, true);
+	view.setUint16(20, 1, true);
+	view.setUint16(22, 1, true);
+	view.setUint32(24, sampleRate, true);
+	view.setUint32(28, sampleRate * 2, true);
+	view.setUint16(32, 2, true);
+	view.setUint16(34, 16, true);
+	writeAscii(36, 'data');
+	view.setUint32(40, n * 2, true);
+	for (let i = 0; i < n; i++) {
+		const s = Math.max(-1, Math.min(1, samples[i]));
+		view.setInt16(44 + i * 2, Math.round(s * 32767), true);
+	}
+	return new Blob([buf], { type: 'audio/wav' });
+}
+
+/** Map a backend `hf://repo/path` voice origin to a fetchable HTTPS URL. */
+export function builtinVoiceWavUrl(origin: string): string | null {
+	const prefix = 'hf://';
+	if (!origin.startsWith(prefix)) return null;
+	const parts = origin.slice(prefix.length).split('/');
+	if (parts.length < 3) return null;
+	const repo = `${parts[0]}/${parts[1]}`;
+	return `https://huggingface.co/${repo}/resolve/main/${parts.slice(2).join('/')}`;
+}
+
+/** Decoded reference voices, cached per voice key (decode once per session). */
+export const referenceVoiceCache = new Map<string, BrowserReferenceVoice>();
+
+/** Decode (once) and cache the clone reference for `key`. */
+export async function resolveReferenceVoice(
+	key: string,
+	load: () => Promise<Blob>
+): Promise<BrowserReferenceVoice> {
+	const hit = referenceVoiceCache.get(key);
+	if (hit) return hit;
+	const voice = await decodeReferenceVoice(await load());
+	referenceVoiceCache.set(key, voice);
+	return voice;
+}
+
 /** Downmix decoded WebAudio channels to mono float32 (clone input). */
 export function monoSamples(channels: Float32Array[]): Float32Array {
 	if (channels.length === 0) return new Float32Array(0);
