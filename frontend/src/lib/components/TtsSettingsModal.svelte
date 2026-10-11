@@ -1,7 +1,6 @@
 <script lang="ts">
-	import { Check, Pencil, Trash2, X, Download } from 'lucide-svelte';
+	import { Check, Pencil, Trash2, X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
-	import { formatBytes, totalBytes, BASE_MODEL_FILES, type DownloadProgress } from '$lib/tts/browserModels';
 	import { sortVoiceOptions, type TtsEngine } from '$lib/settings';
 
 	interface Props {
@@ -20,11 +19,6 @@
 		onRateChange: (rate: number) => void;
 		onVoiceFile: (e: Event) => void;
 		isBackendGenerating: boolean;
-		browserReady: boolean;
-		browserDownloading: boolean;
-		browserProgress: DownloadProgress | null;
-		browserError: string | null;
-		onDownloadBrowser: () => void;
 	}
 
 	let {
@@ -42,12 +36,7 @@
 		synthRate,
 		onRateChange,
 		onVoiceFile,
-		isBackendGenerating,
-		browserReady,
-		browserDownloading,
-		browserProgress,
-		browserError,
-		onDownloadBrowser
+		isBackendGenerating
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
@@ -157,48 +146,10 @@
 						>
 							Pocket TTS
 						</button>
-						<button
-							onclick={() => onEngineChange('browser')}
-							aria-label="Browser Pocket TTS"
-							class="px-3 py-1.5 text-sm font-medium transition-colors {ttsEngine === 'browser'
-								? 'bg-sky-600 text-white'
-								: 'bg-slate-700 text-slate-300 hover:bg-slate-600'}"
-						>
-							Browser
-						</button>
 					</div>
 				</div>
 				{#if ttsEngine !== 'device' && isBackendGenerating}
 					<div class="text-xs text-slate-400 -mt-3">Generating…</div>
-				{/if}
-				{#if ttsEngine === 'browser'}
-					<div class="flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-900/60 p-3">
-						<span class="text-xs font-medium text-slate-300">Browser voice model ({formatBytes(totalBytes(BASE_MODEL_FILES))}, one-time)</span>
-						{#if browserReady}
-							<div class="text-xs text-emerald-400">✓ Downloaded — works offline, no server needed.</div>
-						{:else if browserDownloading}
-							<div class="h-2 rounded bg-slate-700 overflow-hidden">
-								<div
-									class="h-full bg-sky-500 transition-all"
-									style="width: {browserProgress && browserProgress.total > 0 ? Math.round((browserProgress.loaded / browserProgress.total) * 100) : 0}%"
-								></div>
-							</div>
-							<div class="text-xs text-slate-400 tabular-nums">
-								{browserProgress ? `${formatBytes(browserProgress.loaded)} / ${formatBytes(browserProgress.total)}` : 'Starting…'}
-							</div>
-						{:else}
-							<button
-								onclick={onDownloadBrowser}
-								class="inline-flex items-center gap-1.5 self-start text-xs px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium"
-							>
-								<Download size={13} /> Download model
-							</button>
-						{/if}
-						{#if browserError}
-							<div class="text-xs text-red-400">{browserError}</div>
-						{/if}
-						<div class="text-xs text-slate-500">Runs pocket-tts in this tab (WebAssembly, ~1.3x real-time). Built-in voices and your uploaded clones work; clones saved before this update need re-upload for browser use.</div>
-					</div>
 				{/if}
 
 				<!-- Voice -->
@@ -234,7 +185,7 @@
 								{/each}
 							</optgroup>
 						{/if}
-						<optgroup label={ttsEngine === 'browser' ? 'Built-in (reference download)' : 'Built-in (server)'}>
+						<optgroup label={ttsEngine === 'browser' ? 'Built-in' : 'Built-in (server)'}>
 							{#each sortedBuiltinVoices as v}
 								<option value={v.name}>{v.name}</option>
 							{/each}

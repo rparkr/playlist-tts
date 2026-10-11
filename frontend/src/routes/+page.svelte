@@ -55,14 +55,6 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
-	import {
-		BrowserTtsEngine,
-		builtinVoiceWavUrl,
-		encodeWavBlob,
-		resolveReferenceVoice,
-		type BrowserReferenceVoice
-	} from '$lib/tts/browserTts';
-	import { areModelsCached, BASE_MODEL_FILES, type DownloadProgress } from '$lib/tts/browserModels';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
@@ -105,7 +97,7 @@
 	// --- State ---
 	let docs: Doc[] = $state([]);
 	let customVoices: VoiceRecord[] = $state([]);
-	let builtinVoices: { name: string; origin?: string }[] = $state([]);
+	let builtinVoices: { name: string }[] = $state([]);
 	let activeDoc: Doc | null = $state(null);
 	let pdfSizes: Record<string, number> = $state({});
 	let markdownDraft: string = $state('');
@@ -283,9 +275,8 @@
 			const r = await fetch(`${API_BASE}/api/tts/voices`);
 			if (r.ok) {
 				const data = await r.json();
-				// Keep `origin` (hf://…) — the browser engine fetches it for cloning.
 				builtinVoices = (data.voices ?? [{ name: 'alba' }]).map(
-					(v: { name: string; origin?: string }) => ({ name: v.name, origin: v.origin })
+					(v: { name: string }) => ({ name: v.name })
 				);
 			} else builtinVoices = [{ name: 'alba' }];
 		} catch {
@@ -297,7 +288,6 @@
 		await migrateFromLocalStorage();
 		await refreshDocs();
 		await loadBuiltinVoices();
-		void refreshBrowserReady();
 		if (typeof window !== 'undefined' && window.speechSynthesis) {
 			const load = () => {};
 			window.speechSynthesis.onvoiceschanged = load;
@@ -1834,8 +1824,7 @@
 			const base = file.name.replace(/\.[^.]+$/, '') || 'voice';
 			const name = promptForVoiceName(base, 'Name this voice:');
 			if (name === null) return;
-			const wavBytes = new Blob([await file.arrayBuffer()], { type: file.type || 'audio/wav' });
-			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, wavBlob: wavBytes, createdAt: Date.now() };
+			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
@@ -1850,76 +1839,6 @@
 
 	// Player
 	let isBackendGenerating: boolean = $state(false);
-
-	// Browser pocket-tts engine (WASM): module singleton plus download
-	// progress/error state for the settings modal's explicit download.
-	let browserEngine: BrowserTtsEngine | null = null;
-	let browserReady = $state(false);
-	let browserBusy = $state(false);
-	let browserDl: DownloadProgress | null = $state(null);
-	let browserError: string | null = $state(null);
-
-	function getBrowserEngine(): BrowserTtsEngine {
-		if (!browserEngine) browserEngine = new BrowserTtsEngine();
-		return browserEngine;
-	}
-
-	async function refreshBrowserReady() {
-		try {
-			browserReady = await areModelsCached(BASE_MODEL_FILES);
-		} catch {
-			browserReady = false;
-		}
-	}
-
-	async function downloadBrowserModels() {
-		browserError = null;
-		browserBusy = true;
-		try {
-			await getBrowserEngine().ensureReady((p) => {
-				browserDl = p;
-			});
-			browserReady = true;
-			showToast('Browser voice model ready');
-		} catch (e: unknown) {
-			browserError = (e as Error)?.message ?? String(e);
-			showToast(`Model download failed: ${browserError}`);
-		} finally {
-			browserBusy = false;
-		}
-	}
-
-	/** Clone reference for the browser engine: uploaded wav, else built-in. */
-	async function resolveBrowserReference(): Promise<BrowserReferenceVoice | null> {
-		const custom = customVoices.find((v) => v.id === selectedVoiceId);
-		if (custom) {
-			if (custom.wavBlob) {
-				return resolveReferenceVoice(`clone:${custom.id}`, () =>
-					Promise.resolve(custom.wavBlob as Blob)
-				);
-			}
-			showToast(`"${custom.name}" predates browser cloning — using alba`);
-		}
-		const builtin =
-			builtinVoices.find((v) => v.name === selectedVoiceId) ??
-			builtinVoices.find((v) => v.name === 'alba');
-		const url = builtin?.origin ? builtinVoiceWavUrl(builtin.origin) : null;
-		const name = builtin?.name ?? 'alba';
-		if (!url) {
-			showToast('No reference audio for the selected voice');
-			return null;
-		}
-		try {
-			return await resolveReferenceVoice(`builtin:${name}`, async () => {
-				const resp = await fetch(url);
-				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-				return resp.blob();
-			});
-		} catch (e: unknown) {
-			showToast(`Voice download failed: ${(e as Error)?.message ?? e}`);
-			return null;
-		}
-	}
 
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
@@ -1972,10 +1891,6 @@
 
 	/** Start sentence-player playback — server pocket or browser WASM. */
 	function playSentencePlayer() {
-		if (ttsEngine === 'browser') {
-			void playBrowser();
-			return;
-		}
 		if (!activeDoc) return;
 		const texts = tts.texts;
 		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
@@ -1986,54 +1901,6 @@
 		getSentencePlayer().setFetchAudio(fetchTTSWavStream);
 		isBackendGenerating = true;
 		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
-	}
-
-	/** Start browser-WASM playback from `globalIdx` (model + voice first). */
-	async function playBrowser() {
-		if (!activeDoc) return;
-		const texts = tts.texts;
-		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
-			isPlaying = false;
-			return;
-		}
-		const engine = getBrowserEngine();
-		if (engine.status !== 'ready') {
-			try {
-				await engine.ensureReady((p) => {
-					browserDl = p;
-				});
-				browserReady = true;
-				browserError = null;
-			} catch (e: unknown) {
-				browserError = (e as Error)?.message ?? String(e);
-				isPlaying = false;
-				showToast('Browser voice model not ready — download it in TTS settings');
-				showTtsSettings = true;
-				return;
-			}
-		}
-		const reference = await resolveBrowserReference();
-		if (!reference) {
-			isPlaying = false;
-			return;
-		}
-		const player = getSentencePlayer();
-		player.setFetchAudio(async (text) => {
-			// Synthesize at 1x; the player element applies `synthRate` so
-			// ETA stats stay comparable with the server engine.
-			const audio = await engine.generate(text, { speed: 1.0, reference });
-			return { url: URL.createObjectURL(encodeWavBlob(audio.samples, audio.sampleRate)) };
-		});
-		const { voiceKey } = resolveBackendVoice();
-		isBackendGenerating = true;
-		void player.play(
-			texts,
-			chunkForSentence(tts, globalIdx),
-			`browser::${voiceKey}`,
-			null,
-			null,
-			synthRate
-		);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
@@ -2623,11 +2490,6 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
-		{browserReady}
-		browserDownloading={browserBusy}
-		browserProgress={browserDl}
-		{browserError}
-		onDownloadBrowser={downloadBrowserModels}
 	/>
 
 	<PostprocessingModal

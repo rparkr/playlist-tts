@@ -42,8 +42,6 @@ export interface VoiceRecord {
 	blob: Blob;
 	bytes: number;
 	sourceWavName?: string;
-	/** Original upload bytes for wav/mp3 sources (browser-engine cloning). */
-	wavBlob?: Blob;
 	createdAt: number;
 }
 
