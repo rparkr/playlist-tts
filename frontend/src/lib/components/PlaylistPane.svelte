@@ -98,9 +98,13 @@ let selected: string[] = $state([]);
 let reprocessId: string | null = $state(null);
 
 // Drop selections for items that left the playlist (deletes, switches).
+// Guarded: assigning a fresh array unconditionally would re-trigger this
+// same effect forever (new identity notifies on every run) and take down
+// the update flush with `effect_update_depth_exceeded`.
 $effect(() => {
 	const ids = new Set(items.map((i) => i.id));
-	selected = selected.filter((id) => ids.has(id));
+	const pruned = selected.filter((id) => ids.has(id));
+	if (pruned.length !== selected.length) selected = pruned;
 	if (editingId && !ids.has(editingId)) {
 		editingId = null;
 		editValue = '';
