@@ -19,6 +19,8 @@
 		getPdf,
 		deletePdf,
 		getPdfSizes,
+		saveDocAssets,
+		hasDocAssets,
 		createPlaylist,
 		getPlaylists,
 		getAllItems,
@@ -70,7 +72,7 @@
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
 	import { formatEta, formatRemaining, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
 	import { applyPostprocessing } from '$lib/markdown/postprocess';
-	import { domainOf, isPdfUrl, sourceLabel } from '$lib/playlists/model';
+	import { domainOf, isEpubUrl, isPdfUrl, sourceLabel } from '$lib/playlists/model';
 	import {
 		LS_KEYS,
 		URL_PARAMS,
@@ -167,7 +169,7 @@
 	let pdfPendingOcr: boolean = $state(false);
 	let pendingPdfName: string = $state('');
 	let pageOverrides: Record<number, number> = $state({});
-	let mdInputEl: HTMLInputElement | null = $state(null);
+	/** Single consolidated file picker (PDF, Markdown, text, ePub — #83). */
 
 	function currentPostprocessOpts(): PostprocessOptions {
 		return {
@@ -246,7 +248,7 @@
 	let listenPasteTitle: string = $state('');
 	let listenPasteValue: string = $state('');
 
-	let pdfInputEl: HTMLInputElement | null = $state(null);
+	let docInputEl: HTMLInputElement | null = $state(null);
 
 	const API_BASE = (import.meta.env.PUBLIC_API_URL as string) ?? '';
 
@@ -536,10 +538,48 @@
 		}
 	}
 
-	async function onPdfSelected(e: Event) {
+	/** Consolidated upload (#83): sniff extension + magic bytes, then route
+	 * to PDF staging, ePub conversion, or Markdown import. */
+	async function onDocSelected(e: Event) {
 		const input = e.target as HTMLInputElement;
-		if (!input.files?.[0]) return;
-		const file = input.files[0];
+		const file = input.files?.[0];
+		// reset upfront so the same file can be re-selected
+		input.value = '';
+		if (!file) return;
+		const kind = await sniffDocKind(file);
+		if (kind === 'pdf') {
+			stagePdfFile(file);
+			return;
+		}
+		if (kind === 'epub') {
+			await handleEpubFile(file);
+			return;
+		}
+		await handleMarkdownFile(file);
+	}
+
+	/** Extension + content sniffing for the consolidated picker. */
+	async function sniffDocKind(file: File): Promise<'pdf' | 'epub' | 'text'> {
+		const name = (file.name || '').toLowerCase();
+		const type = (file.type || '').toLowerCase().split(';')[0].trim();
+		if (name.endsWith('.pdf') || type === 'application/pdf') return 'pdf';
+		if (name.endsWith('.epub') || type === 'application/epub+zip' || type === 'application/epub')
+			return 'epub';
+		if (name.endsWith('.md') || name.endsWith('.markdown') || name.endsWith('.txt')) return 'text';
+		// Extensionless/dubious names (mobile shares, `blob`): sniff magic.
+		try {
+			const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+			if (head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46)
+				return 'pdf'; // %PDF-
+			if (head[0] === 0x50 && head[1] === 0x4b) {
+				const ascii = String.fromCharCode(...head.slice(0, 64));
+				if (ascii.includes('mimetypeapplication/epub+zip')) return 'epub';
+			}
+		} catch {}
+		return 'text';
+	}
+
+	async function stagePdfFile(file: File) {
 		setPdfFromBlob(file, file.name);
 		pendingPdfName = file.name;
 		pageOverrides = {};
@@ -550,8 +590,6 @@
 		// presses "Extract text" (staging bar) to kick off OCR (#6).
 		await loadPdf();
 		showToast('PDF loaded — set page options, then press Extract text');
-		// reset input so same file can be re-selected
-		input.value = '';
 	}
 
 	function cancelPendingPdf() {
@@ -563,17 +601,59 @@
 		if (activeDoc) void loadCachedPdf(activeDoc.id);
 	}
 
-	// Markdown upload + PDF+Markdown pair (#20). Markers (`Page N.` lines)
-	// drive viewer sync; the PDF page count validates the pairing.
-	function triggerMarkdownUpload() {
-		mdInputEl?.click();
+	// Consolidated picker opener: callers set `pendingPlaylistId` first so
+	// the new doc lands in the open playlist (or standalone when null).
+	function openDocPicker() {
+		docInputEl?.click();
 	}
 
-	async function onMarkdownSelected(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		input.value = '';
-		if (!file) return;
+	/** ePub import: convert server-side, persist Markdown + image assets. */
+	async function handleEpubFile(file: File | Blob, fallbackName: string = 'book.epub') {
+		const name = file instanceof File ? file.name || fallbackName : fallbackName;
+		if (pdfPendingOcr) {
+			showToast('Finish or cancel the staged PDF first');
+			return;
+		}
+		showToast('Converting ePub…');
+		try {
+			const form = new FormData();
+			form.append('file', file, name);
+			const resp = await fetch(`${API_BASE}/api/convert/epub`, { method: 'POST', body: form });
+			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
+			const data = await resp.json();
+			const title =
+				(data.title as string | null) ||
+				name.replace(/\.epub$/i, '').replace(/[_-]+/g, ' ').trim() ||
+				'ePub book';
+			const doc = await createDoc(title, data.markdown as string, undefined, currentPostprocessOpts());
+			const images = (data.images ?? []) as { path: string; media_type: string; data_b64: string }[];
+			if (images.length > 0) {
+				await saveDocAssets(
+					doc.id,
+					images.map((img) => ({
+						path: img.path,
+						mediaType: img.media_type || 'image/png',
+						blob: b64ToBlob(img.data_b64, img.media_type || 'image/png')
+					}))
+				);
+			}
+			await placeNewDoc(doc, { kind: 'epub-upload' });
+			showToast(pendingPlaylistId ? 'ePub added to playlist' : 'ePub opened');
+		} catch (e: unknown) {
+			showToast(`ePub import failed: ${(e as Error)?.message ?? e}`);
+		}
+	}
+
+	function b64ToBlob(b64: string, type: string): Blob {
+		const bin = atob(b64);
+		const bytes = new Uint8Array(bin.length);
+		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+		return new Blob([bytes.buffer as ArrayBuffer], { type });
+	}
+
+	// Markdown upload + PDF+Markdown pair (#20). Markers (`Page N.` lines)
+	// drive viewer sync; the PDF page count validates the pairing.
+	async function handleMarkdownFile(file: File) {
 		let text = '';
 		try {
 			text = await file.text();
@@ -653,17 +733,13 @@
 	// For manual trigger from PdfPane placeholder
 	function triggerPdfUpload() {
 		pendingPlaylistId = null;
-		pdfInputEl?.click();
+		openDocPicker();
 	}
 
 	/** Playlist "+" menu uploads: the new doc lands in the open playlist. */
-	function handlePlaylistPdfUpload() {
+	function handlePlaylistDocUpload() {
 		pendingPlaylistId = activePlaylistId;
-		pdfInputEl?.click();
-	}
-	function handlePlaylistMarkdownUpload() {
-		pendingPlaylistId = activePlaylistId;
-		mdInputEl?.click();
+		openDocPicker();
 	}
 
 	async function loadPdf() {
@@ -1352,6 +1428,22 @@
 			}
 			return;
 		}
+		if (isEpubUrl(url)) {
+			// ePub-URL path: download the blob, then run the convert pipeline.
+			showToast('Downloading ePub…');
+			pendingPlaylistId = targetPlaylistId;
+			try {
+				const resp = await fetch(url);
+				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+				const blob = await resp.blob();
+				const name = url.split('/').pop()?.split('?')[0]?.split('#')[0] || 'book.epub';
+				await handleEpubFile(new Blob([blob], { type: 'application/epub+zip' }), name);
+			} catch (e: unknown) {
+				pendingPlaylistId = null;
+				showToast(`ePub download failed: ${(e as Error)?.message ?? e}`);
+			}
+			return;
+		}
 		showToast('Fetching article…');
 		try {
 			const resp = await fetch(`${API_BASE}/api/fetch/article`, {
@@ -1516,7 +1608,11 @@
 			return;
 		}
 		const source: ItemSource =
-			pdfSizes[doc.id] !== undefined ? { kind: 'pdf-upload' } : { kind: 'markdown-upload' };
+			pdfSizes[doc.id] !== undefined
+				? { kind: 'pdf-upload' }
+				: (await hasDocAssets(doc.id))
+					? { kind: 'epub-upload' }
+					: { kind: 'markdown-upload' };
 		const item = await attachDocAsItem(activePlaylistId, doc, source);
 		if (item) {
 			activeItemId = item.id;
@@ -1895,7 +1991,7 @@
 	function handleHeaderUpload() {
 		// Header uploads are listen-now: the doc opens standalone.
 		pendingPlaylistId = null;
-		pdfInputEl?.click();
+		openDocPicker();
 	}
 	function handleLibraryButton() {
 		if (activeDoc) {
@@ -1915,7 +2011,11 @@
 			return;
 		}
 		const source: ItemSource =
-			pdfSizes[docId] !== undefined ? { kind: 'pdf-upload' } : { kind: 'markdown-upload' };
+			pdfSizes[docId] !== undefined
+				? { kind: 'pdf-upload' }
+				: (await hasDocAssets(docId))
+					? { kind: 'epub-upload' }
+					: { kind: 'markdown-upload' };
 		const item = await attachDocAsItem(playlistId, d, source);
 		if (item) showToast('Added to playlist');
 	}
@@ -2012,8 +2112,7 @@
 <div class="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
 	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} leftPaneVisible={leftVisible} onLogoClick={handleLogoClick} onLibraryClick={handleLibraryButton} onToggleLeftPane={handleToggleLeftPane} />
 
-	<input bind:this={pdfInputEl} type="file" accept="application/pdf" onchange={onPdfSelected} class="hidden" />
-	<input bind:this={mdInputEl} type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onchange={onMarkdownSelected} class="hidden" />
+	<input bind:this={docInputEl} type="file" accept=".pdf,.md,.markdown,.txt,.epub,application/pdf,text/markdown,text/plain,application/epub+zip" onchange={onDocSelected} class="hidden" />
 
 	{#if toast}
 		<div class="fixed top-16 right-4 bg-slate-800 border border-sky-500 text-slate-100 px-4 py-2 rounded-lg shadow z-50">{toast}</div>
@@ -2034,12 +2133,11 @@
 					leftVisible = true;
 				}}
 				onCreatePlaylist={handleCreatePlaylist}
-				onUploadPdf={handleHeaderUpload}
-				onEnterUrl={() => (urlDialogOpen = true)}
-				onUploadMarkdown={() => {
+				onUploadFile={() => {
 					pendingPlaylistId = null;
-					mdInputEl?.click();
+					openDocPicker();
 				}}
+				onEnterUrl={() => (urlDialogOpen = true)}
 				onPasteText={() => (pasteDialogOpen = true)}
 			/>
 		{:else if isOcrRunning}
@@ -2079,7 +2177,7 @@
 					</select>
 				</label>
 				<div class="flex items-center gap-2">
-					<button onclick={triggerMarkdownUpload} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
+					<button onclick={openDocPicker} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
 					<button onclick={cancelPendingPdf} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
 					<button onclick={runOcr} class="text-xs px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">Extract text</button>
 				</div>
@@ -2116,6 +2214,7 @@
 						onDownloadMd={downloadMd}
 						onSaveAudio={saveAudioFile}
 						hasActiveDoc={!!activeDoc}
+						assetDocId={activeDoc?.id ?? null}
 						onSentenceClick={handleSentenceClick}
 					/>
 				{:else}
@@ -2174,8 +2273,7 @@
 							onClearItemPdf={handleClearItemPdf}
 							onReprocessItem={handleReprocessItem}
 							onOpenLibrary={() => (leftPane = 'library')}
-							onUploadPdf={handlePlaylistPdfUpload}
-							onUploadMarkdown={handlePlaylistMarkdownUpload}
+							onUploadDoc={handlePlaylistDocUpload}
 							onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
 							onFetchUrl={(url) => handleFetchUrl(activePlaylistId, url)}
 							onAddCurrentDoc={handleAddCurrentDoc}
@@ -2216,6 +2314,7 @@
 					onDownloadMd={downloadMd}
 					onSaveAudio={saveAudioFile}
 					hasActiveDoc={!!activeDoc}
+					assetDocId={activeDoc?.id ?? null}
 					onSentenceClick={handleSentenceClick}
 				/>
 			</div>
@@ -2225,12 +2324,9 @@
 				<p class="text-sm text-slate-400 max-w-md">Upload a PDF to extract text, upload Markdown directly, or open a document from the library.</p>
 				<div class="mt-2 flex flex-wrap items-center justify-center gap-2">
 					<button onclick={handleHeaderUpload} class="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded-md font-medium">
-						Upload PDF
+						Upload file
 					</button>
-				<button onclick={triggerMarkdownUpload} class="inline-flex items-center gap-2 border border-slate-600 hover:bg-slate-800 text-slate-200 px-5 py-2 rounded-md font-medium">
-					Upload Markdown
-				</button>
-			</div>
+				</div>
 			<button
 				onclick={() => {
 					view = 'overview';

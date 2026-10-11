@@ -12,6 +12,7 @@
 		SENTENCE_ATTR,
 		renderSectionBlocks
 	} from '$lib/markdown/render';
+	import { getDocAsset } from '$lib/stores/library';
 
 	interface Props {
 		markdownDraft: string;
@@ -27,6 +28,8 @@
 		onDownloadMd: () => void;
 		onSaveAudio: () => void;
 		hasActiveDoc: boolean;
+		/** Owning doc id for resolving relative ePub image refs (null skips). */
+		assetDocId?: string | null;
 		onSentenceClick?: (idx: number) => void;
 	}
 
@@ -44,6 +47,7 @@
 		onDownloadMd,
 		onSaveAudio,
 		hasActiveDoc,
+		assetDocId = null,
 		onSentenceClick
 	}: Props = $props();
 
@@ -123,6 +127,59 @@
 			destroy() {
 				node.removeEventListener('click', click);
 				node.removeEventListener('keydown', key);
+			}
+		};
+	}
+
+	// Blob-URL cache for ePub image assets (one entry per doc + path).
+	const assetUrlCache = new Map<string, string>();
+
+	async function assetUrl(docId: string, path: string): Promise<string | null> {
+		const key = `${docId}::${path}`;
+		const hit = assetUrlCache.get(key);
+		if (hit) return hit;
+		const rec = await getDocAsset(docId, path);
+		if (!rec) return null;
+		const url = URL.createObjectURL(rec.blob);
+		assetUrlCache.set(key, url);
+		return url;
+	}
+
+	/** Resolve relative `<img src>` refs (ePub assets) to cached blob URLs.
+	 *
+	 * Absolute http(s)/blob/data/srcs (article images) pass through. A
+	 * `MutationObserver` re-resolves after `{@html}` swaps (edit saves),
+	 * guarded by a per-element flag so sentence spans churn stays cheap. */
+	function resolveAssetImages(node: HTMLElement, docId: string | null) {
+		let current = docId;
+		let cancelled = false;
+		async function run(id: string) {
+			for (const img of node.querySelectorAll('img')) {
+				if (cancelled) return;
+				const el = img as HTMLImageElement;
+				if (el.dataset.assetResolved) continue;
+				const src = el.getAttribute('src') ?? '';
+				if (!src || /^(https?:|blob:|data:|#)/i.test(src) || src.startsWith('/')) continue;
+				el.dataset.assetResolved = 'pending';
+				const url = await assetUrl(id, src);
+				if (cancelled) return;
+				if (url) el.src = url;
+				else delete el.dataset.assetResolved;
+			}
+		}
+		const mo = new MutationObserver(() => {
+			if (current) void run(current);
+		});
+		mo.observe(node, { childList: true, subtree: true });
+		if (current) void run(current);
+		return {
+			update(next: string | null) {
+				current = next;
+				if (next) void run(next);
+			},
+			destroy() {
+				cancelled = true;
+				mo.disconnect();
 			}
 		};
 	}
@@ -336,6 +393,7 @@
 				role="document"
 				class="p-5 prose prose-invert prose-sm max-w-none prose-p:leading-relaxed"
 				use:richInteractions
+				use:resolveAssetImages={assetDocId}
 			>
 				{#if sections.length === 0}
 					<p class="text-slate-400">No content yet.</p>

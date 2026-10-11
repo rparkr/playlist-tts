@@ -10,6 +10,7 @@ export type ItemSourceKind =
 	| 'pdf-upload'
 	| 'markdown-upload'
 	| 'markdown-paste'
+	| 'epub-upload'
 	| 'article-url'
 	| 'pdf-url';
 
@@ -56,6 +57,8 @@ export function sourceLabel(source: ItemSource): string {
 			return 'Markdown';
 		case 'markdown-paste':
 			return 'Pasted text';
+		case 'epub-upload':
+			return 'ePub';
 		case 'article-url':
 			return source.domain || 'Article URL';
 		case 'pdf-url':
@@ -111,4 +114,9 @@ export function domainOf(rawUrl: string): string {
 /** True when the URL points at a PDF (routes to the PDF-URL import path). */
 export function isPdfUrl(rawUrl: string): boolean {
 	return rawUrl.toLowerCase().split('?')[0].split('#')[0].trim().endsWith('.pdf');
+}
+
+/** True when the URL points at an ePub book (routes to the ePub import path). */
+export function isEpubUrl(rawUrl: string): boolean {
+	return rawUrl.toLowerCase().split('?')[0].split('#')[0].trim().endsWith('.epub');
 }

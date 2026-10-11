@@ -52,8 +52,7 @@ interface Props {
 	onClearItemPdf: (id: string) => void;
 	onReprocessItem: (id: string, engine: ReprocessEngine) => void;
 	onOpenLibrary: () => void;
-	onUploadPdf: () => void;
-	onUploadMarkdown: () => void;
+	onUploadDoc: () => void;
 	onPasteText: (title: string, text: string) => void;
 	onFetchUrl: (url: string) => void;
 	onAddCurrentDoc: () => void;
@@ -75,8 +74,7 @@ let {
 	onClearItemPdf,
 	onReprocessItem,
 	onOpenLibrary,
-	onUploadPdf,
-	onUploadMarkdown,
+	onUploadDoc,
 	onPasteText,
 	onFetchUrl,
 	onAddCurrentDoc
@@ -177,7 +175,7 @@ function itemPercent(id: string): number {
 					<h2 class="text-base font-semibold text-slate-100 truncate">{playlist.name}</h2>
 					<div class="text-xs text-slate-400">{items.length} {items.length === 1 ? 'item' : 'items'}</div>
 				</div>
-				<button onclick={openMenu} aria-label="Add item to playlist" title="Add item (Upload PDF | Enter URL | Upload Markdown | Paste)"
+				<button onclick={openMenu} aria-label="Add item to playlist" title="Add item (Upload file | Enter URL | Paste text)"
 					class="w-8 h-8 flex items-center justify-center rounded-md bg-slate-700 hover:bg-slate-600 text-slate-100">
 					<Plus size={16} />
 				</button>
@@ -203,11 +201,8 @@ function itemPercent(id: string): number {
 			{#if menuOpen}
 				<div class="mt-2 flex flex-col gap-2 rounded-lg border border-slate-600 bg-slate-900/60 p-2">
 					<div class="grid grid-cols-2 gap-2">
-						<button onclick={onUploadPdf} class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
-							<Upload size={13} /> Upload PDF
-						</button>
-						<button onclick={onUploadMarkdown} class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
-							<FileText size={13} /> Upload Markdown
+						<button onclick={onUploadDoc} class="col-span-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
+							<Upload size={13} /> Upload file (PDF, Markdown, text, ePub)
 						</button>
 						<button onclick={() => { urlFormOpen = !urlFormOpen; pasteFormOpen = false; }} class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
 							<Link2 size={13} /> Enter URL
@@ -223,7 +218,7 @@ function itemPercent(id: string): number {
 					{/if}
 					{#if urlFormOpen}
 						<form onsubmit={(e) => { e.preventDefault(); submitUrl(); }} class="flex gap-2">
-							<input bind:value={urlValue} placeholder="https://example.com/article or paper.pdf" aria-label="Article or PDF URL"
+							<input bind:value={urlValue} placeholder="https://example.com/article, paper.pdf, or book.epub" aria-label="Article, PDF, or ePub URL"
 								class="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-sky-500" />
 							<button type="submit" class="text-xs px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">Add</button>
 						</form>

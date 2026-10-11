@@ -1,5 +1,5 @@
 <script lang="ts">
-import { ListMusic, Plus, Upload, Link2, FileText, ClipboardPaste, Search } from 'lucide-svelte';
+import { ListMusic, Plus, Upload, Link2, ClipboardPaste, Search } from 'lucide-svelte';
 import type { Playlist } from '$lib/playlists/model';
 
 export interface OverviewPlaylistStat {
@@ -32,9 +32,8 @@ interface Props {
 	onOpenDoc: (docId: string) => void;
 	onShowLibrary: () => void;
 	onCreatePlaylist: () => void;
-	onUploadPdf: () => void;
+	onUploadFile: () => void;
 	onEnterUrl: () => void;
-	onUploadMarkdown: () => void;
 	onPasteText: () => void;
 }
 
@@ -47,9 +46,8 @@ let {
 	onOpenDoc,
 	onShowLibrary,
 	onCreatePlaylist,
-	onUploadPdf,
+	onUploadFile,
 	onEnterUrl,
-	onUploadMarkdown,
 	onPasteText
 }: Props = $props();
 
@@ -155,16 +153,13 @@ function percent(s: OverviewPlaylistStat): number {
 		</section>
 		<section class="border border-slate-700 bg-slate-800 rounded-lg px-4 py-4 flex flex-col gap-3">
 			<h2 class="text-lg font-semibold text-slate-100">Listen now</h2>
-			<p class="text-xs text-slate-400">Upload a PDF, paste a URL, or upload Markdown to begin listening right away.</p>
+			<p class="text-xs text-slate-400">Upload a file (PDF, Markdown, text, ePub), paste a URL, or paste text to begin listening right away.</p>
 			<div class="flex flex-wrap gap-2 mt-auto">
-				<button onclick={onUploadPdf} class="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">
-					<Upload size={15} /> PDF
+				<button onclick={onUploadFile} class="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">
+					<Upload size={15} /> Upload file
 				</button>
 				<button onclick={onEnterUrl} class="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
 					<Link2 size={15} /> URL
-				</button>
-				<button onclick={onUploadMarkdown} class="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
-					<FileText size={15} /> Markdown
 				</button>
 				<button onclick={onPasteText} class="inline-flex items-center gap-1.5 text-sm px-3 py-2 rounded-md border border-slate-600 hover:bg-slate-700 text-slate-200">
 					<ClipboardPaste size={15} /> Paste

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	domainOf,
+	isEpubUrl,
 	isPdfUrl,
 	playlistTotals,
 	reorderIds,
@@ -46,6 +47,7 @@ describe('sourceLabel', () => {
 		expect(sourceLabel({ kind: 'pdf-upload' })).toBe('PDF upload');
 		expect(sourceLabel({ kind: 'markdown-upload' })).toBe('Markdown');
 		expect(sourceLabel({ kind: 'markdown-paste' })).toBe('Pasted text');
+		expect(sourceLabel({ kind: 'epub-upload' })).toBe('ePub');
 	});
 
 	it('badges URL items with their domain', () => {
@@ -65,11 +67,18 @@ describe('playlistTotals', () => {
 	});
 });
 
-describe('domainOf / isPdfUrl', () => {
+describe('domainOf / isPdfUrl / isEpubUrl', () => {
 	it('extracts hosts and detects PDF urls', () => {
 		expect(domainOf('https://Example.COM/article?q=1')).toBe('example.com');
 		expect(domainOf('not a url with spaces !!')).toBe('');
 		expect(isPdfUrl('https://example.com/paper.pdf')).toBe(true);
 		expect(isPdfUrl('https://example.com/article')).toBe(false);
+	});
+
+	it('detects ePub urls', () => {
+		expect(isEpubUrl('https://example.com/book.epub')).toBe(true);
+		expect(isEpubUrl('https://example.com/book.epub#chapter1')).toBe(true);
+		expect(isEpubUrl('https://example.com/paper.pdf')).toBe(false);
+		expect(isEpubUrl('https://example.com/article')).toBe(false);
 	});
 });

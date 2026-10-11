@@ -31,6 +31,7 @@ interface OCRTTSDB extends DBSchema {
 	docs: { key: string; value: Doc };
 	voices: { key: string; value: VoiceRecord };
 	pdfs: { key: string; value: PdfRecord };
+	assets: { key: string; value: DocAsset };
 	playlists: { key: string; value: Playlist };
 	items: { key: string; value: PlaylistItem; indexes: { 'by-playlist': string } };
 }
@@ -54,8 +55,21 @@ export interface PdfRecord {
 	createdAt: number;
 }
 
+/** Cached ePub image asset for a doc (key `${docId}::${path}`). */
+export interface DocAsset {
+	/** Composite key: owning `Doc.id` + image path as referenced in Markdown. */
+	key: string;
+	docId: string;
+	/** Image path relative to the ePub OPF directory (the Markdown `src`). */
+	path: string;
+	blob: Blob;
+	bytes: number;
+	mediaType: string;
+	createdAt: number;
+}
+
 const DB_NAME = 'ocr-tts';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 function getDB() {
 	return openDB<OCRTTSDB>(DB_NAME, DB_VERSION, {
@@ -69,6 +83,9 @@ function getDB() {
 			}
 			if (!db.objectStoreNames.contains('pdfs')) {
 				db.createObjectStore('pdfs', { keyPath: 'docId' });
+			}
+			if (!db.objectStoreNames.contains('assets')) {
+				db.createObjectStore('assets', { keyPath: 'key' });
 			}
 			// Phase 3 playlist library (IndexedDB-only MVP): docs/voices/pdfs
 			// stay as-is; playlists order items via `itemIds`, items link to
@@ -224,6 +241,7 @@ export async function deleteDoc(id: string): Promise<void> {
 	} catch {
 		// ignore — pdfs store may be missing on very old profiles until upgrade
 	}
+	await deleteDocAssets(id);
 }
 
 /** Re-export defaults for UI state initialisation. */
@@ -422,6 +440,62 @@ export async function getPdfSizes(): Promise<Record<string, number>> {
 
 // Playlists + items (Phase 3 library, IndexedDB-only). `playlist.itemIds`
 // is the order source of truth; item rows carry the payload.
+
+// Cached ePub image assets (many per doc), resolved at render time.
+
+/** Persist converted ePub images for a doc so relative refs render later. */
+export async function saveDocAssets(
+	docId: string,
+	assets: { path: string; blob: Blob; mediaType: string }[]
+): Promise<void> {
+	const db = await getDB();
+	for (const a of assets) {
+		const record: DocAsset = {
+			key: `${docId}::${a.path}`,
+			docId,
+			path: a.path,
+			blob: a.blob,
+			bytes: a.blob.size,
+			mediaType: a.mediaType,
+			createdAt: Date.now()
+		};
+		await db.put('assets', record);
+	}
+}
+
+/** Load one cached image asset by its Markdown `src` path. */
+export async function getDocAsset(docId: string, path: string): Promise<DocAsset | undefined> {
+	const db = await getDB();
+	try {
+		return await db.get('assets', `${docId}::${path}`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** True when the doc has any cached image assets (ePub badge heuristic). */
+export async function hasDocAssets(docId: string): Promise<boolean> {
+	const db = await getDB();
+	try {
+		const keys = await db.getAllKeys('assets');
+		return keys.some((k) => k === docId || k.startsWith(`${docId}::`));
+	} catch {
+		return false;
+	}
+}
+
+/** Remove all cached image assets for a doc to free storage. */
+export async function deleteDocAssets(docId: string): Promise<void> {
+	const db = await getDB();
+	try {
+		const keys = await db.getAllKeys('assets');
+		for (const k of keys) {
+			if (k === docId || k.startsWith(`${docId}::`)) await db.delete('assets', k);
+		}
+	} catch {
+		// ignore — store may not exist yet
+	}
+}
 
 function newId(prefix: string): string {
 	return `${prefix}_` + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
