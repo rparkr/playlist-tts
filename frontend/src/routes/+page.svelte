@@ -55,6 +55,14 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import {
+		KOKORO_DEFAULT_VOICE,
+		KOKORO_VOICES,
+		KokoroEngine,
+		encodeWavBlob,
+		isKokoroVoice,
+		type KokoroProgress
+	} from '$lib/tts/kokoro';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
@@ -1721,7 +1729,10 @@
 		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
 		// current selection over so nothing unexpectedly resets to a default.
-		const next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		let next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		if (ttsEngine === 'browser' && !isKokoroVoice(next)) {
+			next = KOKORO_DEFAULT_VOICE;
+		}
 		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, next);
 		selectedVoiceId = next;
 	}
@@ -1840,6 +1851,36 @@
 	// Player
 	let isBackendGenerating: boolean = $state(false);
 
+	// Browser Kokoro engine: module singleton plus download progress/error
+	// state for the settings modal's explicit download.
+	let kokoroEngine: KokoroEngine | null = null;
+	let kokoroReady = $state(false);
+	let kokoroBusy = $state(false);
+	let kokoroDl: KokoroProgress | null = $state(null);
+	let kokoroError: string | null = $state(null);
+
+	function getKokoroEngine(): KokoroEngine {
+		if (!kokoroEngine) kokoroEngine = new KokoroEngine();
+		return kokoroEngine;
+	}
+
+	async function downloadKokoroModel() {
+		kokoroError = null;
+		kokoroBusy = true;
+		try {
+			await getKokoroEngine().ensureReady((p) => {
+				kokoroDl = p;
+			});
+			kokoroReady = true;
+			showToast('Browser voice model ready');
+		} catch (e: unknown) {
+			kokoroError = (e as Error)?.message ?? String(e);
+			showToast(`Model download failed: ${kokoroError}`);
+		} finally {
+			kokoroBusy = false;
+		}
+	}
+
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
 			sentencePlayer = new BackendSentencePlayer();
@@ -1889,8 +1930,12 @@
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start sentence-player playback — server pocket or browser WASM. */
+	/** Start sentence-player playback — server pocket or browser Kokoro. */
 	function playSentencePlayer() {
+		if (ttsEngine === 'browser') {
+			void playKokoro();
+			return;
+		}
 		if (!activeDoc) return;
 		const texts = tts.texts;
 		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
@@ -1901,6 +1946,52 @@
 		getSentencePlayer().setFetchAudio(fetchTTSWavStream);
 		isBackendGenerating = true;
 		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
+	}
+
+	/** Start browser-Kokoro playback from `globalIdx` (model first). */
+	async function playKokoro() {
+		if (!activeDoc) return;
+		const texts = tts.texts;
+		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
+			isPlaying = false;
+			return;
+		}
+		const engine = getKokoroEngine();
+		if (engine.status !== 'ready') {
+			kokoroBusy = true;
+			try {
+				await engine.ensureReady((p) => {
+					kokoroDl = p;
+				});
+				kokoroReady = true;
+				kokoroError = null;
+			} catch (e: unknown) {
+				kokoroError = (e as Error)?.message ?? String(e);
+				isPlaying = false;
+				showToast('Browser voice model not ready — download it in TTS settings');
+				showTtsSettings = true;
+				return;
+			} finally {
+				kokoroBusy = false;
+			}
+		}
+		const voice = isKokoroVoice(selectedVoiceId) ? selectedVoiceId : KOKORO_DEFAULT_VOICE;
+		const player = getSentencePlayer();
+		player.setFetchAudio(async (text) => {
+			// Synthesize at 1x; the player element applies `synthRate` so
+			// ETA stats stay comparable with the server engine.
+			const audio = await engine.generate(text, { voice, speed: 1.0 });
+			return { url: URL.createObjectURL(encodeWavBlob(audio.samples, audio.sampleRate)) };
+		});
+		isBackendGenerating = true;
+		void player.play(
+			texts,
+			chunkForSentence(tts, globalIdx),
+			`kokoro::${voice}`,
+			null,
+			null,
+			synthRate
+		);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
@@ -2490,6 +2581,11 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
+		{kokoroReady}
+		kokoroDownloading={kokoroBusy}
+		kokoroProgress={kokoroDl}
+		{kokoroError}
+		onDownloadKokoro={downloadKokoroModel}
 	/>
 
 	<PostprocessingModal
