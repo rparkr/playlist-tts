@@ -19,8 +19,26 @@
 		getPdf,
 		deletePdf,
 		getPdfSizes,
+		saveDocAssets,
+		hasDocAssets,
+		createPlaylist,
+		getPlaylists,
+		getAllItems,
+		renamePlaylist,
+		deletePlaylist,
+		touchPlaylistListened,
+		getPlaylistItems,
+		addPlaylistItem,
+		renamePlaylistItem,
+		deletePlaylistItem,
+		deleteItemsByDocId,
+		movePlaylistItem,
+		updatePlaylistItemProgress,
 		type Doc,
 		type VoiceRecord,
+		type Playlist,
+		type PlaylistItem,
+		type ItemSource,
 		type PostprocessOptions
 	} from '$lib/stores/library';
 	import {
@@ -35,18 +53,34 @@
 		selectSections,
 		type Section
 	} from '$lib/markdown/parse';
-	import { createTTSFileJob, getTTSDownloadUrl } from '$lib/tts/backendStream';
+	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import {
+		KOKORO_DEFAULT_VOICE,
+		KOKORO_VOICES,
+		KokoroEngine,
+		encodeWavBlob,
+		isKokoroVoice,
+		type KokoroProgress
+	} from '$lib/tts/kokoro';
+	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
-	import LibraryModal from '$lib/components/LibraryModal.svelte';
+	import Overview, {
+		type OverviewPlaylistStat,
+		type OverviewSearchHit
+	} from '$lib/components/Overview.svelte';
+	import PlaylistPane, { type PlaylistItemStat } from '$lib/components/PlaylistPane.svelte';
+	import LibraryPane, { type LibraryPlaylistStat } from '$lib/components/LibraryPane.svelte';
 	import TtsSettingsModal from '$lib/components/TtsSettingsModal.svelte';
 	import PostprocessingModal from '$lib/components/PostprocessingModal.svelte';
 	import MarkdownPane from '$lib/components/MarkdownPane.svelte';
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
 	import { formatEta, formatRemaining, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
+	import { applyPostprocessing } from '$lib/markdown/postprocess';
+	import { domainOf, isEpubUrl, isPdfUrl, sourceLabel } from '$lib/playlists/model';
 	import {
 		LS_KEYS,
 		URL_PARAMS,
@@ -80,6 +114,32 @@
 	let pdfDoc: any = $state.raw(null);
 	let pdfPageNum: number = $state(1);
 	let pdfTotalPages: number = $state(0);
+	// Set by the PDF prev/next buttons: the next Markdown→PDF follow
+	// reaction belongs to that manual navigation, so it must not overwrite
+	// the explicitly chosen page (missing-marker snap-back, #75).
+	let pdfManualNav = false;
+	// Horizontal pane split (#56): left-pane width percent, persisted.
+	let paneSplit: number = $state(50);
+	let readerGridEl: HTMLElement | null = $state(null);
+	let paneResizing = false;
+
+	function paneResizeStart(e: PointerEvent) {
+		paneResizing = true;
+		(e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
+	}
+	function paneResizeMove(e: PointerEvent) {
+		if (!paneResizing || !readerGridEl) return;
+		const rect = readerGridEl.getBoundingClientRect();
+		if (rect.width <= 0) return;
+		paneSplit = Math.max(25, Math.min(75, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+	}
+	function paneResizeEnd() {
+		if (!paneResizing) return;
+		paneResizing = false;
+		try {
+			localStorage.setItem(LS_KEYS.paneSplit, String(paneSplit));
+		} catch {}
+	}
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
 	let ocrStartAt: number | null = $state(null);
@@ -91,11 +151,11 @@
 
 	let globalIdx: number = $state(0);
 	let isPlaying: boolean = $state(false);
-	let useBackendTTS: boolean = $state(false);
+	let ttsEngine: TtsEngine = $state('device');
 	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	// Per-engine voice memory: each TTS engine remembers its own selection.
-	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null });
+	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null, browser: null });
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
 
@@ -103,8 +163,11 @@
 	let optUppercase: boolean = $state(true);
 	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
-	let optFirstPageMarker: boolean = $state(false);
+	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
+	/** Extraction engine for the staging bar: auto routes text-vs-OCR, `llm`
+	 * posts to the vision-LLM endpoint instead of `/api/ocr/jobs`. */
+	let optEngine: 'auto' | 'text' | 'docling' | 'llm' = $state('auto');
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
 	let settingsHydrated: boolean = $state(false);
@@ -114,7 +177,7 @@
 	let pdfPendingOcr: boolean = $state(false);
 	let pendingPdfName: string = $state('');
 	let pageOverrides: Record<number, number> = $state({});
-	let mdInputEl: HTMLInputElement | null = $state(null);
+	/** Single consolidated file picker (PDF, Markdown, text, ePub — #83). */
 
 	function currentPostprocessOpts(): PostprocessOptions {
 		return {
@@ -124,6 +187,8 @@
 			insert_page_markers: optPageMarkers,
 			first_page_marker: optFirstPageMarker,
 			first_page_number: optFirstPageNumber,
+			// The LLM endpoint shares the schema; it ignores `engine`.
+			engine: optEngine === 'llm' ? 'auto' : optEngine,
 			page_overrides: Object.keys(pageOverrides).length > 0 ? { ...pageOverrides } : null
 		};
 	}
@@ -161,14 +226,37 @@
 	let markdownPaneRef: any = $state(null);
 
 	// UI state per plan
-	let showLibrary = $state(false);
 	let showTtsSettings = $state(false);
 	let showPostprocess = $state(false);
-	let pdfVisible = $state(true);
+	// Phase 3: overview view + tri-mode left pane (PDF | Playlist | Library).
+	// The logo lands on the overview; the header eye-toggle shows/hides the pane.
+	let view: 'overview' | 'reader' = $state('reader');
+	let leftPane: 'pdf' | 'playlist' | 'library' = $state('playlist');
+	let leftVisible = $state(true);
 	let isEditing = $state(false);
 	let editBackup: string = $state('');
 
-	let pdfInputEl: HTMLInputElement | null = $state(null);
+	// Playlist library (IndexedDB-only MVP).
+	let playlists: Playlist[] = $state([]);
+	let activePlaylistId: string | null = $state(null);
+	let activeItemId: string | null = $state(null);
+	let playlistItems: PlaylistItem[] = $state([]);
+	let itemStats: Record<string, PlaylistItemStat> = $state({});
+	let libraryStats: Record<string, LibraryPlaylistStat> = $state({});
+	let overviewStats: OverviewPlaylistStat[] = $state([]);
+	let overviewSearch: OverviewSearchHit[] = $state([]);
+	/** Docs not referenced by any playlist item (library unassigned section). */
+	let unassignedDocs: Doc[] = $state([]);
+	/** New docs (OCR / upload / fetch / paste) land in this playlist when set. */
+	let pendingPlaylistId: string | null = $state(null);
+	/** Listen-now URL / paste dialogs from the overview page. */
+	let urlDialogOpen = $state(false);
+	let pasteDialogOpen = $state(false);
+	let listenUrlValue: string = $state('');
+	let listenPasteTitle: string = $state('');
+	let listenPasteValue: string = $state('');
+
+	let docInputEl: HTMLInputElement | null = $state(null);
 
 	const API_BASE = (import.meta.env.PUBLIC_API_URL as string) ?? '';
 
@@ -195,7 +283,9 @@
 			const r = await fetch(`${API_BASE}/api/tts/voices`);
 			if (r.ok) {
 				const data = await r.json();
-				builtinVoices = data.voices ?? [{ name: 'alba' }];
+				builtinVoices = (data.voices ?? [{ name: 'alba' }]).map(
+					(v: { name: string }) => ({ name: v.name })
+				);
 			} else builtinVoices = [{ name: 'alba' }];
 		} catch {
 			builtinVoices = [{ name: 'alba' }];
@@ -223,13 +313,14 @@
 		const storedEngine = localStorage.getItem(LS_KEYS.engine);
 		synthRate = resolveWithUrlPrecedence(rateParam, storedRate, 1.0, parseRate);
 		const engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
-		useBackendTTS = engine === 'pocket';
+		ttsEngine = engine;
 		// Per-engine voice: stored map first, legacy single key migrates into
 		// the current engine's slot, URL `voice` wins for the current engine.
 		// The URL carries clone *names* (slugified); stored state keeps IDs.
 		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
 			device: null,
-			pocket: null
+			pocket: null,
+			browser: null
 		};
 		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
 		if (voiceParam) {
@@ -285,6 +376,13 @@
 			// Restore the cached PDF so the viewer renders after reload/deep-link.
 			await loadCachedPdf(activeDoc.id);
 		}
+		await refreshPlaylistData();
+		// Fresh profiles (no restored doc) land on the overview page.
+		if (!activeDoc) view = 'overview';
+		try {
+			const split = parseInt(localStorage.getItem(LS_KEYS.paneSplit) ?? '', 10);
+			if (Number.isFinite(split)) paneSplit = Math.max(25, Math.min(75, split));
+		} catch {}
 		settingsHydrated = true;
 	});
 
@@ -293,11 +391,15 @@
 		if (activeDoc) {
 			localStorage.setItem(LS_KEYS.activeDocId, activeDoc.id);
 			localStorage.setItem(progressKey(activeDoc.id), String(globalIdx));
+			if (activeItemId) {
+				// Mirror reader progress onto the playlist item card.
+				void updatePlaylistItemProgress(activeItemId, globalIdx, totalSentences);
+			}
 		}
 		localStorage.setItem(LS_KEYS.rate, String(synthRate));
 		localStorage.setItem(LS_KEYS.voice, selectedVoiceId);
 		localStorage.setItem(LS_KEYS.voiceByEngine, serializeVoiceByEngine(voiceByEngine));
-		localStorage.setItem(LS_KEYS.engine, useBackendTTS ? 'pocket' : 'device');
+		localStorage.setItem(LS_KEYS.engine, ttsEngine);
 		localStorage.setItem(
 			LS_KEYS.postprocess,
 			serializePostprocessFlags({
@@ -316,7 +418,7 @@
 			url.searchParams.set(URL_PARAMS.rate, String(synthRate));
 			// Cloned voices are deep-linked by slugified name, not raw ID.
 			url.searchParams.set(URL_PARAMS.voice, voiceUrlParam(selectedVoiceId, customVoices));
-			url.searchParams.set(URL_PARAMS.engine, useBackendTTS ? 'pocket' : 'device');
+			url.searchParams.set(URL_PARAMS.engine, ttsEngine);
 			history.replaceState(null, '', url.toString());
 		}
 	});
@@ -328,15 +430,27 @@
 		selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
 	);
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
+	// Speakable TTS view over the live sections (#63): re-derived on open and
+	// on every edit (saved or debounced), so the player always speaks the
+	// current text. Highlight/seek stay in global-sentence space via the
+	// chunk→sentence map — the renderer's `data-sentence-idx` never changes.
+	let tts = $derived(deriveTts(sections));
 	let currentSectionIdx: number = $derived(globalToSectionChunk(sections, globalIdx).sectionIdx);
 	let currentSection: Section | null = $derived(sections[currentSectionIdx] ?? null);
 	let breadcrumbs: string = $derived(currentSection ? currentSection.titles.join(' > ') : '');
 
 	// Keep the backend player's snapshot aligned with the live sections, so
 	// edits (saved or not) replace what TTS speaks from the next sentence on
-	// and deleted sentences can never sound after a pause/seek/resume.
+	// and deleted sentences can never sound after a pause/seek/resume. The
+	// snapshot holds derived speakable chunks; a paused player re-parks on
+	// the chunk for the current sentence, while a running chain picks the
+	// new text up from the next chunk.
 	$effect(() => {
-		sentencePlayer?.updateSentences(getGlobalSentences(sections));
+		const texts = tts.texts;
+		const player = sentencePlayer;
+		if (!player) return;
+		player.updateSentences(texts);
+		if (!player.isRunning) void player.seek(chunkForSentence(tts, globalIdx));
 	});
 
 	// Two-way Markdown→PDF sync (#1): as the current sentence crosses a
@@ -346,7 +460,11 @@
 	$effect(() => {
 		const idx = globalIdx;
 		const sens = sections;
-		if (!pdfVisible || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
+		const manual = pdfManualNav;
+		pdfManualNav = false;
+		// Manual PDF paging owns the viewer until playback/seek moves on.
+		if (manual) return;
+		if (!leftVisible || leftPane !== 'pdf' || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
 		const sentences = getGlobalSentences(sens);
 		if (sentences.length === 0) return;
 		const logical = findPageForSentence(sentences, idx);
@@ -366,7 +484,7 @@
 		const secs = estimateRemainingSeconds(
 			remainingChars,
 			selectedVoiceId,
-			useBackendTTS ? 'pocket' : 'device',
+			ttsEngine,
 			synthRate
 		);
 		return formatRemaining(secs);
@@ -431,42 +549,122 @@
 		}
 	}
 
-	async function onPdfSelected(e: Event) {
+	/** Consolidated upload (#83): sniff extension + magic bytes, then route
+	 * to PDF staging, ePub conversion, or Markdown import. */
+	async function onDocSelected(e: Event) {
 		const input = e.target as HTMLInputElement;
-		if (!input.files?.[0]) return;
-		const file = input.files[0];
+		const file = input.files?.[0];
+		// reset upfront so the same file can be re-selected
+		input.value = '';
+		if (!file) return;
+		const kind = await sniffDocKind(file);
+		if (kind === 'pdf') {
+			stagePdfFile(file);
+			return;
+		}
+		if (kind === 'epub') {
+			await handleEpubFile(file);
+			return;
+		}
+		await handleMarkdownFile(file);
+	}
+
+	/** Extension + content sniffing for the consolidated picker. */
+	async function sniffDocKind(file: File): Promise<'pdf' | 'epub' | 'text'> {
+		const name = (file.name || '').toLowerCase();
+		const type = (file.type || '').toLowerCase().split(';')[0].trim();
+		if (name.endsWith('.pdf') || type === 'application/pdf') return 'pdf';
+		if (name.endsWith('.epub') || type === 'application/epub+zip' || type === 'application/epub')
+			return 'epub';
+		if (name.endsWith('.md') || name.endsWith('.markdown') || name.endsWith('.txt')) return 'text';
+		// Extensionless/dubious names (mobile shares, `blob`): sniff magic.
+		try {
+			const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+			if (head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46)
+				return 'pdf'; // %PDF-
+			if (head[0] === 0x50 && head[1] === 0x4b) {
+				const ascii = String.fromCharCode(...head.slice(0, 64));
+				if (ascii.includes('mimetypeapplication/epub+zip')) return 'epub';
+			}
+		} catch {}
+		return 'text';
+	}
+
+	async function stagePdfFile(file: File) {
 		setPdfFromBlob(file, file.name);
 		pendingPdfName = file.name;
 		pageOverrides = {};
 		pdfPendingOcr = true;
-		pdfVisible = true;
+		leftVisible = true;
+		leftPane = 'pdf';
 		// Stage the PDF for preview + options — do NOT POST yet. The user
 		// presses "Extract text" (staging bar) to kick off OCR (#6).
 		await loadPdf();
 		showToast('PDF loaded — set page options, then press Extract text');
-		// reset input so same file can be re-selected
-		input.value = '';
 	}
 
 	function cancelPendingPdf() {
 		pdfPendingOcr = false;
 		pendingPdfName = '';
 		pageOverrides = {};
+		pendingPlaylistId = null;
 		clearPdfViewer();
 		if (activeDoc) void loadCachedPdf(activeDoc.id);
 	}
 
-	// Markdown upload + PDF+Markdown pair (#20). Markers (`Page N.` lines)
-	// drive viewer sync; the PDF page count validates the pairing.
-	function triggerMarkdownUpload() {
-		mdInputEl?.click();
+	// Consolidated picker opener: callers set `pendingPlaylistId` first so
+	// the new doc lands in the open playlist (or standalone when null).
+	function openDocPicker() {
+		docInputEl?.click();
 	}
 
-	async function onMarkdownSelected(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		input.value = '';
-		if (!file) return;
+	/** ePub import: convert server-side, persist Markdown + image assets. */
+	async function handleEpubFile(file: File | Blob, fallbackName: string = 'book.epub') {
+		const name = file instanceof File ? file.name || fallbackName : fallbackName;
+		if (pdfPendingOcr) {
+			showToast('Finish or cancel the staged PDF first');
+			return;
+		}
+		showToast('Converting ePub…');
+		try {
+			const form = new FormData();
+			form.append('file', file, name);
+			const resp = await fetch(`${API_BASE}/api/convert/epub`, { method: 'POST', body: form });
+			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
+			const data = await resp.json();
+			const title =
+				(data.title as string | null) ||
+				name.replace(/\.epub$/i, '').replace(/[_-]+/g, ' ').trim() ||
+				'ePub book';
+			const doc = await createDoc(title, data.markdown as string, undefined, currentPostprocessOpts());
+			const images = (data.images ?? []) as { path: string; media_type: string; data_b64: string }[];
+			if (images.length > 0) {
+				await saveDocAssets(
+					doc.id,
+					images.map((img) => ({
+						path: img.path,
+						mediaType: img.media_type || 'image/png',
+						blob: b64ToBlob(img.data_b64, img.media_type || 'image/png')
+					}))
+				);
+			}
+			await placeNewDoc(doc, { kind: 'epub-upload' });
+			showToast(pendingPlaylistId ? 'ePub added to playlist' : 'ePub opened');
+		} catch (e: unknown) {
+			showToast(`ePub import failed: ${(e as Error)?.message ?? e}`);
+		}
+	}
+
+	function b64ToBlob(b64: string, type: string): Blob {
+		const bin = atob(b64);
+		const bytes = new Uint8Array(bin.length);
+		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+		return new Blob([bytes.buffer as ArrayBuffer], { type });
+	}
+
+	// Markdown upload + PDF+Markdown pair (#20). Markers (`Page N.` lines)
+	// drive viewer sync; the PDF page count validates the pairing.
+	async function handleMarkdownFile(file: File) {
 		let text = '';
 		try {
 			text = await file.text();
@@ -500,22 +698,17 @@
 				} catch (err: any) {
 					showToast(`Imported, but PDF caching failed: ${err?.message ?? err}`);
 				}
-				docs = await getAllDocs();
 				try {
 					pdfSizes = await getPdfSizes();
 				} catch {}
-				activeDoc = doc;
-				markdownDraft = doc.markdown;
-				renderBaseline = doc.markdown;
-				globalIdx = 0;
-				isEditing = false;
+				await placeNewDoc(doc, { kind: 'pdf-upload' });
 				pdfPendingOcr = false;
 				pendingPdfName = '';
 				pageOverrides = {};
+				leftPane = 'pdf';
+				leftVisible = true;
 				syncPostprocessOptsFromDoc(doc, true);
 				showToast('PDF + Markdown imported');
-				await tick();
-				await loadCachedPdf(doc.id);
 			} catch (err: any) {
 				showToast(`Import failed: ${err?.message ?? err}`);
 			}
@@ -524,14 +717,9 @@
 		// Markdown-only import (no PDF): parse client-side, no backend needed.
 		try {
 			const doc = await createDoc(title, text, undefined, currentPostprocessOpts());
-			docs = await getAllDocs();
-			activeDoc = doc;
-			markdownDraft = doc.markdown;
-			renderBaseline = doc.markdown;
-			globalIdx = 0;
-			isEditing = false;
-			syncPostprocessOptsFromDoc(doc, true);
-			showToast('Markdown imported');
+			const target = pendingPlaylistId;
+			await placeNewDoc(doc, { kind: 'markdown-upload' });
+			showToast(target ? 'Markdown added to playlist' : 'Markdown imported');
 		} catch (err: any) {
 			showToast(`Import failed: ${err?.message ?? err}`);
 		}
@@ -555,7 +743,14 @@
 
 	// For manual trigger from PdfPane placeholder
 	function triggerPdfUpload() {
-		pdfInputEl?.click();
+		pendingPlaylistId = null;
+		openDocPicker();
+	}
+
+	/** Playlist "+" menu uploads: the new doc lands in the open playlist. */
+	function handlePlaylistDocUpload() {
+		pendingPlaylistId = activePlaylistId;
+		openDocPicker();
 	}
 
 	async function loadPdf() {
@@ -590,6 +785,9 @@
 	}
 	async function renderPdfPage() {
 		if (!pdfDoc) return;
+		// The PdfPane canvas unmounts while OCR progress is shown, when the
+		// left pane is hidden, or when it shows playlist/library instead.
+		if (!leftVisible || leftPane !== 'pdf') return;
 		// The PdfPane canvas unmounts while OCR progress is shown (and when
 		// the pane is hidden), so wait for it to be bound before drawing.
 		let tries = 0;
@@ -611,7 +809,7 @@
 	// true page lengths made that visible.
 	const viewer = markdownPaneRef?.getViewerEl?.();
 	const scrolledToMarker = (() => {
-		if (isEditing || !viewer || pdfPageNum <= 1) return false;
+		if (isEditing || !viewer || pdfPageNum < 1) return false;
 		const idx = findPageMarkerIndex(getGlobalSentences(sections), pdfPageNum);
 		if (idx === -1) return false;
 		const node = viewer.querySelector(`[data-sentence-idx="${idx}"]`) as HTMLElement | null;
@@ -639,6 +837,7 @@
 	function nextPdfPage() {
 		if (pdfPageNum < pdfTotalPages) {
 			pdfPageNum++;
+			pdfManualNav = true;
 			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
 		}
@@ -646,12 +845,18 @@
 	function prevPdfPage() {
 		if (pdfPageNum > 1) {
 			pdfPageNum--;
+			pdfManualNav = true;
 			syncMarkdownToPdfPage(pdfPageNum);
 			renderPdfPage();
 		}
 	}
 
-	/** PDF→Markdown sync (#1): move the reader to the new PDF page's marker. */
+	/** PDF→Markdown sync (#1): move the reader to the new PDF page's marker.
+	 *
+	 * Physical page 1 has no marker in legacy docs (markers started at
+	 * Page 2): seek doc start instead of resolving to the Page-2 marker,
+	 * which used to snap the viewer straight back to page 2.
+	 */
 	function syncMarkdownToPdfPage(physical: number) {
 		if (isEditing || pdfPendingOcr) return;
 		const sentences = getGlobalSentences(sections);
@@ -659,8 +864,11 @@
 		const logical = physicalToLogical(physical, activeDoc?.pageMap);
 		const markerIdx = findPageMarkerIndex(sentences, logical);
 		if (markerIdx !== -1 && markerIdx !== globalIdx) {
-			if (isPlaying || useBackendTTS) seekTo(markerIdx);
+			if (isPlaying || ttsEngine !== 'device') seekTo(markerIdx);
 			else globalIdx = markerIdx;
+		} else if (markerIdx === -1 && physical === 1 && globalIdx !== 0) {
+			if (isPlaying || ttsEngine !== 'device') seekTo(0);
+			else globalIdx = 0;
 		}
 	}
 
@@ -675,6 +883,84 @@
 		return text;
 	}
 
+	/** OCR endpoint base for an engine choice (`llm` has its own router). */
+	function ocrJobBase(engine: string): string {
+		return engine === 'llm' ? `${API_BASE}/api/ocr/llm/jobs` : `${API_BASE}/api/ocr/jobs`;
+	}
+
+	function beginOcrProgress() {
+		isOcrRunning = true;
+		ocrProgress = { done: 0, total: 0 };
+		ocrStartAt = Date.now();
+		ocrEtaSeconds = null;
+		ocrEtaAnchoredAt = null;
+		ocrNow = Date.now();
+	}
+
+	function clearOcrProgress() {
+		isOcrRunning = false;
+		ocrProgress = null;
+		ocrStartAt = null;
+		ocrEtaSeconds = null;
+		ocrEtaAnchoredAt = null;
+	}
+
+	/** Submit a PDF OCR job and wait for its result (SSE with polling fallback).
+	 *
+	 * Updates the shared progress state so the progress pane animates.
+	 * Returns the job `result` payload (`markdown`, `raw_markdown`, …).
+	 */
+	async function runOcrJobToResult(
+		file: Blob,
+		filename: string,
+		postprocessJson: string,
+		base: string
+	): Promise<any> {
+		const fd = new FormData();
+		// Pass filename explicitly so the backend always sees it,
+		// even if the File object was wrapped/proxied by state.
+		fd.append('file', file, filename);
+		fd.append('postprocess', postprocessJson);
+		const resp = await fetch(base, { method: 'POST', body: fd });
+		if (!resp.ok) throw new Error(await parseErrorResponse(resp));
+		const { job_id } = await resp.json();
+		const es = new EventSource(`${base}/${job_id}/events`);
+		await new Promise<any>((resolve, reject) => {
+			es.onmessage = (ev) => {
+				try {
+					const data = JSON.parse(ev.data);
+					if (data.type === 'progress' || data.type === 'keepalive') {
+						ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
+						anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
+					} else if (data.type === 'done') {
+						es.close();
+						resolve(data);
+					} else if (data.type === 'error') {
+						es.close();
+						reject(new Error(data.error));
+					}
+				} catch {}
+			};
+			es.onerror = () => {};
+		}).catch(async () => {
+			for (let i = 0; i < 120; i++) {
+				await new Promise((r) => setTimeout(r, 2000));
+				const r = await fetch(`${base}/${job_id}`);
+				if (!r.ok) continue;
+				const j = await r.json();
+				ocrProgress = { done: j.progress.done, total: j.progress.total };
+				anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
+				if (j.status === 'done') return j;
+				if (j.status === 'error') throw new Error(j.error);
+			}
+			throw new Error('OCR poll timeout');
+		});
+		const r = await fetch(`${base}/${job_id}`);
+		const job = await r.json();
+		if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
+		return job.result;
+	}
+
 	async function runOcr() {
 		if (!pdfFile) {
 			showToast('Select a PDF first');
@@ -685,57 +971,19 @@
 		if (fileToUpload.size > 100 * 1024 * 1024) {
 			showToast(`Large PDF (${(fileToUpload.size / 1024 / 1024).toFixed(1)} MB) — processing may take a while`);
 		}
-		isOcrRunning = true;
-		ocrProgress = { done: 0, total: 0 };
-		ocrStartAt = Date.now();
-		ocrEtaSeconds = null;
-		ocrEtaAnchoredAt = null;
-		ocrNow = Date.now();
+		if (isOcrRunning) {
+			showToast('Extraction already running');
+			return;
+		}
+		beginOcrProgress();
 		let ocrSucceeded = false;
 		try {
-			const fd = new FormData();
-			// Pass filename explicitly so the backend always sees it,
-			// even if the File object was wrapped/proxied by state.
-			fd.append('file', fileToUpload, fileToUpload.name || 'upload.pdf');
-			fd.append('postprocess', JSON.stringify(currentPostprocessOpts()));
-			const resp = await fetch(`${API_BASE}/api/ocr/jobs`, { method: 'POST', body: fd });
-			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
-			const { job_id } = await resp.json();
-			const es = new EventSource(`${API_BASE}/api/ocr/jobs/${job_id}/events`);
-			await new Promise<any>((resolve, reject) => {
-				es.onmessage = (ev) => {
-					try {
-						const data = JSON.parse(ev.data);
-						if (data.type === 'progress' || data.type === 'keepalive') {
-							ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
-							anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
-						} else if (data.type === 'done') {
-							es.close();
-							resolve(data);
-						} else if (data.type === 'error') {
-							es.close();
-							reject(new Error(data.error));
-						}
-					} catch {}
-				};
-				es.onerror = () => {};
-			}).catch(async () => {
-				for (let i = 0; i < 120; i++) {
-					await new Promise((r) => setTimeout(r, 2000));
-					const r = await fetch(`${API_BASE}/api/ocr/jobs/${job_id}`);
-					if (!r.ok) continue;
-					const j = await r.json();
-					ocrProgress = { done: j.progress.done, total: j.progress.total };
-					anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
-					if (j.status === 'done') return j;
-					if (j.status === 'error') throw new Error(j.error);
-				}
-				throw new Error('OCR poll timeout');
-			});
-			const r = await fetch(`${API_BASE}/api/ocr/jobs/${job_id}`);
-			const job = await r.json();
-			if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
-			const result = job.result;
+			const result = await runOcrJobToResult(
+				fileToUpload,
+				fileToUpload.name || 'upload.pdf',
+				JSON.stringify(currentPostprocessOpts()),
+				ocrJobBase(optEngine)
+			);
 			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
 			// Prefer raw backend output so re-render stays client-side/offline.
 			// Fall back to processed markdown for older backends.
@@ -761,16 +1009,23 @@
 			pdfPendingOcr = false;
 			pendingPdfName = '';
 			pageOverrides = {};
+			if (pendingPlaylistId) {
+				const item = await attachDocAsItem(pendingPlaylistId, doc, { kind: 'pdf-upload' });
+				pendingPlaylistId = null;
+				if (item) {
+					activePlaylistId = item.playlistId;
+					activeItemId = item.id;
+				}
+			} else {
+				activePlaylistId = null;
+				activeItemId = null;
+			}
 			showToast('OCR completed');
 			ocrSucceeded = true;
 		} catch (e: any) {
 			showToast(`OCR failed: ${e.message}`);
 		} finally {
-			isOcrRunning = false;
-			ocrProgress = null;
-			ocrStartAt = null;
-			ocrEtaSeconds = null;
-			ocrEtaAnchoredAt = null;
+			clearOcrProgress();
 		}
 		// Load the preview only after the progress pane is gone — while OCR
 		// runs the PdfPane (and its canvas) is unmounted, so rendering then
@@ -778,6 +1033,82 @@
 		if (ocrSucceeded && pdfUrl) {
 			await tick();
 			await loadPdf();
+		}
+	}
+
+	/** Re-extract a playlist item's cached PDF with a chosen engine.
+	 *
+	 * Runs the same job flow as initial OCR, then swaps the doc's text in
+	 * place (title, playlist items, and cached PDF are kept). Progress
+	 * reuses the OCR progress pane.
+	 */
+	async function handleReprocessItem(
+		itemId: string,
+		engine: 'auto' | 'text' | 'docling' | 'llm'
+	) {
+		const item = playlistItems.find((i) => i.id === itemId);
+		if (!item) return;
+		const doc = await getDoc(item.docId);
+		if (!doc) {
+			showToast('Document not found');
+			return;
+		}
+		const pdf = await getPdf(item.docId);
+		if (!pdf?.blob) {
+			showToast('No cached PDF for this item');
+			return;
+		}
+		if (
+			!confirm(`Re-extract "${item.title}" with ${engine}? This replaces the current text.`)
+		)
+			return;
+		if (isOcrRunning) {
+			showToast('Extraction already running');
+			return;
+		}
+		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+		sentencePlayer?.stop();
+		isPlaying = false;
+		beginOcrProgress();
+		try {
+			const opts = { ...currentPostprocessOpts(), engine: engine === 'llm' ? 'auto' : engine };
+			const result = await runOcrJobToResult(
+				pdf.blob,
+				pdf.name || 'document.pdf',
+				JSON.stringify(opts),
+				ocrJobBase(engine)
+			);
+			const rawMarkdown = result.raw_markdown ?? result.markdown;
+			const rawPageMap = result.raw_page_map ?? result.page_map;
+			const rendered = applyPostprocessing(rawMarkdown, opts, rawPageMap ?? null);
+			const updated: Doc = {
+				...doc,
+				markdown: rendered.markdown,
+				sections: rendered.sections,
+				pageMap: rendered.pageMap,
+				rawMarkdown,
+				rawPageMap,
+				postprocess: opts,
+				updatedAt: Date.now()
+			};
+			await saveDoc(updated);
+			docs = await getAllDocs();
+			const total = getGlobalSentences(rendered.sections).length;
+			await updatePlaylistItemProgress(itemId, 0, total);
+			if (activeDoc?.id === doc.id) {
+				activeDoc = updated;
+				markdownDraft = updated.markdown;
+				renderBaseline = updated.markdown;
+				globalIdx = 0;
+				isEditing = false;
+				await loadCachedPdf(doc.id);
+			}
+			await refreshPlaylistData();
+			showToast('Re-extraction complete');
+		} catch (e: any) {
+			showToast(`Re-extract failed: ${e?.message ?? e}`);
+		} finally {
+			clearOcrProgress();
 		}
 	}
 
@@ -790,6 +1121,9 @@
 		pdfPendingOcr = false;
 		pendingPdfName = '';
 		pageOverrides = {};
+		// Standalone doc (outside any playlist item).
+		activePlaylistId = null;
+		activeItemId = null;
 		clearPdfViewer();
 		activeDoc = d;
 		markdownDraft = d.markdown;
@@ -805,12 +1139,16 @@
 	async function deleteDocHandler(id: string) {
 		if (!confirm('Delete document?')) return;
 		await deleteDoc(id);
+		// Drop playlist items that pointed at the deleted doc.
+		await deleteItemsByDocId(id);
 		try {
 			pdfSizes = await getPdfSizes();
 		} catch {}
 		docs = await getAllDocs();
+		await refreshPlaylistData();
 		if (activeDoc?.id === id) {
 			activeDoc = null;
+			activeItemId = null;
 			markdownDraft = '';
 			renderBaseline = null;
 			clearPdfViewer();
@@ -833,6 +1171,482 @@
 		if (!d) return;
 		docs = await getAllDocs();
 		if (activeDoc?.id === id) activeDoc = d;
+	}
+
+	// ---- Playlist library (Phase 3, IndexedDB-only) ----
+
+	function formatLastListened(ts: number | null): string | null {
+		if (!ts) return null;
+		const mins = Math.floor((Date.now() - ts) / 60000);
+		if (mins < 1) return 'just now';
+		if (mins < 60) return `${mins}m ago`;
+		const hours = Math.floor(mins / 60);
+		if (hours < 24) return `${hours}h ago`;
+		const days = Math.floor(hours / 24);
+		if (days < 30) return `${days}d ago`;
+		return new Date(ts).toLocaleDateString();
+	}
+
+	async function refreshPlaylistData() {
+		playlists = await getPlaylists();
+		if (activePlaylistId && !playlists.some((p) => p.id === activePlaylistId)) {
+			activePlaylistId = null;
+			activeItemId = null;
+		}
+		playlistItems = activePlaylistId ? await getPlaylistItems(activePlaylistId) : [];
+		if (activeItemId && !playlistItems.some((i) => i.id === activeItemId)) activeItemId = null;
+		await refreshUnassigned();
+		await refreshItemStats();
+		await refreshLibraryStats();
+	}
+
+	/** Docs not referenced by any playlist item. */
+	async function refreshUnassigned() {
+		try {
+			const all = await getAllItems();
+			const referenced = new Set(all.map((i) => i.docId));
+			unassignedDocs = docs.filter((d) => !referenced.has(d.id));
+		} catch {
+			unassignedDocs = [];
+		}
+	}
+
+	/** Per-card progress + ETA stats for the open playlist's items. */
+	async function refreshItemStats() {
+		const engine = ttsEngine;
+		const next: Record<string, PlaylistItemStat> = {};
+		for (const item of playlistItems) {
+			const d = await getDoc(item.docId);
+			const sens = d ? getGlobalSentences(d.sections) : [];
+			const total = sens.length;
+			const done = Math.max(0, Math.min(item.progress, total));
+			const totalChars = sens.join(' ').length;
+			const remChars = sens.slice(done).join(' ').length;
+			if (total !== item.totalSentences) {
+				await updatePlaylistItemProgress(item.id, item.progress, total);
+				item.totalSentences = total;
+			}
+			next[item.id] = {
+				done,
+				total,
+				estTotal: formatRemaining(estimateRemainingSeconds(totalChars, selectedVoiceId, engine, 1)),
+				estRemaining: formatRemaining(
+					estimateRemainingSeconds(remChars, selectedVoiceId, engine, synthRate)
+				),
+				hasPdf: (pdfSizes[item.docId] ?? 0) > 0
+			};
+		}
+		itemStats = next;
+	}
+
+	async function refreshLibraryStats() {
+		const engine = ttsEngine;
+		const next: Record<string, LibraryPlaylistStat> = {};
+		for (const p of playlists) {
+			const items = await getPlaylistItems(p.id);
+			let done = 0;
+			let total = 0;
+			let remChars = 0;
+			for (const it of items) {
+				const d = await getDoc(it.docId);
+				const sens = d ? getGlobalSentences(d.sections) : [];
+				total += sens.length;
+				const at = Math.max(0, Math.min(it.progress, sens.length));
+				done += at;
+				remChars += sens.slice(at).join(' ').length;
+			}
+			next[p.id] = {
+				itemCount: items.length,
+				done,
+				total,
+				estRemaining: formatRemaining(
+					estimateRemainingSeconds(remChars, selectedVoiceId, engine, synthRate)
+				)
+			};
+		}
+		libraryStats = next;
+	}
+
+	async function refreshOverview() {
+		playlists = await getPlaylists();
+		await refreshUnassigned();
+		await refreshLibraryStats();
+		overviewStats = playlists.map((p) => {
+			const s = libraryStats[p.id];
+			return {
+				playlist: p,
+				itemCount: s?.itemCount ?? 0,
+				done: s?.done ?? 0,
+				total: s?.total ?? 0,
+				estRemaining: s?.estRemaining ?? formatRemaining(0),
+				lastListenedLabel: formatLastListened(p.lastListenedAt)
+			};
+		});
+		const idx: OverviewSearchHit[] = [];
+		for (const p of playlists) {
+			idx.push({
+				playlistId: p.id,
+				playlistName: p.name,
+				itemId: null,
+				title: p.name,
+				detail: 'Playlist'
+			});
+			for (const it of await getPlaylistItems(p.id)) {
+				idx.push({
+					playlistId: p.id,
+					playlistName: p.name,
+					itemId: it.id,
+					title: it.title,
+					detail: `${p.name} · ${sourceLabel(it.source)}`
+				});
+			}
+		}
+		for (const d of unassignedDocs) {
+			idx.push({
+				playlistId: '',
+				playlistName: '',
+				itemId: null,
+				docId: d.id,
+				title: d.title,
+				detail: 'Not in a playlist'
+			});
+		}
+		overviewSearch = idx;
+	}
+
+	/** Start (or resume) playback from the current sentence. */
+	function startPlayback() {
+		isPlaying = true;
+		if (ttsEngine !== 'device') {
+			if (sentencePlayer?.canResume()) void sentencePlayer.resume();
+			else playSentencePlayer();
+		} else playWebSpeechCorrect();
+	}
+
+	async function openPlaylistItem(
+		playlistId: string,
+		itemId: string,
+		opts?: { autoplay?: boolean }
+	) {
+		const items = await getPlaylistItems(playlistId);
+		const item = items.find((i) => i.id === itemId);
+		if (!item) {
+			showToast('Playlist item not found');
+			return;
+		}
+		const d = await getDoc(item.docId);
+		if (!d) {
+			showToast('The document for this item was deleted');
+			return;
+		}
+		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+		sentencePlayer?.stop();
+		isPlaying = false;
+		pdfPendingOcr = false;
+		pendingPdfName = '';
+		pageOverrides = {};
+		pendingPlaylistId = null;
+		clearPdfViewer();
+		activePlaylistId = playlistId;
+		activeItemId = itemId;
+		activeDoc = d;
+		markdownDraft = d.markdown;
+		renderBaseline = d.markdown;
+		syncPostprocessOptsFromDoc(d, true);
+		isEditing = false;
+		const total = getGlobalSentences(d.sections).length;
+		globalIdx = Math.max(0, Math.min(item.progress, Math.max(0, total - 1)));
+		await updatePlaylistItemProgress(itemId, globalIdx, total);
+		await touchPlaylistListened(playlistId);
+		view = 'reader';
+		leftVisible = true;
+		await refreshPlaylistData();
+		await tick();
+		await loadCachedPdf(d.id);
+		if (opts?.autoplay) startPlayback();
+	}
+
+	/** Autoplay: after the last sentence, continue with the next playlist item. */
+	async function advanceToNextItem(): Promise<boolean> {
+		if (!activePlaylistId || !activeItemId) return false;
+		const items = await getPlaylistItems(activePlaylistId);
+		const idx = items.findIndex((i) => i.id === activeItemId);
+		if (idx === -1 || idx >= items.length - 1) return false;
+		const next = items[idx + 1];
+		await openPlaylistItem(activePlaylistId, next.id, { autoplay: true });
+		showToast(`Up next: ${next.title}`);
+		return true;
+	}
+
+	async function attachDocAsItem(
+		playlistId: string,
+		doc: Doc,
+		source: ItemSource
+	): Promise<PlaylistItem | null> {
+		const total = getGlobalSentences(doc.sections).length;
+		const item = await addPlaylistItem(playlistId, {
+			title: doc.title,
+			source,
+			docId: doc.id,
+			totalSentences: total
+		});
+		if (!item) {
+			showToast('Playlist not found');
+			return null;
+		}
+		await touchPlaylistListened(playlistId);
+		await refreshPlaylistData();
+		return item;
+	}
+
+	/** Route a fresh doc into the pending playlist, or open it standalone. */
+	async function placeNewDoc(doc: Doc, source: ItemSource): Promise<void> {
+		docs = await getAllDocs();
+		if (pendingPlaylistId) {
+			const item = await attachDocAsItem(pendingPlaylistId, doc, source);
+			pendingPlaylistId = null;
+			if (item) await openPlaylistItem(item.playlistId, item.id);
+			else await openDoc(doc.id);
+		} else {
+			await openDoc(doc.id);
+		}
+		view = 'reader';
+	}
+
+	async function handleFetchUrl(targetPlaylistId: string | null, rawUrl: string) {
+		const url = rawUrl.trim();
+		if (!url) return;
+		if (isPdfUrl(url)) {
+			// PDF-URL path: download the blob, then stage for OCR text routing.
+			showToast('Downloading PDF…');
+			try {
+				const resp = await fetch(url);
+				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+				const blob = await resp.blob();
+				const name = url.split('/').pop()?.split('?')[0]?.split('#')[0] || 'article.pdf';
+				setPdfFromBlob(new Blob([blob], { type: 'application/pdf' }), name);
+				pendingPdfName = name;
+				pageOverrides = {};
+				pdfPendingOcr = true;
+				pendingPlaylistId = targetPlaylistId;
+				leftVisible = true;
+				leftPane = 'pdf';
+				view = 'reader';
+				await loadPdf();
+				showToast('PDF loaded — set page options, then press Extract text');
+			} catch (e: unknown) {
+				showToast(`PDF download failed: ${(e as Error)?.message ?? e}`);
+			}
+			return;
+		}
+		if (isEpubUrl(url)) {
+			// ePub-URL path: download the blob, then run the convert pipeline.
+			showToast('Downloading ePub…');
+			pendingPlaylistId = targetPlaylistId;
+			try {
+				const resp = await fetch(url);
+				if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+				const blob = await resp.blob();
+				const name = url.split('/').pop()?.split('?')[0]?.split('#')[0] || 'book.epub';
+				await handleEpubFile(new Blob([blob], { type: 'application/epub+zip' }), name);
+			} catch (e: unknown) {
+				pendingPlaylistId = null;
+				showToast(`ePub download failed: ${(e as Error)?.message ?? e}`);
+			}
+			return;
+		}
+		showToast('Fetching article…');
+		try {
+			const resp = await fetch(`${API_BASE}/api/fetch/article`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ url })
+			});
+			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
+			const data = await resp.json();
+			const title =
+				(data.title as string | null) ||
+				(data.domain ? `${data.domain} article` : 'Article');
+			pendingPlaylistId = targetPlaylistId;
+			const doc = await createDoc(
+				title,
+				data.markdown as string,
+				undefined,
+				currentPostprocessOpts()
+			);
+			await placeNewDoc(doc, {
+				kind: 'article-url',
+				domain: (data.domain as string) || domainOf(url),
+				url: (data.url as string) || url
+			});
+			showToast(targetPlaylistId ? 'Article added to playlist' : 'Article opened');
+		} catch (e: unknown) {
+			pendingPlaylistId = null;
+			showToast(`Fetch failed: ${(e as Error)?.message ?? e}`);
+		}
+	}
+
+	async function handlePasteText(targetPlaylistId: string | null, text: string, title?: string) {
+		const clean = text.trim();
+		if (!clean) return;
+		const firstLine =
+			clean
+				.split('\n')
+				.map((l) => l.trim())
+				.find((l) => l.length > 0) ?? 'Pasted text';
+		const docTitle = title?.trim() || firstLine.replace(/^#+\s*/, '').slice(0, 80) || 'Pasted text';
+		pendingPlaylistId = targetPlaylistId;
+		try {
+			const doc = await createDoc(docTitle, clean, undefined, currentPostprocessOpts());
+			await placeNewDoc(doc, { kind: 'markdown-paste' });
+			showToast(targetPlaylistId ? 'Pasted text added to playlist' : 'Pasted text opened');
+		} catch (e: unknown) {
+			pendingPlaylistId = null;
+			showToast(`Paste failed: ${(e as Error)?.message ?? e}`);
+		}
+	}
+
+	async function handleCreatePlaylist() {
+		const name = prompt('Name this playlist:');
+		if (name === null) return;
+		const playlist = await createPlaylist(name.trim() || 'Untitled playlist');
+		await refreshPlaylistData();
+		if (view === 'overview') await refreshOverview();
+		// Drop the user into the new playlist.
+		activePlaylistId = playlist.id;
+		leftPane = 'playlist';
+		leftVisible = true;
+		view = 'reader';
+	}
+
+	async function handleOpenPlaylist(id: string) {
+		activePlaylistId = id;
+		leftPane = 'playlist';
+		leftVisible = true;
+		view = 'reader';
+		await refreshPlaylistData();
+	}
+
+	async function handleResumePlaylist(id: string) {
+		const items = await getPlaylistItems(id);
+		if (items.length === 0) {
+			await handleOpenPlaylist(id);
+			return;
+		}
+		const next =
+			items.find((i) => i.progress < Math.max(1, i.totalSentences)) ?? items[0];
+		await openPlaylistItem(id, next.id);
+	}
+
+	async function handleRenamePlaylistItem(id: string, title: string) {
+		await renamePlaylistItem(id, title);
+		await refreshPlaylistData();
+	}
+
+	async function handleDeletePlaylistItem(id: string) {
+		const item = playlistItems.find((i) => i.id === id);
+		if (item && !confirm(`Remove "${item.title}" from the playlist? (The document is kept.)`))
+			return;
+		await deletePlaylistItem(id);
+		if (activeItemId === id) activeItemId = null;
+		await refreshPlaylistData();
+	}
+
+	async function handleBulkDeletePlaylistItems(ids: string[]) {
+		if (ids.length === 0) return;
+		if (
+			!confirm(
+				`Remove ${ids.length} ${ids.length === 1 ? 'item' : 'items'} from the playlist? (Documents are kept.)`
+			)
+		)
+			return;
+		for (const id of ids) {
+			await deletePlaylistItem(id);
+			if (activeItemId === id) activeItemId = null;
+		}
+		await refreshPlaylistData();
+		showToast(`Removed ${ids.length} ${ids.length === 1 ? 'item' : 'items'}`);
+	}
+
+	async function handleMovePlaylistItem(id: string, dir: -1 | 1) {
+		if (!activePlaylistId) return;
+		const idx = playlistItems.findIndex((i) => i.id === id);
+		if (idx === -1) return;
+		await movePlaylistItem(activePlaylistId, id, idx + dir);
+		playlistItems = await getPlaylistItems(activePlaylistId);
+	}
+
+	async function handleDropPlaylistItem(dragId: string, targetId: string) {
+		if (!activePlaylistId || dragId === targetId) return;
+		const targetIdx = playlistItems.findIndex((i) => i.id === targetId);
+		if (targetIdx === -1) return;
+		await movePlaylistItem(activePlaylistId, dragId, targetIdx);
+		playlistItems = await getPlaylistItems(activePlaylistId);
+	}
+
+	async function handleShowItemPdf(id: string) {
+		const item = playlistItems.find((i) => i.id === id);
+		if (!item) return;
+		const ok = await loadCachedPdf(item.docId);
+		leftPane = 'pdf';
+		leftVisible = true;
+		if (ok) {
+			await tick();
+			await renderPdfPage();
+		} else {
+			showToast('No cached PDF for this item');
+		}
+	}
+
+	async function handleClearItemPdf(id: string) {
+		const item = playlistItems.find((i) => i.id === id);
+		if (!item) return;
+		if (!confirm('Remove the cached PDF to save storage? The text stays.')) return;
+		await deletePdf(item.docId);
+		try {
+			pdfSizes = await getPdfSizes();
+		} catch {}
+		if (activeDoc?.id === item.docId) clearPdfViewer();
+		await refreshItemStats();
+		showToast('Cached PDF cleared');
+	}
+
+	async function handleAddCurrentDoc() {
+		const doc = activeDoc;
+		if (!doc || !activePlaylistId) return;
+		if (playlistItems.some((i) => i.docId === doc.id)) {
+			showToast('Already in this playlist');
+			return;
+		}
+		const source: ItemSource =
+			pdfSizes[doc.id] !== undefined
+				? { kind: 'pdf-upload' }
+				: (await hasDocAssets(doc.id))
+					? { kind: 'epub-upload' }
+					: { kind: 'markdown-upload' };
+		const item = await attachDocAsItem(activePlaylistId, doc, source);
+		if (item) {
+			activeItemId = item.id;
+			showToast('Added to playlist');
+		}
+	}
+
+	async function handleRenamePlaylist(id: string, name: string) {
+		await renamePlaylist(id, name);
+		await refreshPlaylistData();
+		if (view === 'overview') await refreshOverview();
+	}
+
+	async function handleDeletePlaylist(id: string) {
+		const p = playlists.find((x) => x.id === id);
+		if (p && !confirm(`Delete playlist "${p.name}"? (Documents are kept.)`)) return;
+		await deletePlaylist(id);
+		if (activePlaylistId === id) {
+			activePlaylistId = null;
+			activeItemId = null;
+		}
+		await refreshPlaylistData();
+		if (view === 'overview') await refreshOverview();
 	}
 
 	let saveDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -858,9 +1672,12 @@
 		if (!activeDoc) return;
 		if (!isEditing) {
 			editBackup = markdownDraft;
+			// Capture scroll pre-swap so edit mode lands at the same view.
+			markdownPaneRef?.prepareEditSwap?.(true);
 			isEditing = true;
 		} else {
 			// shouldn't happen because save/cancel handle
+			markdownPaneRef?.prepareEditSwap?.(false);
 			isEditing = false;
 		}
 	}
@@ -870,6 +1687,7 @@
 			clearTimeout(saveDebounce);
 			saveDebounce = null;
 		}
+		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 		activeDoc.markdown = markdownDraft;
 		activeDoc.sections = parseMarkdownStructure(markdownDraft);
@@ -883,10 +1701,11 @@
 			saveDebounce = null;
 		}
 		markdownDraft = editBackup;
+		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {
-		if (isPlaying || useBackendTTS) seekTo(idx);
+		if (isPlaying || ttsEngine !== 'device') seekTo(idx);
 		else globalIdx = idx;
 	}
 
@@ -894,23 +1713,27 @@
 		selectedVoiceId = id;
 		// Remember the choice under the current engine so toggling engines
 		// restores each engine's last voice.
-		const engine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
-		voiceByEngine = withVoiceForEngine(voiceByEngine, engine, id);
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, id);
 		// Cache keys are voice-scoped, so just restart the chain: the new
 		// voice synthesizes from the current sentence, nothing earlier.
-		if (isPlaying && useBackendTTS) playBackend();
+		if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
 	}
 
-	function handleEngineChange(useBackend: boolean) {
+	function handleEngineChange(engine: TtsEngine) {
 		// Park the current selection under the old engine before switching.
-		const fromEngine: TtsEngine = useBackendTTS ? 'pocket' : 'device';
-		const toEngine: TtsEngine = useBackend ? 'pocket' : 'device';
-		voiceByEngine = withVoiceForEngine(voiceByEngine, fromEngine, selectedVoiceId);
-		useBackendTTS = useBackend;
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		// Stop any running chain — audio must never bleed across engines.
+		cancelSpeech();
+		sentencePlayer?.stop();
+		isPlaying = false;
+		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
 		// current selection over so nothing unexpectedly resets to a default.
-		const next = voiceForEngine(voiceByEngine, toEngine, selectedVoiceId);
-		voiceByEngine = withVoiceForEngine(voiceByEngine, toEngine, next);
+		let next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
+		if (ttsEngine === 'browser' && !isKokoroVoice(next)) {
+			next = KOKORO_DEFAULT_VOICE;
+		}
+		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, next);
 		selectedVoiceId = next;
 	}
 
@@ -973,11 +1796,12 @@
 		const fallback = builtinVoices[0]?.name ?? 'alba';
 		voiceByEngine = {
 			device: voiceByEngine.device === id ? fallback : voiceByEngine.device,
-			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket
+			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket,
+			browser: voiceByEngine.browser === id ? fallback : voiceByEngine.browser
 		};
 		if (selectedVoiceId === id) {
 			selectedVoiceId = fallback;
-			if (isPlaying && useBackendTTS) playBackend();
+			if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
 		}
 	}
 
@@ -997,7 +1821,7 @@
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
-			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
+			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 			(input as HTMLInputElement).value = '';
 			return;
@@ -1015,7 +1839,7 @@
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
-			voiceByEngine = withVoiceForEngine(voiceByEngine, useBackendTTS ? 'pocket' : 'device', record.id);
+			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
 			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 		} catch (err: any) {
 			showToast(`Voice clone failed: ${err.message}`);
@@ -1027,28 +1851,69 @@
 	// Player
 	let isBackendGenerating: boolean = $state(false);
 
+	// Browser Kokoro engine: module singleton plus download progress/error
+	// state for the settings modal's explicit download.
+	let kokoroEngine: KokoroEngine | null = null;
+	let kokoroReady = $state(false);
+	let kokoroBusy = $state(false);
+	let kokoroDl: KokoroProgress | null = $state(null);
+	let kokoroError: string | null = $state(null);
+
+	function getKokoroEngine(): KokoroEngine {
+		if (!kokoroEngine) kokoroEngine = new KokoroEngine();
+		return kokoroEngine;
+	}
+
+	async function downloadKokoroModel() {
+		kokoroError = null;
+		kokoroBusy = true;
+		try {
+			await getKokoroEngine().ensureReady((p) => {
+				kokoroDl = p;
+			});
+			kokoroReady = true;
+			showToast('Browser voice model ready');
+		} catch (e: unknown) {
+			kokoroError = (e as Error)?.message ?? String(e);
+			showToast(`Model download failed: ${kokoroError}`);
+		} finally {
+			kokoroBusy = false;
+		}
+	}
+
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
 			sentencePlayer = new BackendSentencePlayer();
 			sentencePlayer.setCallbacks({
 				onSentenceStart: (idx) => {
-					globalIdx = idx;
+					// Backend index is derived-chunk space; map back so the
+					// highlight and PDF sync stay on global sentences.
+					// Code-comment chunks map to nothing — keep position.
+					const g = tts.chunks[idx]?.sentenceIndices[0];
+					if (g !== undefined) globalIdx = g;
 				},
 				onSentenceComplete: (_idx, chars, secondsAt1x) => {
 					// Refine ETA stats for the voice+engine that sounded it.
 					recordEtaSample(
 						selectedVoiceId,
-						useBackendTTS ? 'pocket' : 'device',
+						ttsEngine,
 						chars,
 						secondsAt1x
 					);
 				},
 				onEnded: () => {
-					isPlaying = false;
-					globalIdx = Math.max(0, getGlobalSentences(sections).length - 1);
+					// Autoplay: continue with the next playlist item when there
+					// is one; otherwise park at the last sentence and stop.
+					void (async () => {
+						const advanced = await advanceToNextItem();
+						if (!advanced) {
+							isPlaying = false;
+							globalIdx = Math.max(0, getGlobalSentences(sections).length - 1);
+						}
+					})();
 				},
 				onError: (msg) => {
-					showToast(`Backend TTS failed: ${msg}`);
+					showToast(`${ttsEngine === 'browser' ? 'Browser TTS' : 'Backend TTS'} failed: ${msg}`);
 					isPlaying = false;
 				},
 				onLoadingChange: (loading) => {
@@ -1065,23 +1930,74 @@
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start backend playback from `globalIdx` — one sentence per request. */
-	function playBackend() {
+	/** Start sentence-player playback — server pocket or browser Kokoro. */
+	function playSentencePlayer() {
+		if (ttsEngine === 'browser') {
+			void playKokoro();
+			return;
+		}
 		if (!activeDoc) return;
-		const all = getGlobalSentences(sections);
-		if (all.slice(globalIdx).every((s) => !s.trim())) {
+		const texts = tts.texts;
+		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
 			isPlaying = false;
 			return;
 		}
 		const { voiceKey, voiceId, blob } = resolveBackendVoice();
+		getSentencePlayer().setFetchAudio(fetchTTSWavStream);
 		isBackendGenerating = true;
-		void getSentencePlayer().play(all, globalIdx, voiceKey, voiceId, blob, synthRate);
+		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
+	}
+
+	/** Start browser-Kokoro playback from `globalIdx` (model first). */
+	async function playKokoro() {
+		if (!activeDoc) return;
+		const texts = tts.texts;
+		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
+			isPlaying = false;
+			return;
+		}
+		const engine = getKokoroEngine();
+		if (engine.status !== 'ready') {
+			kokoroBusy = true;
+			try {
+				await engine.ensureReady((p) => {
+					kokoroDl = p;
+				});
+				kokoroReady = true;
+				kokoroError = null;
+			} catch (e: unknown) {
+				kokoroError = (e as Error)?.message ?? String(e);
+				isPlaying = false;
+				showToast('Browser voice model not ready — download it in TTS settings');
+				showTtsSettings = true;
+				return;
+			} finally {
+				kokoroBusy = false;
+			}
+		}
+		const voice = isKokoroVoice(selectedVoiceId) ? selectedVoiceId : KOKORO_DEFAULT_VOICE;
+		const player = getSentencePlayer();
+		player.setFetchAudio(async (text) => {
+			// Synthesize at 1x; the player element applies `synthRate` so
+			// ETA stats stay comparable with the server engine.
+			const audio = await engine.generate(text, { voice, speed: 1.0 });
+			return { url: URL.createObjectURL(encodeWavBlob(audio.samples, audio.sampleRate)) };
+		});
+		isBackendGenerating = true;
+		void player.play(
+			texts,
+			chunkForSentence(tts, globalIdx),
+			`kokoro::${voice}`,
+			null,
+			null,
+			synthRate
+		);
 	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
 		const all = getGlobalSentences(sections);
 		if (globalIdx >= all.length) { isPlaying = false; return; }
-		const text = all[globalIdx];
+		const text = speakable(all[globalIdx]);
 		let voice: SpeechSynthesisVoice | null = null;
 		if (!customVoices.some((v) => v.id === selectedVoiceId)) {
 			voice = synthVoices.find((v) => String(synthVoices.indexOf(v)) === selectedVoiceId) ?? synthVoices.find((v) => v.name === selectedVoiceId) ?? null;
@@ -1098,6 +2014,7 @@
 				playWebSpeechCorrect();
 			} else {
 				isPlaying = false;
+				void advanceToNextItem();
 			}
 		};
 		u.onerror = () => {};
@@ -1110,11 +2027,7 @@
 			// Pause keeps cached sentence audio + position for instant resume.
 			sentencePlayer?.pause();
 		} else {
-			isPlaying = true;
-			if (useBackendTTS) {
-				if (sentencePlayer?.canResume()) void sentencePlayer.resume();
-				else playBackend();
-			} else playWebSpeechCorrect();
+			startPlayback();
 		}
 	}
 	/** Move to `idx`, keeping backend playback going from there when playing. */
@@ -1122,10 +2035,11 @@
 		const total = getGlobalSentences(sections).length;
 		const next = Math.max(0, Math.min(idx, total - 1));
 		globalIdx = next;
-		if (useBackendTTS) {
+		if (ttsEngine !== 'device') {
 			// When paused this just parks the resume position; when playing it
-			// aborts in-flight requests and starts at the new sentence.
-			void sentencePlayer?.seek(next);
+			// aborts in-flight requests and starts at the new sentence. The
+			// player works in derived-chunk space, so map the global index.
+			void sentencePlayer?.seek(chunkForSentence(tts, next));
 		} else if (isPlaying) {
 			cancelSpeech();
 			playWebSpeechCorrect();
@@ -1138,7 +2052,7 @@
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx < sections.length - 1) {
 			const target = sectionChunkToGlobal(sections, sectionIdx + 1, 0);
-			if (isPlaying || useBackendTTS) seekTo(target);
+			if (isPlaying || ttsEngine !== 'device') seekTo(target);
 			else globalIdx = target;
 		}
 	}
@@ -1146,7 +2060,7 @@
 		const { sectionIdx } = globalToSectionChunk(sections, globalIdx);
 		if (sectionIdx > 0) {
 			const target = sectionChunkToGlobal(sections, sectionIdx - 1, 0);
-			if (isPlaying || useBackendTTS) seekTo(target);
+			if (isPlaying || ttsEngine !== 'device') seekTo(target);
 			else globalIdx = target;
 		}
 	}
@@ -1157,18 +2071,55 @@
 
 	// Header actions
 	async function handleLogoClick() {
-		pdfVisible = !pdfVisible;
-		if (pdfVisible && pdfDoc) {
+		// The logo lands on the overview page (resume / library / listen now).
+		view = 'overview';
+		await refreshOverview();
+	}
+	function handleToggleLeftPane() {
+		leftVisible = !leftVisible;
+		if (leftVisible && leftPane === 'pdf' && pdfDoc) {
 			// The canvas remounts when the pane becomes visible again.
-			await tick();
-			await renderPdfPage();
+			void (async () => {
+				await tick();
+				await renderPdfPage();
+			})();
 		}
 	}
 	function handleHeaderUpload() {
-		pdfInputEl?.click();
+		// Header uploads are listen-now: the doc opens standalone.
+		pendingPlaylistId = null;
+		openDocPicker();
 	}
-	function handleMenuClick() {
-		showLibrary = true;
+	function handleLibraryButton() {
+		if (activeDoc) {
+			view = 'reader';
+			leftPane = 'library';
+			leftVisible = true;
+		} else {
+			view = 'overview';
+			void refreshOverview();
+		}
+	}
+
+	async function handleAddUnassignedToPlaylist(docId: string, playlistId: string) {
+		const d = docs.find((x) => x.id === docId) ?? (await getDoc(docId));
+		if (!d) {
+			showToast('Document not found');
+			return;
+		}
+		const source: ItemSource =
+			pdfSizes[docId] !== undefined
+				? { kind: 'pdf-upload' }
+				: (await hasDocAssets(docId))
+					? { kind: 'epub-upload' }
+					: { kind: 'markdown-upload' };
+		const item = await attachDocAsItem(playlistId, d, source);
+		if (item) showToast('Added to playlist');
+	}
+
+	async function handleOpenUnassignedDoc(docId: string) {
+		await openDoc(docId);
+		view = 'reader';
 	}
 
 	// Postprocessing apply — offline client-side re-render, preserving user edits.
@@ -1228,7 +2179,7 @@
 	}
 	async function saveAudioFile() {
 		if (!activeDoc) return;
-		const text = getGlobalSentences(sections).join(' ');
+		const text = tts.texts.join(' ');
 		const custom = customVoices.find((v) => v.id === selectedVoiceId);
 		const blob = custom?.blob ?? null;
 		const voiceUrl = custom ? null : selectedVoiceId;
@@ -1256,17 +2207,37 @@
 </svelte:head>
 
 <div class="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} onLogoClick={handleLogoClick} onUploadClick={handleHeaderUpload} onMenuClick={handleMenuClick} />
+	<Header activeTitle={activeDoc?.title ?? null} {breadcrumbs} leftPaneVisible={leftVisible} onLogoClick={handleLogoClick} onLibraryClick={handleLibraryButton} onToggleLeftPane={handleToggleLeftPane} />
 
-	<input bind:this={pdfInputEl} type="file" accept="application/pdf" onchange={onPdfSelected} class="hidden" />
-	<input bind:this={mdInputEl} type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onchange={onMarkdownSelected} class="hidden" />
+	<input bind:this={docInputEl} type="file" accept=".pdf,.md,.markdown,.txt,.epub,application/pdf,text/markdown,text/plain,application/epub+zip" onchange={onDocSelected} class="hidden" />
 
 	{#if toast}
 		<div class="fixed top-16 right-4 bg-slate-800 border border-sky-500 text-slate-100 px-4 py-2 rounded-lg shadow z-50">{toast}</div>
 	{/if}
 
 	<main class="flex-1 min-h-0 flex flex-col mx-auto w-full max-w-6xl px-4 py-4 gap-4">
-		{#if isOcrRunning}
+		{#if view === 'overview'}
+			<Overview
+				stats={overviewStats}
+				searchIndex={overviewSearch}
+				onResume={handleResumePlaylist}
+				onOpenPlaylist={handleOpenPlaylist}
+				onOpenItem={(pid, iid) => openPlaylistItem(pid, iid)}
+				onOpenDoc={handleOpenUnassignedDoc}
+				onShowLibrary={() => {
+					view = 'reader';
+					leftPane = 'library';
+					leftVisible = true;
+				}}
+				onCreatePlaylist={handleCreatePlaylist}
+				onUploadFile={() => {
+					pendingPlaylistId = null;
+					openDocPicker();
+				}}
+				onEnterUrl={() => (urlDialogOpen = true)}
+				onPasteText={() => (pasteDialogOpen = true)}
+			/>
+		{:else if isOcrRunning}
 			<OcrProgressPane {ocrProgress} {ocrEta} />
 		{:else if pdfPendingOcr && pdfUrl}
 			<div class="bg-slate-800 border border-sky-500/40 rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center gap-3">
@@ -1288,14 +2259,28 @@
 						class="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
 					/>
 				</label>
+				<label class="flex items-center gap-2 text-xs text-slate-300">
+					Engine
+					<select
+						bind:value={optEngine}
+						aria-label="Extraction engine"
+						title="auto tries text extraction first, then OCR"
+						class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
+					>
+						<option value="auto">auto</option>
+						<option value="text">text extraction</option>
+						<option value="docling">OCR: docling</option>
+						<option value="llm">OCR: LLM</option>
+					</select>
+				</label>
 				<div class="flex items-center gap-2">
-					<button onclick={triggerMarkdownUpload} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
+					<button onclick={openDocPicker} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
 					<button onclick={cancelPendingPdf} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
 					<button onclick={runOcr} class="text-xs px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">Extract text</button>
 				</div>
 			</div>
-			<div class="{pdfVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-19rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full flex flex-col'}">
-				{#if pdfVisible}
+			<div class="{leftVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-19rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full flex flex-col'}">
+				{#if leftVisible}
 					<PdfPane
 						{pdfUrl}
 						bind:canvasEl
@@ -1326,6 +2311,7 @@
 						onDownloadMd={downloadMd}
 						onSaveAudio={saveAudioFile}
 						hasActiveDoc={!!activeDoc}
+						assetDocId={activeDoc?.id ?? null}
 						onSentenceClick={handleSentenceClick}
 					/>
 				{:else}
@@ -1336,18 +2322,79 @@
 				{/if}
 			</div>
 		{:else if activeDoc}
-			<div class="{pdfVisible ? 'grid md:grid-cols-2 gap-4 items-stretch md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0 flex flex-col'}">
-				{#if pdfVisible}
-					<PdfPane
-						{pdfUrl}
-						bind:canvasEl
-						{pdfPageNum}
-						{pdfTotalPages}
-						onPrev={prevPdfPage}
-						onNext={nextPdfPage}
-						onUploadClick={triggerPdfUpload}
-						logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
-					/>
+			<div
+				bind:this={readerGridEl}
+				style:--left-pct={`${paneSplit}%`}
+				class="{leftVisible ? 'pane-split relative grid gap-4 items-stretch md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0' : 'max-w-3xl mx-auto w-full md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] min-h-0 flex flex-col'}"
+			>
+				{#if leftVisible}
+					<button
+						class="pane-handle hidden md:block"
+						style:left={`${paneSplit}%`}
+						onpointerdown={paneResizeStart}
+						onpointermove={paneResizeMove}
+						onpointerup={paneResizeEnd}
+						onpointercancel={paneResizeEnd}
+						aria-label="Resize panes"
+						title="Drag to resize panes"
+					></button>
+					{#if leftPane === 'pdf'}
+						<PdfPane
+							{pdfUrl}
+							bind:canvasEl
+							{pdfPageNum}
+							{pdfTotalPages}
+							onPrev={prevPdfPage}
+							onNext={nextPdfPage}
+							onUploadClick={triggerPdfUpload}
+							logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
+						/>
+					{:else if leftPane === 'playlist'}
+						<PlaylistPane
+							playlist={playlists.find((p) => p.id === activePlaylistId) ?? null}
+							items={playlistItems}
+							stats={itemStats}
+							{activeItemId}
+							canAddCurrentDoc={!!activeDoc &&
+								!!activePlaylistId &&
+								!playlistItems.some((i) => i.docId === activeDoc?.id)}
+							onSelectItem={(id) => {
+								if (activePlaylistId) openPlaylistItem(activePlaylistId, id);
+							}}
+							onRenameItem={handleRenamePlaylistItem}
+							onDeleteItem={handleDeletePlaylistItem}
+							onBulkDelete={handleBulkDeletePlaylistItems}
+							onMoveItem={handleMovePlaylistItem}
+							onDropItem={handleDropPlaylistItem}
+							onShowPdf={handleShowItemPdf}
+							onClearItemPdf={handleClearItemPdf}
+							onReprocessItem={handleReprocessItem}
+							onOpenLibrary={() => (leftPane = 'library')}
+							onUploadDoc={handlePlaylistDocUpload}
+							onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
+							onFetchUrl={(url) => handleFetchUrl(activePlaylistId, url)}
+							onAddCurrentDoc={handleAddCurrentDoc}
+						/>
+					{:else}
+						<LibraryPane
+							{playlists}
+							stats={libraryStats}
+							{activePlaylistId}
+							unassigned={unassignedDocs.map((d) => ({
+								id: d.id,
+								title: d.title,
+								hasPdf: pdfSizes[d.id] !== undefined
+							}))}
+							onOpenPlaylist={handleOpenPlaylist}
+							onCreatePlaylist={handleCreatePlaylist}
+							onRenamePlaylist={handleRenamePlaylist}
+							onDeletePlaylist={handleDeletePlaylist}
+							onOpenDoc={handleOpenUnassignedDoc}
+							onRenameDoc={renameDoc}
+							onDeleteDoc={deleteDocHandler}
+							onAddDocToPlaylist={handleAddUnassignedToPlaylist}
+						/>
+					{/if}
 				{/if}
 				<MarkdownPane
 					bind:this={markdownPaneRef}
@@ -1364,6 +2411,7 @@
 					onDownloadMd={downloadMd}
 					onSaveAudio={saveAudioFile}
 					hasActiveDoc={!!activeDoc}
+					assetDocId={activeDoc?.id ?? null}
 					onSentenceClick={handleSentenceClick}
 				/>
 			</div>
@@ -1373,17 +2421,20 @@
 				<p class="text-sm text-slate-400 max-w-md">Upload a PDF to extract text, upload Markdown directly, or open a document from the library.</p>
 				<div class="mt-2 flex flex-wrap items-center justify-center gap-2">
 					<button onclick={handleHeaderUpload} class="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded-md font-medium">
-						Upload PDF
-					</button>
-					<button onclick={triggerMarkdownUpload} class="inline-flex items-center gap-2 border border-slate-600 hover:bg-slate-800 text-slate-200 px-5 py-2 rounded-md font-medium">
-						Upload Markdown
+						Upload file
 					</button>
 				</div>
-				<button onclick={() => (showLibrary = true)} class="text-sm text-slate-400 hover:text-slate-200 underline">
-					Open library ({docs.length} {docs.length === 1 ? 'doc' : 'docs'})
-				</button>
-			</div>
-		{/if}
+			<button
+				onclick={() => {
+					view = 'overview';
+					void refreshOverview();
+				}}
+				class="text-sm text-slate-400 hover:text-slate-200 underline"
+			>
+				Go to overview
+			</button>
+		</div>
+	{/if}
 	</main>
 
 	<PlayerBar
@@ -1400,22 +2451,124 @@
 		onSettings={() => (showTtsSettings = true)}
 	/>
 
-	<LibraryModal
-		open={showLibrary}
-		{docs}
-		activeDocId={activeDoc?.id ?? null}
-		pdfSizes={pdfSizes}
-		onClose={() => (showLibrary = false)}
-		onSelect={openDoc}
-		onDelete={deleteDocHandler}
-		onRename={renameDoc}
-		onClearPdf={clearCachedPdf}
-	/>
+	{#if urlDialogOpen}
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center p-4"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Add URL"
+		>
+			<button
+				class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+				onclick={() => (urlDialogOpen = false)}
+				aria-label="Close"
+				tabindex="-1"
+			></button>
+			<form
+				onsubmit={(e) => {
+					e.preventDefault();
+					const v = listenUrlValue;
+					listenUrlValue = '';
+					urlDialogOpen = false;
+					void handleFetchUrl(null, v);
+				}}
+				class="relative w-full max-w-md bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col gap-3"
+			>
+				<h2 class="text-base font-semibold text-slate-100">Add URL</h2>
+				<p class="text-xs text-slate-400">
+					Articles are fetched and converted to Markdown; links ending in .pdf download the PDF
+					for OCR instead.
+				</p>
+				<input
+					bind:value={listenUrlValue}
+					placeholder="https://example.com/article"
+					aria-label="Article or PDF URL"
+					class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
+					autofocus
+				/>
+				<div class="flex justify-end gap-2">
+					<button
+						type="button"
+						onclick={() => (urlDialogOpen = false)}
+						class="text-sm px-4 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
+					>
+						Cancel
+					</button>
+					<button
+						type="submit"
+						class="text-sm px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium"
+					>
+						Add
+					</button>
+				</div>
+			</form>
+		</div>
+	{/if}
+
+	{#if pasteDialogOpen}
+		<div
+			class="fixed inset-0 z-50 flex items-center justify-center p-4"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Paste text"
+		>
+			<button
+				class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+				onclick={() => (pasteDialogOpen = false)}
+				aria-label="Close"
+				tabindex="-1"
+			></button>
+			<form
+				onsubmit={(e) => {
+					e.preventDefault();
+					const t = listenPasteTitle;
+					const v = listenPasteValue;
+					listenPasteTitle = '';
+					listenPasteValue = '';
+					pasteDialogOpen = false;
+					void handlePasteText(null, v, t);
+				}}
+				class="relative w-full max-w-md bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col gap-3"
+			>
+				<h2 class="text-base font-semibold text-slate-100">Paste text</h2>
+				<p class="text-xs text-slate-400">Paste Markdown or plain text to listen to right away.</p>
+				<input
+					bind:value={listenPasteTitle}
+					placeholder="Title (optional — first line used otherwise)"
+					aria-label="Pasted text title"
+					class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
+				/>
+				<textarea
+					bind:value={listenPasteValue}
+					rows={8}
+					placeholder="Paste Markdown or plain text…"
+					aria-label="Text to listen to"
+					class="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
+					autofocus
+				></textarea>
+				<div class="flex justify-end gap-2">
+					<button
+						type="button"
+						onclick={() => (pasteDialogOpen = false)}
+						class="text-sm px-4 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
+					>
+						Cancel
+					</button>
+					<button
+						type="submit"
+						class="text-sm px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium"
+					>
+						Add
+					</button>
+				</div>
+			</form>
+		</div>
+	{/if}
 
 	<TtsSettingsModal
 		open={showTtsSettings}
 		onClose={() => (showTtsSettings = false)}
-		{useBackendTTS}
+		{ttsEngine}
 		onEngineChange={handleEngineChange}
 		{builtinVoices}
 		{customVoices}
@@ -1428,6 +2581,11 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
+		{kokoroReady}
+		kokoroDownloading={kokoroBusy}
+		kokoroProgress={kokoroDl}
+		{kokoroError}
+		onDownloadKokoro={downloadKokoroModel}
 	/>
 
 	<PostprocessingModal
@@ -1452,4 +2610,38 @@
 
 <style>
 	:global(body) { margin: 0; }
+	/* Horizontal pane resize (#56): two columns on md+ sized by --left-pct,
+	 * stacked on narrow screens. Unlayered so it wins over utilities. */
+	@media (min-width: 768px) {
+		.pane-split {
+			grid-template-columns: var(--left-pct, 50%) minmax(0, 1fr);
+		}
+	}
+	.pane-handle {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 14px;
+		margin-left: -7px;
+		cursor: col-resize;
+		z-index: 10;
+		background: transparent;
+		border: 0;
+		padding: 0;
+		touch-action: none;
+	}
+	.pane-handle::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 6px;
+		width: 2px;
+		background: transparent;
+		transition: background 0.15s;
+	}
+	.pane-handle:hover::after,
+	.pane-handle:active::after {
+		background: rgb(14 165 233 / 0.6);
+	}
 </style>

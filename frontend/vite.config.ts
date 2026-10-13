@@ -25,7 +25,11 @@ export default defineConfig({
 				display: 'standalone'
 			},
 			workbox: {
-				globPatterns: ['**/*.{js,css,html,svg,png,woff2}']
+				globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+				// The lazy kokoro-js/transformers chunk (~2.2MB, only fetched
+				// when the browser TTS engine is used) exceeds the default
+				// 2MB precache cap.
+				maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
 			}
 		})
 	],

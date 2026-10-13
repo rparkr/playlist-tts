@@ -10,12 +10,14 @@ dependencies = [
     "fastapi>=0.141.1",
     "httpx2>=2.12.0",
     # Required by the vision-LLM OCR engine (OpenAI-compatible API, e.g. llama.cpp).
+    "markdownify>=1.2.3",
     "openai>=3.0.0",
     "pocket-tts>=2.1.0",
     "pydantic>=2.0.0",
     "pypdf>=6.0.0",
     # python-multipart is required for file upload in FastAPI
     "python-multipart>=0.0.9",
+    "readability-lxml>=0.9",
     "rich>=15.0.0",
     "typer>=0.26.8",
     "uvicorn[standard]>=0.34.0",

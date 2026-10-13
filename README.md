@@ -47,6 +47,7 @@ Main endpoints:
 | `GET /api/ocr/jobs/{id}/markdown` | Download result as Markdown |
 | `POST /api/ocr` | Synchronous OCR alias (creates a job and polls) |
 | `POST /api/parse-markdown` | Parse pasted/uploaded Markdown into sections |
+| `POST /api/convert/epub` | Convert an ePub book to Markdown plus image binaries |
 | `GET /api/tts/voices` | Built-in voice catalog |
 | `POST /api/tts/stream` | Stream WAV audio for text (chunked) |
 | `POST /api/tts/jobs` | Background audio-file job → `GET …/download` |

@@ -60,11 +60,12 @@ export function formatEta(totalSeconds: number): string {
 }
 
 /**
- * Format a remaining-time countdown with a leading `-`.
+ * Format a remaining-time countdown (no leading `-`: the surrounding `left`
+ * / player context already conveys countdown semantics).
  *
- * Shows `-h:mm:ss` when the duration is an hour or more, otherwise `-m:ss`
- * (e.g. `-382:45` becomes `-6:22:45`). Rounds to the nearest second first so
- * values like `119.6s` render as `-2:00` rather than `-1:60`.
+ * Shows `h:mm:ss` when the duration is an hour or more, otherwise `m:ss`
+ * (e.g. `382:45` becomes `6:22:45`). Rounds to the nearest second first so
+ * values like `119.6s` render as `2:00` rather than `1:60`.
  */
 export function formatRemaining(totalSeconds: number): string {
 	const total = Math.max(0, Math.round(totalSeconds));
@@ -72,9 +73,9 @@ export function formatRemaining(totalSeconds: number): string {
 		const h = Math.floor(total / 3600);
 		const m = Math.floor((total % 3600) / 60);
 		const s = total % 60;
-		return `-${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+		return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 	}
 	const m = Math.floor(total / 60);
 	const s = total % 60;
-	return `-${m}:${String(s).padStart(2, '0')}`;
+	return `${m}:${String(s).padStart(2, '0')}`;
 }

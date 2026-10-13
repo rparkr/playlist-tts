@@ -262,3 +262,36 @@ describe('BackendSentencePlayer completion timing', () => {
 		expect(completed[0].idx).toBe(1);
 	});
 });
+
+describe('BackendSentencePlayer fetch injection', () => {
+	let player: BackendSentencePlayer;
+	let started: number[];
+
+	beforeEach(() => {
+		audios = [];
+		started = [];
+		fetchMock.mockClear();
+		vi.stubGlobal('Audio', MockAudio);
+		player = new BackendSentencePlayer();
+		player.setCallbacks({ onSentenceStart: (idx) => started.push(idx) });
+	});
+
+	afterEach(async () => {
+		player.destroy();
+		vi.unstubAllGlobals();
+		await sleep(300);
+	});
+
+	it('uses the injected fetch (browser WASM path) instead of the backend', async () => {
+		const calls: string[] = [];
+		player.setFetchAudio(async (text) => {
+			calls.push(text);
+			return { url: `browser:${text}` };
+		});
+		void player.play(['Alpha.', 'Bravo.'], 0, 'browser', null, null, 1);
+		await vi.waitFor(() => expect(audio().src).toBe('browser:Alpha.'));
+		expect(calls).toContain('Alpha.');
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(started).toEqual([0]);
+	});
+});

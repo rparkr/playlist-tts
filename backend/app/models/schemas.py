@@ -1,6 +1,7 @@
 """Pydantic schemas for OCR, parse, and TTS contracts."""
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,8 +13,13 @@ class PostprocessOptions(BaseModel):
     normalize_uppercase: bool = False
     ensure_punctuation: bool = False
     insert_page_markers: bool = True
-    # Honored by the LLM engine's strict join; the Docling pipeline ignores it.
-    first_page_marker: bool = False
+    # Emit a `Page N.` marker for the first page too (default on: the PDF
+    # viewer needs it for back-navigation to page 1).
+    first_page_marker: bool = True
+    # Extraction engine override for `/api/ocr/jobs`: `auto` keeps the
+    # text-fast-path/Docling routing, `text` forces `pypdf` extraction,
+    # `docling` forces Docling OCR. The LLM engine lives on `/api/ocr/llm`.
+    engine: Literal["auto", "text", "docling"] = "auto"
     # Logical number of physical PDF page 1 (chapter-by-chapter scans).
     first_page_number: int = Field(default=1, ge=1)
     # Physical (1-indexed) → logical page overrides (skipped illustrations).
@@ -125,3 +131,41 @@ class TTSJobStatusResponse(BaseModel):
     progress: dict[str, int] = Field(default_factory=lambda: {"done": 0, "total": 0})
     error: str | None = None
     output: str | None = Field(default=None, description="Download filename once the job is done")
+
+
+class FetchArticleRequest(BaseModel):
+    """Request for POST /api/fetch/article."""
+
+    url: str = Field(description="Article URL (http/https only)")
+
+
+class FetchArticleResponse(BaseModel):
+    """Extracted article Markdown plus metadata for playlist item cards."""
+
+    markdown: str
+    title: str | None = None
+    author: str | None = None
+    site: str | None = None
+    date: str | None = None
+    excerpt: str | None = None
+    url: str
+    domain: str
+
+
+class EpubImage(BaseModel):
+    """One image binary referenced from converted ePub Markdown (base64)."""
+
+    path: str = Field(
+        description="Image path relative to the OPF directory, as referenced in Markdown"
+    )
+    media_type: str = Field(default="image/png")
+    data_b64: str = Field(description="Raw image bytes, base64-encoded")
+
+
+class ConvertEpubResponse(BaseModel):
+    """Response for POST /api/convert/epub."""
+
+    markdown: str
+    title: str | None = None
+    author: str | None = None
+    images: list[EpubImage] = Field(default_factory=list)

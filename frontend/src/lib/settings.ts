@@ -7,7 +7,7 @@
  * used for new OCR jobs and for the pre-doc UI.
  */
 
-export type TtsEngine = 'device' | 'pocket';
+export type TtsEngine = 'device' | 'pocket' | 'browser';
 
 export const LS_KEYS = {
 	activeDocId: 'tts_active_doc_id',
@@ -15,7 +15,8 @@ export const LS_KEYS = {
 	voice: 'tts_voice',
 	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
-	postprocess: 'tts_postprocess'
+	postprocess: 'tts_postprocess',
+	paneSplit: 'tts_pane_split'
 } as const;
 
 export const URL_PARAMS = {
@@ -39,6 +40,7 @@ export interface PostprocessFlags {
 export function parseEngine(value: string | null | undefined): TtsEngine | null {
 	if (value === 'pocket' || value === 'backend') return 'pocket';
 	if (value === 'device' || value === 'builtin') return 'device';
+	if (value === 'browser' || value === 'local') return 'browser';
 	return null;
 }
 
@@ -118,6 +120,7 @@ export function progressKey(docId: string): string {
 export interface VoiceByEngine {
 	device: string | null;
 	pocket: string | null;
+	browser: string | null;
 }
 
 /** Parse a stored per-engine voice map; return null when absent/invalid. */
@@ -127,10 +130,15 @@ export function parseVoiceByEngine(value: string | null | undefined): VoiceByEng
 		const p = JSON.parse(value) as Partial<VoiceByEngine>;
 		const device = p.device ?? null;
 		const pocket = p.pocket ?? null;
-		if ((device !== null && typeof device !== 'string') || (pocket !== null && typeof pocket !== 'string')) {
+		const browser = p.browser ?? null;
+		if (
+			(device !== null && typeof device !== 'string') ||
+			(pocket !== null && typeof pocket !== 'string') ||
+			(browser !== null && typeof browser !== 'string')
+		) {
 			return null;
 		}
-		return { device, pocket };
+		return { device, pocket, browser };
 	} catch {
 		return null;
 	}
@@ -147,8 +155,7 @@ export function voiceForEngine(
 	engine: TtsEngine,
 	fallback: string
 ): string {
-	if (engine === 'pocket') return map?.pocket ?? fallback;
-	return map?.device ?? fallback;
+	return map?.[engine] ?? fallback;
 }
 
 /** Return a copy of `map` with `engine`'s voice set to `voiceId`. */
@@ -157,7 +164,11 @@ export function withVoiceForEngine(
 	engine: TtsEngine,
 	voiceId: string
 ): VoiceByEngine {
-	const next: VoiceByEngine = { device: map?.device ?? null, pocket: map?.pocket ?? null };
+	const next: VoiceByEngine = {
+		device: map?.device ?? null,
+		pocket: map?.pocket ?? null,
+		browser: map?.browser ?? null
+	};
 	next[engine] = voiceId;
 	return next;
 }

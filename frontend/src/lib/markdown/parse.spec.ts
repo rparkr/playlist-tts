@@ -5,9 +5,12 @@ import {
 	findPageMarkerIndex,
 	getBreadcrumbs,
 	getGlobalSentences,
+	getSectionParagraphs,
 	globalToSectionChunk,
+	normalizeIndentedLines,
 	sectionChunkToGlobal,
-	selectSections
+	selectSections,
+	splitBlocks
 } from './parse';
 
 describe('chunkTextIntoSentences', () => {
@@ -28,6 +31,27 @@ describe('chunkTextIntoSentences', () => {
 			'docs are here.',
 			'Done.'
 		]);
+	});
+
+	it('keeps lone asterisks and snake_case (renderer parity)', () => {
+		expect(chunkTextIntoSentences('The 26B-A4B* model uses max_tokens here.')).toEqual([
+			'The 26B-A4B* model uses max_tokens here.'
+		]);
+		expect(chunkTextIntoSentences('A * B = C stars stay.')).toEqual(['A * B = C stars stay.']);
+	});
+
+	it('strips paired emphasis but not spaced stars', () => {
+		expect(chunkTextIntoSentences('This is **bold** and *em* text.')).toEqual([
+			'This is bold and em text.'
+		]);
+		expect(chunkTextIntoSentences('Values * ja* stay literal.')).toEqual([
+			'Values * ja* stay literal.'
+		]);
+	});
+
+	it('drops images and HTML tags but keeps image-adjacent prose', () => {
+		expect(chunkTextIntoSentences('See ![alt](https://x/y.png) here.')).toEqual(['See here.']);
+		expect(chunkTextIntoSentences('Output an <eos> token now.')).toEqual(['Output an token now.']);
 	});
 });
 
@@ -73,6 +97,78 @@ describe('parseMarkdownStructure', () => {
 
 	it('returns no sections for empty input', () => {
 		expect(parseMarkdownStructure('')).toEqual([]);
+	});
+
+	it('emits one block per list item with paragraph alignment', () => {
+		const sections = parseMarkdownStructure('- alpha here\n- beta here\n\nTail.');
+		expect(sections.length).toBe(1);
+		const kinds = sections[0].blocks.map((b) => b.kind);
+		expect(kinds).toEqual(['list-item', 'list-item', 'paragraph']);
+		expect(sections[0].blocks.map((b) => b.paraIdx)).toEqual([0, 1, 2]);
+		expect(getSectionParagraphs(sections[0])).toEqual([['alpha here'], ['beta here'], ['Tail.']]);
+	});
+
+	it('keeps mid-paragraph numbered lines as prose, not lists', () => {
+		const sections = parseMarkdownStructure('Intro line here.\n2.3. Encoder stuff here.');
+		const kinds = sections[0].blocks.map((b) => b.kind);
+		expect(kinds).toEqual(['paragraph']);
+		expect(getGlobalSentences(sections)).toEqual([
+			'Intro line here.',
+			'2.3.',
+			'Encoder stuff here.'
+		]);
+	});
+
+	it('marks code and hr blocks unspeakable', () => {
+		const sections = parseMarkdownStructure('```py\nprint(1)\n```\n\n---\n\nDone here.');
+		const kinds = sections[0].blocks.map((b) => b.kind);
+		expect(kinds).toContain('code');
+		expect(kinds).toContain('hr');
+		for (const b of sections[0].blocks) {
+			if (b.kind === 'code' || b.kind === 'hr') expect(b.paraIdx).toBeNull();
+		}
+		expect(getGlobalSentences(sections)).toEqual(['Done here.']);
+	});
+});
+
+describe('splitBlocks', () => {
+	it('splits fences, tables, quotes, and headings structurally', () => {
+		const blocks = splitBlocks([
+			'## Sub here',
+			'',
+			'> quoted here',
+			'',
+			'| a | b |',
+			'|---|---|',
+			'| 1 | 2 |',
+			'',
+			'```js',
+			'x();',
+			'```'
+		]);
+		expect(blocks.map((b) => b.kind)).toEqual(['heading', 'blockquote', 'table', 'code']);
+	});
+
+	it('groups ordered runs and flags ordering', () => {
+		const blocks = splitBlocks(['1. one here', '2. two here']);
+		expect(blocks.map((b) => b.kind)).toEqual(['list-item', 'list-item']);
+		expect(blocks.every((b) => b.ordered)).toBe(true);
+	});
+});
+
+describe('normalizeIndentedLines', () => {
+	it('de-indents isolated centered titles but keeps code runs', () => {
+		expect(normalizeIndentedLines(['', '\t\tCentered Title', ''])).toEqual([
+			'',
+			'Centered Title',
+			''
+		]);
+		expect(normalizeIndentedLines(['', '\tline one', '\tline two', ''])).toEqual([
+			'',
+			'\tline one',
+			'\tline two',
+			''
+		]);
 	});
 });
 
@@ -121,9 +217,11 @@ describe('findPageMarkerIndex', () => {
 		expect(sentences[findPageMarkerIndex(sentences, 2)]).toBe('Page 2.');
 	});
 
-	it('returns -1 for page 1 and missing markers', () => {
+	it('resolves Page 1 markers like any other page', () => {
+		expect(findPageMarkerIndex(['Page 1.', 'Intro.'], 1)).toBe(0);
 		expect(findPageMarkerIndex(['Page 2.'], 1)).toBe(-1);
 		expect(findPageMarkerIndex(['Just text.'], 3)).toBe(-1);
+		expect(findPageMarkerIndex(['Page 1.'], 0)).toBe(-1);
 	});
 });
 

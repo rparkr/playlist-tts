@@ -1,21 +1,22 @@
 <script lang="ts">
-	import { Menu, Upload } from 'lucide-svelte';
+	import { LibraryBig, PanelLeft } from 'lucide-svelte';
 
 	interface Props {
 		activeTitle: string | null;
 		breadcrumbs: string;
+		leftPaneVisible: boolean;
 		onLogoClick: () => void;
-		onUploadClick: () => void;
-		onMenuClick: () => void;
+		onLibraryClick: () => void;
+		onToggleLeftPane: () => void;
 	}
 
-	let { activeTitle, breadcrumbs, onLogoClick, onUploadClick, onMenuClick }: Props = $props();
+	let { activeTitle, breadcrumbs, leftPaneVisible, onLogoClick, onLibraryClick, onToggleLeftPane }: Props = $props();
 </script>
 
 <header class="sticky top-0 z-30 w-full bg-slate-900 border-b border-slate-800">
 	<div class="mx-auto max-w-6xl w-full flex items-center justify-between gap-3 px-4 py-2.5">
 		<!-- Logo -->
-		<button onclick={onLogoClick} aria-label="Toggle PDF viewer" class="flex items-center shrink-0 hover:opacity-90 transition-opacity">
+		<button onclick={onLogoClick} aria-label="Go to overview" title="Overview" class="flex items-center shrink-0 hover:opacity-90 transition-opacity cursor-pointer">
 			<img src="/tts-logo.svg" alt="PDF to TTS" class="h-8 w-auto object-contain" />
 		</button>
 
@@ -34,19 +35,21 @@
 		<!-- Actions -->
 		<div class="flex items-center gap-2 shrink-0">
 			<button
-				onclick={onUploadClick}
-				class="inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-3.5 py-1.5 rounded-md transition-colors"
+				onclick={onToggleLeftPane}
+				aria-label={leftPaneVisible ? 'Hide side pane' : 'Show side pane'}
+				title="Show/hide the PDF / Playlist / Library pane"
+				class="w-9 h-9 flex items-center justify-center rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 transition-colors {leftPaneVisible ? '' : 'opacity-60'}"
 			>
-				<Upload size={16} />
-				<span class="hidden sm:inline">Upload PDF</span>
-				<span class="sm:hidden">Upload</span>
+				<PanelLeft size={20} />
 			</button>
 			<button
-				onclick={onMenuClick}
+				onclick={onLibraryClick}
 				aria-label="Open library"
-				class="w-9 h-9 flex items-center justify-center rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 transition-colors"
+				title="Open the playlist library"
+				class="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 text-sm font-medium px-3.5 py-1.5 rounded-md transition-colors"
 			>
-				<Menu size={20} />
+				<LibraryBig size={16} />
+				<span class="hidden sm:inline">Library</span>
 			</button>
 		</div>
 	</div>

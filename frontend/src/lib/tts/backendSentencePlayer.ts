@@ -28,6 +28,14 @@ export interface SentencePlayerCallbacks {
 
 const MAX_CACHE_ENTRIES = 100;
 
+/** Synthesize one sentence to a playable object URL (backend or browser). */
+export type FetchAudioFn = (
+	text: string,
+	voiceId: string | null,
+	voiceBlob: Blob | null,
+	signal?: AbortSignal
+) => Promise<{ url: string }>;
+
 /** Short hash so cache keys stay small but text edits invalidate entries. */
 function hashText(text: string): string {
 	let h = 5381;
@@ -51,6 +59,12 @@ export class BackendSentencePlayer {
 	private paused = false;
 	private loading = false;
 	private cb: SentencePlayerCallbacks = {};
+	private fetchAudio: FetchAudioFn = fetchTTSWavStream;
+
+	/** Swap the synthesis backend (browser WASM engine injects its own). */
+	setFetchAudio(fn: FetchAudioFn): void {
+		this.fetchAudio = fn;
+	}
 
 	/** Snapshot of playback state for the UI. */
 	get currentIndex(): number {
@@ -101,7 +115,7 @@ export class BackendSentencePlayer {
 		const text = this.sentences[idx] ?? '';
 		const voiceId = this.voiceId;
 		const voiceBlob = this.voiceBlob;
-		const promise = fetchTTSWavStream(text, voiceId, voiceBlob, signal)
+		const promise = this.fetchAudio(text, voiceId, voiceBlob, signal)
 			.then(({ url }) => {
 				// Cache the newest entry; evict oldest past the cap.
 				this.cache.delete(key);

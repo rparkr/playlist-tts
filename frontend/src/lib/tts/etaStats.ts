@@ -7,7 +7,7 @@
  * samples yet, estimates fall back to a cold-start pace of ~150wpm.
  */
 
-export type TtsEngineKey = 'device' | 'pocket';
+export type TtsEngineKey = 'device' | 'pocket' | 'browser';
 
 /** Cold-start pace (~150wpm at ~6 chars/word including spaces). */
 export const COLD_START_CPS = 15;

@@ -28,4 +28,5 @@ archive/
 **/.vscode
 
 test-pdfs/
-
+test-epub/
+test-articles/

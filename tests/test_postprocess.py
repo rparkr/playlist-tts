@@ -151,6 +151,13 @@ def test_dehyphenate_inline_breaks():
     )
     assert dehyphenate("cables in combi- nation with") == "cables in combination with"
     assert dehyphenate("more reli- able signals") == "more reliable signals"
+    assert dehyphenate("cele- bration") == "celebration"
+    # Screenshot cases from a two-column technical report.
+    assert dehyphenate("decoder-only Trans- former architecture") == (
+        "decoder-only Transformer architecture"
+    )
+    assert dehyphenate("with ef- fective 2.3B") == "with effective 2.3B"
+    assert dehyphenate("26B total pa- rameters") == "26B total parameters"
     assert (
         dehyphenate("immune to electromag- netic interference")
         == "immune to electromagnetic interference"
@@ -204,11 +211,27 @@ def test_join_pages_strict_keeps_empty_pages_aligned():
     assert md.index("First.") < md.index("Page 2.") < md.index("Page 3.") < md.index("Third.")
 
 
-def test_join_pages_strict_single_page_has_no_marker():
-    """A single page needs no marker and maps the whole text."""
+def test_join_pages_strict_single_page_marker_by_default():
+    """Page 1 gets a marker by default so the viewer can navigate back to it."""
     md, page_map = join_pages_strict(["Only page."], True)
+    assert md == "\n\nPage 1.\n\nOnly page."
+    assert [p.page for p in page_map] == [1]
+
+
+def test_join_pages_strict_single_page_marker_opt_out():
+    """Opting out of the first-page marker keeps single-page docs clean."""
+    md, page_map = join_pages_strict(["Only page."], True, first_page_marker=False)
     assert md == "Only page."
     assert [p.page for p in page_map] == [1]
+
+
+def test_postprocess_options_defaults():
+    """Page-1 markers on and auto engine routing out of the box."""
+    opts = PostprocessOptions()
+    assert opts.first_page_marker is True
+    assert opts.engine == "auto"
+    assert PostprocessOptions(engine="text").engine == "text"
+    assert PostprocessOptions(engine="docling").engine == "docling"
 
 
 def test_join_pages_strict_without_markers():
