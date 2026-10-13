@@ -206,13 +206,13 @@ def test_join_pages_strict_never_carries_next_page_content():
     before `Page 2.`; the strict join must not.
     """
     md, page_map = join_pages_strict(
-        ["OUTER ISLAND\nDINOTOPIA\nSTATUTE MILES", "HOW I DISCOVERED THE SKETCHBOOK"],
+        ["NORTH REACH\nISLE OF GULLS\nLEAGUES", "HOW I FOUND THE LOGBOOK"],
         True,
     )
-    assert md.index("STATUTE MILES") < md.index("Page 2.")
-    assert md.index("Page 2.") < md.index("HOW I DISCOVERED")
+    assert md.index("LEAGUES") < md.index("Page 2.")
+    assert md.index("Page 2.") < md.index("HOW I FOUND")
     assert [p.page for p in page_map] == [1, 2]
-    assert md[page_map[1].char_start : page_map[1].char_end] == "HOW I DISCOVERED THE SKETCHBOOK"
+    assert md[page_map[1].char_start : page_map[1].char_end] == "HOW I FOUND THE LOGBOOK"
 
 
 def test_join_pages_strict_keeps_empty_pages_aligned():

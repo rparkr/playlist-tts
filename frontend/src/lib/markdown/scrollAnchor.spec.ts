@@ -32,8 +32,8 @@ describe('scroll anchors', () => {
 	});
 
 	it('strips markers so source lines match rendered text', () => {
-		expect(stripMarkdownForMatch('## Map of Dyno-topia')).toBe('Map of Dyno-topia');
-		expect(stripMarkdownForMatch('1. NESTING ROOM, with ferns')).toBe('NESTING ROOM, with ferns');
+		expect(stripMarkdownForMatch('## Map of the Isle')).toBe('Map of the Isle');
+		expect(stripMarkdownForMatch('1. STORAGE ROOM, with reeds')).toBe('STORAGE ROOM, with reeds');
 		expect(stripMarkdownForMatch('- item **bold** done')).toBe('item bold done');
 		expect(snippetForSourceLine('Page 22.')).toBe('Page 22.');
 		expect(collapseWs('a  \n b')).toBe('a b');
@@ -55,18 +55,19 @@ describe('scroll anchors', () => {
 	it('round-trips every logical line through visual rows', () => {
 		// Synthetic stand-in for book text: empty lines, short item-like
 		// lines, tab-indented lines, and very long prose lines (800+ chars).
+		// All content below is invented for the test — no source excerpts.
 		const long = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. ';
 		const lines = [
 			'Page 22.',
 			'',
-			'Windy Point',
-			'Crystal Caverns',
+			'Harbor Hill',
+			'Glass Caverns',
 			'\tIndented with a tab here',
 			long.repeat(14).trim(),
 			'Short again.',
 			'',
-			'1. NESTING ROOM, with egg basins made of hardened clay',
-			'Unicode: Brachiosaurus — Pooktook “Hatchery” … done',
+			'1. STORAGE ROOM, with grain bins made of woven reeds',
+			'Unicode: gryphon — aviary “roost” … done',
 			long.repeat(16).trim(),
 			'Page 23.'
 		];
@@ -79,7 +80,7 @@ describe('scroll anchors', () => {
 			}
 		}
 		// Map-style items are findable by their rendered snippet.
-		expect(candidateLines(lines, 'Windy Point', 0)).not.toEqual([]);
-		expect(candidateLines(lines, 'NESTING ROOM', 0)).not.toEqual([]);
+		expect(candidateLines(lines, 'Harbor Hill', 0)).not.toEqual([]);
+		expect(candidateLines(lines, 'STORAGE ROOM', 0)).not.toEqual([]);
 	});
 });
