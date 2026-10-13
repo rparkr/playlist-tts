@@ -12,6 +12,14 @@
 		SENTENCE_ATTR,
 		renderSectionBlocks
 	} from '$lib/markdown/render';
+	import {
+		candidateLines,
+		collapseWs,
+		lineForRow,
+		rowsAbove,
+		snippetForSourceLine,
+		snippetForText
+	} from '$lib/markdown/scrollAnchor';
 	import { getDocAsset } from '$lib/stores/library';
 
 	interface Props {
@@ -279,20 +287,65 @@
 		});
 	});
 
-	// Preserve scroll across the viewer↔editor swap so editing a long doc
-	// lands at the same position instead of jumping to the top. The outer
-	// scroll container persists, but the editor (`h-full` textarea) is much
-	// shorter than rendered prose: without compensation the browser clamps
-	// `scrollTop` to 0 when entering edit mode, and there are no sentence
-	// spans to anchor to when leaving it.
-	//
+	// Preserve scroll across the viewer↔editor swap by text identity: the
+	// topmost visible unit on one side is located by content on the other,
+	// so the same words stay in view despite different fonts and layouts.
 	// Capture must happen pre-swap (the parent calls `prepareEditSwap`
-	// before flipping `isEditing`): on entering, pin the textarea's
-	// min-height to the pre-swap scroll height (keeping the scroll range
-	// stable); on exit, just carry the textarea's fraction over. The
-	// transition effect below only restores the captured fraction post-swap.
+	// before flipping `isEditing`). A plain scroll fraction is kept as the
+	// fallback whenever the anchor text cannot be found. The transition
+	// effect below applies the captured anchor post-swap.
+	interface EditAnchor {
+		/** Target editor logical line + in-view offset (entering; the editor
+		 * mounts only post-swap, so metrics resolve in the effect). */
+		editorLine?: number;
+		editorDelta?: number;
+		/** Snippet to locate in the viewer (exiting) with its in-view offset. */
+		viewerSnippet?: string;
+		viewerDelta?: number;
+	}
+	let pendingAnchor: EditAnchor | null = null;
 	let pendingFraction: number | null = null;
 	let editorMinHeight: string | null = $state(null);
+
+	/** Mono editor metrics for exact logical-line math under soft wrap. */
+	function measureEditor(
+		editor: HTMLTextAreaElement
+	): { lineHeight: number; charsPerRow: number } | null {
+		const style = getComputedStyle(editor);
+		const lineHeight = parseFloat(style.lineHeight);
+		if (!Number.isFinite(lineHeight) || lineHeight <= 0) return null;
+		const font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+		let charWidth = 0;
+		try {
+			const canvas = document.createElement('canvas');
+			const ctx = canvas.getContext('2d');
+			if (!ctx) return null;
+			ctx.font = font;
+			charWidth = ctx.measureText('MMMMMMMMMM').width / 10;
+		} catch {
+			return null;
+		}
+		if (!Number.isFinite(charWidth) || charWidth <= 0) return null;
+		return { lineHeight, charsPerRow: Math.max(16, Math.floor(editor.clientWidth / charWidth)) };
+	}
+
+	/** Topmost visible sentence span in the viewer (O(1) hit-test + scan fallback). */
+	function topVisibleSentence(viewer: HTMLElement): HTMLElement | null {
+		const rect = viewer.getBoundingClientRect();
+		try {
+			const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 3);
+			const span = hit?.closest?.(`[${SENTENCE_ATTR}]`) as HTMLElement | null;
+			if (span && viewer.contains(span)) return span;
+		} catch {
+			// fall through to the scan
+		}
+		const spans = viewer.querySelectorAll(`[${SENTENCE_ATTR}]`);
+		for (const el of spans) {
+			const r = (el as HTMLElement).getBoundingClientRect();
+			if (r.bottom > rect.top + 1) return el as HTMLElement;
+		}
+		return null;
+	}
 
 	export function prepareEditSwap(entering: boolean): void {
 		const scroller = viewerEl;
@@ -300,41 +353,106 @@
 		// without subscribing, so setting it never retriggers anything. Set
 		// before the parent flips `isEditing`, so the exit-triggered effect
 		// run sees it and skips its smooth scroll (which would otherwise
-		// fight the fraction restore below and yank to the active sentence).
+		// fight the anchor restore below and yank to the active sentence).
 		if (!entering) suppressFollowOnce = true;
+		pendingAnchor = null;
 		if (!scroller) {
 			pendingFraction = 0;
 			return;
 		}
 		const maxBefore = scroller.scrollHeight - scroller.clientHeight;
-		const active = scroller.querySelector(
-			`[data-sentence-idx="${globalIdx}"]`
-		) as HTMLElement | null;
-		let fraction: number;
-		if (active && entering) {
+		const fraction =
+			maxBefore > 0 ? Math.max(0, Math.min(1, scroller.scrollTop / maxBefore)) : 0;
+		pendingFraction = fraction;
+		if (entering) {
+			// Anchor to the visible view (not the active sentence): locate
+			// the topmost sentence in the draft. The editor mounts only
+			// post-swap, so only the logical line is captured here; metrics
+			// resolve in the transition effect.
+			const span = topVisibleSentence(scroller);
 			const viewerRect = scroller.getBoundingClientRect();
-			const elRect = active.getBoundingClientRect();
-			const absTop = scroller.scrollTop + (elRect.top - viewerRect.top);
-			fraction = scroller.scrollHeight > 0 ? absTop / scroller.scrollHeight : 0;
+			if (span) {
+				const snippet = snippetForText(span.textContent ?? '');
+				const lines = markdownDraft.split('\n');
+				const guessLine = Math.round(fraction * Math.max(0, lines.length - 1));
+				const hits = candidateLines(lines, snippet, guessLine);
+				if (snippet && hits.length > 0) {
+					pendingAnchor = {
+						editorLine: hits[0],
+						editorDelta: Math.max(0, span.getBoundingClientRect().top - viewerRect.top)
+					};
+				}
+			}
+			// Keep the scroll range stable across the swap; cleared on save/cancel.
+			editorMinHeight =
+				scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
 		} else {
-			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
+			// Anchor to the editor's top logical line: locate its text in
+			// the viewer on exit.
+			const editor = editorEl;
+			if (editor) {
+				const metrics = measureEditor(editor);
+				if (metrics) {
+					const row = Math.max(0, Math.round(editor.scrollTop / metrics.lineHeight));
+					const lines = editor.value.split('\n');
+					const line = lineForRow(lines, row, metrics.charsPerRow);
+					const snippet = snippetForSourceLine(lines[line] ?? '');
+					if (snippet) {
+						const delta =
+							editor.scrollTop - rowsAbove(lines, line, metrics.charsPerRow) * metrics.lineHeight;
+						pendingAnchor = { viewerSnippet: snippet, viewerDelta: Math.max(0, delta) };
+					}
+				}
+			}
 		}
-		pendingFraction = Math.max(0, Math.min(1, fraction));
-		// Keep the scroll range stable across the swap; cleared on save/cancel.
-		editorMinHeight = entering && scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
 	}
 
 	let prevEditing = false;
 	$effect(() => {
 		if (isEditing === prevEditing) return;
 		prevEditing = isEditing;
+		const anchor = pendingAnchor;
+		pendingAnchor = null;
 		const fraction = pendingFraction;
 		pendingFraction = null;
-		if (fraction === null) return;
+		if (anchor === null && fraction === null) return;
 		void tick().then(() => {
 			requestAnimationFrame(() => {
 				const el = viewerEl;
 				if (!el) return;
+				if (anchor?.editorLine !== undefined) {
+					// Entering: the editor is the scroller now — resolve its
+					// metrics post-mount and scroll to the anchored line.
+					const editor = editorEl;
+					const metrics = editor ? measureEditor(editor) : null;
+					if (editor && metrics) {
+						const lines = editor.value.split('\n');
+						const line = Math.max(0, Math.min(anchor.editorLine, lines.length - 1));
+						el.scrollTop = Math.max(
+							0,
+							rowsAbove(lines, line, metrics.charsPerRow) * metrics.lineHeight -
+								(anchor.editorDelta ?? 0)
+						);
+						return;
+					}
+				}
+				if (anchor?.viewerSnippet) {
+					// Exiting: find the editor's top line in the fresh view.
+					const spans = el.querySelectorAll(`[${SENTENCE_ATTR}]`);
+					for (const node of spans) {
+						const text = collapseWs((node as HTMLElement).textContent ?? '');
+						if (text.includes(anchor.viewerSnippet)) {
+							const viewerRect = el.getBoundingClientRect();
+							const r = (node as HTMLElement).getBoundingClientRect();
+							el.scrollTop = Math.max(
+								0,
+								el.scrollTop + (r.top - viewerRect.top) - (anchor.viewerDelta ?? 0)
+							);
+							return;
+						}
+					}
+				}
+				if (fraction === null) return;
 				const maxAfter = el.scrollHeight - el.clientHeight;
 				if (maxAfter <= 0) return;
 				// Assigning scrollTop cancels any in-flight smooth follow-scroll.
