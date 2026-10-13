@@ -7,6 +7,7 @@
  */
 
 import { parseMarkdownStructure, type PageMapItem, type Section } from './parse';
+import { isBareItemLine } from './parse';
 
 /** User-configurable post-processing flags (snake_case to match backend JSON). */
 export interface PostprocessOptions {
@@ -247,8 +248,16 @@ export function reflowColumns(markdown: string): string {
 				const nxtStripped = nxt.replace(/^\s+/, '');
 				const first = nxtStripped[0] ?? '';
 				const isLowerLetter = first >= 'a' && first <= 'z';
+				// Unmarked item runs (bare table rows) stay separate: an
+				// item-like line never merges into a digit/paren-led next
+				// line. Mirrors the `isItemBoundary` rule in `parse.ts`.
+				const curLines = cur.split('\n');
+				const itemBreak =
+					isBareItemLine(curLines[curLines.length - 1] ?? '') &&
+					(/[0-9]/.test(first) || first === '(');
 				const shouldMerge =
 					nxtStripped.length > 0 &&
+					!itemBreak &&
 					(endsHyphen || isLowerLetter || /[0-9]/.test(first) || first === '(');
 				if (shouldMerge) {
 					let merged: string;

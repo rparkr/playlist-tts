@@ -7,6 +7,7 @@ from backend.app.services.postprocess import (
     chunk_text_into_sentences,
     dehyphenate,
     ensure_punctuation,
+    is_bare_item_line,
     join_pages_strict,
     normalize_uppercase,
     parse_markdown_structure,
@@ -29,6 +30,27 @@ def test_reflow_merges_continuation():
     out = reflow_columns(md)
     # First para should now be completed sentence + remainder
     assert "and continues here." in out
+
+
+def test_reflow_keeps_bare_item_rows_separate():
+    """Item-like line never merges into a digit-led next line."""
+    md = "E4B305M 150M 670M + 2,820M 3,940M 77M\n\n12B- - 1,000M 10,890M 400M"
+    out = reflow_columns(md)
+    assert out.count("\n\n") >= 1
+    # Citation wraps still merge (trailing comma defeats item-likeness).
+    cite = "embeddings as in Gemma 3n (Gemma Team,\n\n2025b), making them effective."
+    assert "\n\n" not in reflow_columns(cite)
+
+
+def test_is_bare_item_line():
+    """Short unterminated lines flag; wraps and structural lines do not."""
+    assert is_bare_item_line("E2B305M 150M 400M + 2,340M") is True
+    assert is_bare_item_line("Gemma 4 Technical Report") is True
+    assert is_bare_item_line("most capable and efficient generation in the") is False
+    assert is_bare_item_line("with RMSNorm (Zhang and Sennrich, 2019),") is False
+    assert is_bare_item_line("Our models have pre-norm and post-norm.") is False
+    assert is_bare_item_line("- marked item") is False
+    assert is_bare_item_line("| piped | row |") is False
 
 
 def test_normalize_uppercase_single_long_word():

@@ -35,6 +35,34 @@ _DEHYPHEN_RE = re.compile(r"(?<=[A-Za-z])-\s+(?=[A-Za-z])")
 # Soft hyphen (U+00AD) — invisible break hint; always drop, incl. trailing space.
 _SOFT_HYPHEN_RE = re.compile(r"­\s*")
 
+#: Widest a bare line can be and still read as one unmarked item (chars).
+BARE_ITEM_MAX_CHARS = 60
+_BARE_ITEM_WRAP_WORD_RE = re.compile(r"^[A-Za-z]{1,4}$")
+_BARE_ITEM_STRUCT_RE = re.compile(r"^(#{1,6}\s+|\s*[-*+]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)")
+
+
+def is_bare_item_line(line: str) -> bool:
+    """Whether `line` reads as one item of an unmarked list.
+
+    Short, unterminated, not ending on a continuation mark or a wrap word
+    (`the`, `of`, `your`, …), and not itself a structural line. Mirrors
+    `isBareItemLine` in `frontend/src/lib/markdown/parse.ts`.
+    """
+    t = line.strip()
+    if not t or len(t) > BARE_ITEM_MAX_CHARS:
+        return False
+    if _TERMINAL_RE.search(t):
+        return False
+    if re.search(r"[,;:—–-]\s*$", t):
+        return False
+    if _BARE_ITEM_STRUCT_RE.match(line):
+        return False
+    last = t.split()[-1] if t.split() else ""
+    last = re.sub(r"^[(\[\"']+|[)\]\"':;,.!?]+$", "", last)
+    if _BARE_ITEM_WRAP_WORD_RE.match(last):
+        return False
+    return True
+
 
 _IMAGE_COMMENT_RE = re.compile(r"^\s*<!--\s*image\s*-->\s*$", re.IGNORECASE)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -213,8 +241,15 @@ def reflow_columns(markdown: str) -> str:
             nxt_is_special = _is_special_block(nxt) or "```" in nxt
             if not nxt_is_header and not nxt_is_special:
                 nxt_stripped = nxt.lstrip()
+                # Unmarked item runs (bare table rows) stay separate: an
+                # item-like line never merges into a digit/paren-led next
+                # line (`E4B…77M` / `12B- …`), though hyphen wraps still join.
+                cur_last = cur.split("\n")[-1] if "\n" in cur else cur
+                nxt_lead = nxt_stripped[:1]
+                item_break = is_bare_item_line(cur_last) and (nxt_lead == "(" or nxt_lead.isdigit())
                 should_merge = bool(
                     nxt_stripped
+                    and not item_break
                     and (
                         ends_hyphen
                         or nxt_stripped[0].islower()

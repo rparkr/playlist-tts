@@ -54,6 +54,15 @@ describe('reflowColumns', () => {
 		expect(out).toContain('Intro text here.');
 		expect(out).toContain('Trailing text here.');
 	});
+
+	it('keeps bare item rows separate from digit-led next lines', () => {
+		const md = 'E4B305M 150M 670M + 2,820M 3,940M 77M\n\n12B- - 1,000M 10,890M 400M';
+		expect(reflowColumns(md).split('\n\n').length).toBeGreaterThanOrEqual(2);
+		// Citation wraps still merge (trailing comma defeats item-likeness).
+		expect(reflowColumns('embeddings as in Gemma 3n (Gemma Team,\n\n2025b), effective.')).not.toContain(
+			'\n\n'
+		);
+	});
 });
 
 describe('normalizeUppercase', () => {
