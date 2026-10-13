@@ -15,8 +15,7 @@
 	import {
 		candidateLines,
 		collapseWs,
-		lineForRow,
-		rowsAbove,
+		createLineMirror,
 		snippetForSourceLine,
 		snippetForText
 	} from '$lib/markdown/scrollAnchor';
@@ -307,28 +306,6 @@
 	let pendingFraction: number | null = null;
 	let editorMinHeight: string | null = $state(null);
 
-	/** Mono editor metrics for exact logical-line math under soft wrap. */
-	function measureEditor(
-		editor: HTMLTextAreaElement
-	): { lineHeight: number; charsPerRow: number } | null {
-		const style = getComputedStyle(editor);
-		const lineHeight = parseFloat(style.lineHeight);
-		if (!Number.isFinite(lineHeight) || lineHeight <= 0) return null;
-		const font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-		let charWidth = 0;
-		try {
-			const canvas = document.createElement('canvas');
-			const ctx = canvas.getContext('2d');
-			if (!ctx) return null;
-			ctx.font = font;
-			charWidth = ctx.measureText('MMMMMMMMMM').width / 10;
-		} catch {
-			return null;
-		}
-		if (!Number.isFinite(charWidth) || charWidth <= 0) return null;
-		return { lineHeight, charsPerRow: Math.max(16, Math.floor(editor.clientWidth / charWidth)) };
-	}
-
 	/** Topmost visible sentence span in the viewer (O(1) hit-test + scan fallback). */
 	function topVisibleSentence(viewer: HTMLElement): HTMLElement | null {
 		const rect = viewer.getBoundingClientRect();
@@ -387,20 +364,49 @@
 			editorMinHeight =
 				scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
 		} else {
-			// Anchor to the editor's top logical line: locate its text in
-			// the viewer on exit.
+			// Anchor to the editor's top logical line: the scroll container
+			// (not the h-full textarea) carries the scroll, so map its
+			// position into the textarea and locate that line in the viewer.
 			const editor = editorEl;
 			if (editor) {
-				const metrics = measureEditor(editor);
-				if (metrics) {
-					const row = Math.max(0, Math.round(editor.scrollTop / metrics.lineHeight));
-					const lines = editor.value.split('\n');
-					const line = lineForRow(lines, row, metrics.charsPerRow);
-					const snippet = snippetForSourceLine(lines[line] ?? '');
-					if (snippet) {
-						const delta =
-							editor.scrollTop - rowsAbove(lines, line, metrics.charsPerRow) * metrics.lineHeight;
-						pendingAnchor = { viewerSnippet: snippet, viewerDelta: Math.max(0, delta) };
+				const lines = editor.value.split('\n');
+				const mirror = createLineMirror(editor, lines);
+				if (mirror) {
+					try {
+						const scrollerRect = scroller.getBoundingClientRect();
+						const editorRect = editor.getBoundingClientRect();
+						// Viewport top in text coords: the editor's box top
+						// sits `scrollerRect.top - editorRect.top` above the
+						// viewport, minus its padding-top.
+						const padTop =
+							parseFloat(getComputedStyle(editor).paddingTop) || 0;
+						const viewInText = Math.max(
+							0,
+							scrollerRect.top - editorRect.top - padTop
+						);
+						const line = mirror.lineAtScroll(viewInText);
+						// The viewport top can sit on a blank line — walk
+						// forward to the first line with searchable text,
+						// keeping the (possibly negative) delta so the
+						// restore reproduces the exact view.
+						let snippet = '';
+						let anchorLine = line;
+						for (let l = line; l < Math.min(line + 8, lines.length); l++) {
+							const s = snippetForSourceLine(lines[l] ?? '');
+							if (s) {
+								snippet = s;
+								anchorLine = l;
+								break;
+							}
+						}
+						if (snippet) {
+							pendingAnchor = {
+								viewerSnippet: snippet,
+								viewerDelta: viewInText - mirror.topOfLine(anchorLine)
+							};
+						}
+					} finally {
+						mirror.dispose();
 					}
 				}
 			}
@@ -421,18 +427,25 @@
 				const el = viewerEl;
 				if (!el) return;
 				if (anchor?.editorLine !== undefined) {
-					// Entering: the editor is the scroller now — resolve its
-					// metrics post-mount and scroll to the anchored line.
+					// Entering: the editor mounts only post-swap — mirror its
+					// layout now and scroll the container to the anchored line.
 					const editor = editorEl;
-					const metrics = editor ? measureEditor(editor) : null;
-					if (editor && metrics) {
-						const lines = editor.value.split('\n');
-						const line = Math.max(0, Math.min(anchor.editorLine, lines.length - 1));
-						el.scrollTop = Math.max(
-							0,
-							rowsAbove(lines, line, metrics.charsPerRow) * metrics.lineHeight -
-								(anchor.editorDelta ?? 0)
-						);
+					const lines = editor ? editor.value.split('\n') : [];
+					const mirror = editor ? createLineMirror(editor, lines) : null;
+					if (editor && mirror) {
+						try {
+							const line = Math.max(0, Math.min(anchor.editorLine, lines.length - 1));
+							const viewerRect = el.getBoundingClientRect();
+							const editorRect = editor.getBoundingClientRect();
+							const padTop = parseFloat(getComputedStyle(editor).paddingTop) || 0;
+							const textTop = el.scrollTop + (editorRect.top - viewerRect.top);
+							el.scrollTop = Math.max(
+								0,
+								textTop + mirror.topOfLine(line) - (anchor.editorDelta ?? 0) + padTop
+							);
+						} finally {
+							mirror.dispose();
+						}
 						return;
 					}
 				}
@@ -444,9 +457,11 @@
 						if (text.includes(anchor.viewerSnippet)) {
 							const viewerRect = el.getBoundingClientRect();
 							const r = (node as HTMLElement).getBoundingClientRect();
+							// Signed delta: the anchor line sat `delta` below
+							// the editor's viewport top; reproduce that here.
 							el.scrollTop = Math.max(
 								0,
-								el.scrollTop + (r.top - viewerRect.top) - (anchor.viewerDelta ?? 0)
+								el.scrollTop + (r.top - viewerRect.top) + (anchor.viewerDelta ?? 0)
 							);
 							return;
 						}

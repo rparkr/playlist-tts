@@ -1,34 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
 	collapseWs,
-	visualWidth,
-	rowsForLine,
-	rowsAbove,
-	lineForRow,
 	lineForCharIndex,
 	stripMarkdownForMatch,
 	snippetForSourceLine,
 	nearestIndex,
-	candidateLines
+	candidateLines,
+	lineStartOffsets
 } from './scrollAnchor';
 
 describe('scroll anchors', () => {
-	it('measures visual rows with tab expansion and wrapping', () => {
-		expect(visualWidth('ab\tc')).toBe(2 + 6 + 1);
-		expect(rowsForLine('', 80)).toBe(1);
-		expect(rowsForLine('x'.repeat(80), 80)).toBe(1);
-		expect(rowsForLine('x'.repeat(81), 80)).toBe(2);
-		expect(rowsAbove(['a', 'b'.repeat(161), 'c'], 2, 80)).toBe(1 + 3);
-		expect(lineForRow(['a', 'b'.repeat(161), 'c'], 0, 80)).toBe(0);
-		expect(lineForRow(['a', 'b'.repeat(161), 'c'], 1, 80)).toBe(1);
-		expect(lineForRow(['a', 'b'.repeat(161), 'c'], 3, 80)).toBe(1);
-		expect(lineForRow(['a', 'b'.repeat(161), 'c'], 4, 80)).toBe(2);
-	});
-
-	it('maps char offsets to logical lines', () => {
+	it('maps char offsets to logical lines and line starts', () => {
 		expect(lineForCharIndex('ab\ncd\nef', 0)).toBe(0);
 		expect(lineForCharIndex('ab\ncd\nef', 4)).toBe(1);
 		expect(lineForCharIndex('ab\ncd\nef', 99)).toBe(2);
+		expect(lineStartOffsets(['ab', 'cd', 'ef'])).toEqual([0, 3, 6]);
 	});
 
 	it('strips markers so source lines match rendered text', () => {
@@ -52,7 +38,7 @@ describe('scroll anchors', () => {
 		expect(candidateLines(lines, 'absent', 0)).toEqual([]);
 	});
 
-	it('round-trips every logical line through visual rows', () => {
+	it('round-trips anchor snippets through invented book-like text', () => {
 		// Synthetic stand-in for book text: empty lines, short item-like
 		// lines, tab-indented lines, and very long prose lines (800+ chars).
 		// All content below is invented for the test — no source excerpts.
@@ -71,16 +57,13 @@ describe('scroll anchors', () => {
 			long.repeat(16).trim(),
 			'Page 23.'
 		];
-		// Narrow (70 cols) and wide (160 cols) editors alike: each logical
-		// line maps to visual rows and back to itself.
-		for (const cpl of [70, 160]) {
-			for (let L = 0; L < lines.length; L++) {
-				const R = rowsAbove(lines, L, cpl);
-				expect(lineForRow(lines, R, cpl)).toBe(L);
-			}
-		}
-		// Map-style items are findable by their rendered snippet.
-		expect(candidateLines(lines, 'Harbor Hill', 0)).not.toEqual([]);
-		expect(candidateLines(lines, 'STORAGE ROOM', 0)).not.toEqual([]);
+		// Source lines locate by snippet: exact line for unique text, and
+		// the nearer occurrence for repeats (map markers, page numbers).
+		const harbor = candidateLines(lines, 'Harbor Hill', 0);
+		expect(harbor.length).toBe(1);
+		expect(lines[harbor[0]]).toBe('Harbor Hill');
+		expect(candidateLines(lines, 'STORAGE ROOM', 0).length).toBe(1);
+		const pages = candidateLines(lines, 'Page 2', 99);
+		expect(pages[0]).toBe(lines.length - 1);
 	});
 });

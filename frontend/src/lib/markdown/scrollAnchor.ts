@@ -14,41 +14,6 @@ export function collapseWs(text: string): string {
 	return text.replace(/\s+/g, ' ').trim();
 }
 
-/** Visual columns of a source line with tab expansion. */
-export function visualWidth(line: string, tabSize = 8): number {
-	let w = 0;
-	for (const ch of line) {
-		if (ch === '\t') w += tabSize - (w % tabSize);
-		else w += 1;
-	}
-	return w;
-}
-
-/** Visual rows a logical line occupies in a soft-wrapping mono textarea. */
-export function rowsForLine(line: string, charsPerRow: number, tabSize = 8): number {
-	if (charsPerRow <= 0) return 1;
-	return Math.max(1, Math.ceil(visualWidth(line, tabSize) / charsPerRow));
-}
-
-/** Total visual rows above logical line `L` (0-based). */
-export function rowsAbove(lines: string[], L: number, charsPerRow: number, tabSize = 8): number {
-	let rows = 0;
-	for (let i = 0; i < Math.max(0, Math.min(L, lines.length)); i++) {
-		rows += rowsForLine(lines[i], charsPerRow, tabSize);
-	}
-	return rows;
-}
-
-/** Logical line index holding visual row `R` (0-based, clamped). */
-export function lineForRow(lines: string[], R: number, charsPerRow: number, tabSize = 8): number {
-	let rows = 0;
-	for (let i = 0; i < lines.length; i++) {
-		rows += rowsForLine(lines[i], charsPerRow, tabSize);
-		if (rows > R) return i;
-	}
-	return Math.max(0, lines.length - 1);
-}
-
 /** Logical line index holding char offset `idx` (clamped). */
 export function lineForCharIndex(text: string, idx: number): number {
 	const clamped = Math.max(0, Math.min(idx, text.length));
@@ -112,4 +77,97 @@ export function candidateLines(lines: string[], snippet: string, guessLine: numb
 	}
 	hits.sort((a, b) => Math.abs(a - guessLine) - Math.abs(b - guessLine));
 	return hits;
+}
+
+/** Line-start char offsets for `lines` (as joined by `\n`). */
+export function lineStartOffsets(lines: string[]): number[] {
+	const out: number[] = [];
+	let acc = 0;
+	for (const line of lines) {
+		out.push(acc);
+		acc += line.length + 1;
+	}
+	return out;
+}
+
+/** Exact logical-line layout via an off-screen mirror of a soft-wrap textarea.
+ *
+ * Font arithmetic (canvas `measureText` over fallback stacks) drifts a row or
+ * two per hundred lines — pages off in a book. The browser already lays the
+ * text out; a hidden mirror with identical width/font/wrap exposes each
+ * logical line's true pixel top through `Range` caret rects. Build per
+ * viewer↔editor swap (not per keystroke) and `dispose()` after.
+ */
+export interface LineMirror {
+	/** Pixel top of logical line `L` (clamped) relative to the text start. */
+	topOfLine(L: number): number;
+	/** Logical line holding `scrollTop` pixels (clamped). */
+	lineAtScroll(scrollTop: number): number;
+	/** Remove the mirror from the document. */
+	dispose(): void;
+}
+
+export function createLineMirror(
+	textarea: HTMLTextAreaElement,
+	lines: string[]
+): LineMirror | null {
+	try {
+		const style = getComputedStyle(textarea);
+		const lineHeight = parseFloat(style.lineHeight);
+		if (!Number.isFinite(lineHeight) || lineHeight <= 0) return null;
+		const padL = parseFloat(style.paddingLeft) || 0;
+		const padR = parseFloat(style.paddingRight) || 0;
+		const contentWidth = textarea.clientWidth - padL - padR;
+		if (!Number.isFinite(contentWidth) || contentWidth <= 0) return null;
+		const mirror = document.createElement('div');
+		mirror.setAttribute('aria-hidden', 'true');
+		mirror.style.cssText =
+			'position:fixed;left:-99999px;top:0;visibility:hidden;pointer-events:none;' +
+			`width:${contentWidth}px;font:${style.font};line-height:${style.lineHeight};` +
+			`white-space:${style.whiteSpace};word-break:${style.wordBreak};` +
+			`overflow-wrap:${style.overflowWrap};letter-spacing:${style.letterSpacing};` +
+			`tab-size:${style.tabSize};padding:0;border:0;margin:0;`;
+		mirror.textContent = lines.join('\n');
+		document.body.appendChild(mirror);
+		const node = mirror.firstChild;
+		const starts = lineStartOffsets(lines);
+		const range = document.createRange();
+		// Raw caret tops; blank lines yield no rects (holes), so backfill
+		// from the next known top — an empty pre-wrap line is one row.
+		const raw: number[] = new Array(lines.length).fill(-1);
+		if (node) {
+			const textLen = (node.textContent ?? '').length;
+			const mTop = mirror.getBoundingClientRect().top;
+			for (let i = 0; i < lines.length; i++) {
+				range.setStart(node, Math.min(starts[i], textLen));
+				range.collapse(true);
+				const rects = range.getClientRects();
+				if (rects.length > 0) raw[i] = rects[0].top - mTop;
+			}
+		}
+		const bottom = mirror.scrollHeight;
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (raw[i] < 0) raw[i] = (i + 1 < lines.length ? raw[i + 1] : bottom) - lineHeight;
+		}
+		const topOfLine = (L: number): number => raw[Math.max(0, Math.min(L, raw.length - 1))] ?? 0;
+		return {
+			topOfLine,
+			lineAtScroll(scrollTop: number): number {
+				const s = Math.max(0, scrollTop);
+				let lo = 0;
+				let hi = lines.length - 1;
+				while (lo < hi) {
+					const mid = Math.floor((lo + hi + 1) / 2);
+					if (topOfLine(mid) <= s + 0.5) lo = mid;
+					else hi = mid - 1;
+				}
+				return lo;
+			},
+			dispose() {
+				mirror.remove();
+			}
+		};
+	} catch {
+		return null;
+	}
 }
