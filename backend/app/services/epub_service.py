@@ -1,14 +1,19 @@
-"""Stateless ePub conversion — book chapters to Markdown via `trafilatura`.
+"""Stateless ePub conversion — book chapters to Markdown.
 
 No database: unzips the ePub (stdlib `zipfile`), walks the OPF spine in
-order, extracts each chapter's XHTML with `trafilatura` (`favor_recall`, so
-lists survive), and concatenates the chapters under `##` headers.
+order, renders each chapter's XHTML with `markdownify`, and concatenates
+the chapters under `##` headers.
 
-Images are kept, not dropped: each chapter `<img>` is swapped for a text
-sentinel before extraction (so `trafilatura` preserves its position), then
-swapped back to a `![alt](path)` ref. The referenced image binaries are
-returned alongside the Markdown; the frontend persists them in IndexedDB
-and resolves the relative refs at render time.
+Spine chapters skip `readability`: unlike web pages they contain no
+boilerplate to remove — they *are* the content — and its stripping
+heuristic can discard short lists, tables, or sparse chapters. Direct
+rendering keeps full recall.
+
+Images are kept, not dropped: `markdownify` renders each `<img>` as an
+`![alt](src)` ref, whose `src` is resolved against the chapter location
+and rewritten to the OPF-relative path. The referenced image binaries
+are returned alongside the Markdown; the frontend persists them in
+IndexedDB and resolves the relative refs at render time.
 
 Stateless and Cloud Run-compatible (nothing stored server-side). Rejects
 DRM-encrypted books (`META-INF/encryption.xml`) with 422.
@@ -21,14 +26,11 @@ import zipfile
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
 
-import trafilatura
+from backend.app.services.html_to_markdown import render_markdown
 
 EPUB_MAX_BYTES = 100 * 1024 * 1024
 
-_IMAGE_SENTINEL_RE = re.compile(r"^EPUBIMAGE(\d+)PLACEHOLDER\s*$", re.MULTILINE)
-_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
-_IMG_SRC_RE = re.compile(r"""\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_IMG_ALT_RE = re.compile(r"""\balt\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 _HEADING_RE = re.compile(r"<h([1-3])\b[^>]*>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -85,13 +87,6 @@ def _text_of(el: ET.Element | None) -> str:
     if el is None:
         return ""
     return "".join(el.itertext()).strip()
-
-
-def _unquote(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
 
 
 def _opf_rootfile(data: bytes) -> str:
@@ -152,26 +147,6 @@ def _chapter_title(raw_html: str, ncx_label: str | None, fallback: str) -> str:
     return fallback.replace("_", " ").replace("-", " ").strip().title() or fallback
 
 
-def _swap_images(raw_html: str) -> tuple[str, list[tuple[str, str]]]:
-    """Replace `<img>` tags with positional text sentinels.
-
-    Returns the rewritten HTML and the `(src, alt)` pairs in order.
-    """
-
-    found: list[tuple[str, str]] = []
-
-    def _repl(match: re.Match[str]) -> str:
-        tag = match.group(0)
-        src_m = _IMG_SRC_RE.search(tag)
-        alt_m = _IMG_ALT_RE.search(tag)
-        src = _unquote(src_m.group(1)) if src_m else ""
-        alt = _unquote(alt_m.group(1)) if alt_m else ""
-        found.append((src, alt))
-        return f"<p>EPUBIMAGE{len(found) - 1}PLACEHOLDER</p>"
-
-    return _IMG_TAG_RE.sub(_repl, raw_html), found
-
-
 def _resolve_chapter_path(src: str, chapter_dir: str, opf_dir: str) -> str | None:
     """Resolve an image `src` to a zip path, relative to the OPF directory."""
     if not src or src.startswith(("data:", "http://", "https://", "mailto:")):
@@ -187,6 +162,42 @@ def _resolve_chapter_path(src: str, chapter_dir: str, opf_dir: str) -> str | Non
     return None
 
 
+def _resolve_image_refs(
+    markdown: str,
+    zf: zipfile.ZipFile,
+    chapter_dir: str,
+    opf_dir: str,
+    media_by_href: dict[str, str],
+    images: dict[str, EpubImageData],
+) -> str:
+    """Resolve Markdown `![alt](src)` refs to OPF-relative paths.
+
+    Collects each resolvable image binary into `images`; unresolvable
+    refs (remote URLs, missing files) are dropped.
+    """
+
+    def _repl(match: re.Match[str]) -> str:
+        alt, src = match.group(1), match.group(2).strip()
+        if src.startswith("<") and src.endswith(">"):
+            src = src[1:-1].strip()
+        resolved = _resolve_chapter_path(src, chapter_dir, opf_dir)
+        if resolved is None:
+            return ""
+        img_zip = (opf_dir + "/" + resolved) if opf_dir else resolved
+        try:
+            blob = zf.read(img_zip)
+        except KeyError:
+            return ""
+        media = media_by_href.get(resolved, "")
+        images.setdefault(
+            resolved, EpubImageData(path=resolved, media_type=media or "image/png", data=blob)
+        )
+        alt_text = alt.strip() or posixpath.basename(resolved)
+        return f"![{alt_text}]({resolved})"
+
+    return _MD_IMAGE_RE.sub(_repl, markdown)
+
+
 def _starts_with_heading(markdown: str, label: str) -> bool:
     """True when the text already opens with an equivalent `#` heading."""
     first = next((ln for ln in markdown.split("\n") if ln.strip()), "")
@@ -196,33 +207,13 @@ def _starts_with_heading(markdown: str, label: str) -> bool:
     return bool(heading) and heading == label.strip().rstrip(":").lower()
 
 
-def _sentinel_to_ref(
-    idx: int,
-    found: list[tuple[str, str]],
-    zf: zipfile.ZipFile,
-    chapter_dir: str,
-    opf_dir: str,
-    media_by_href: dict[str, str],
-    images: dict[str, EpubImageData],
-) -> str:
-    """Resolve one image sentinel to a `![alt](path)` ref (or drop it)."""
-    if idx >= len(found):
-        return ""
-    src, alt = found[idx]
-    resolved = _resolve_chapter_path(src, chapter_dir, opf_dir)
-    if resolved is None:
-        return ""
-    img_zip = (opf_dir + "/" + resolved) if opf_dir else resolved
-    try:
-        blob = zf.read(img_zip)
-    except KeyError:
-        return ""
-    media = media_by_href.get(resolved, "")
-    images.setdefault(
-        resolved, EpubImageData(path=resolved, media_type=media or "image/png", data=blob)
-    )
-    alt_text = alt.strip() or posixpath.basename(resolved)
-    return f"![{alt_text}]({resolved})"
+def _strip_leading_heading(markdown: str) -> str:
+    """Drop the first non-blank line (an ATX heading the caller matched)."""
+    lines = markdown.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip():
+            return "\n".join(lines[i + 1 :]).strip()
+    return ""
 
 
 def convert_epub(data: bytes) -> EpubResult:
@@ -309,33 +300,25 @@ def convert_epub(data: bytes) -> EpubResult:
         chapter_key = _rel(zip_path)
         label = _chapter_title(raw_html, labels.get(chapter_key), posixpath.basename(rel_href))
 
-        swapped, found = _swap_images(raw_html)
-        markdown = (
-            trafilatura.extract(
-                swapped,
-                output_format="markdown",
-                include_formatting=True,
-                include_links=True,
-                include_tables=True,
-                include_images=True,
-                with_metadata=False,
-                favor_recall=True,
-            )
-            or ""
-        )
-
-        markdown = _IMAGE_SENTINEL_RE.sub(
-            lambda match, _found=found, _dir=chapter_dir: _sentinel_to_ref(
-                int(match.group(1)), _found, zf, _dir, opf_dir, media_by_href, images
-            ),
-            markdown,
+        try:
+            markdown = render_markdown(raw_html)
+        except Exception:
+            markdown = ""
+        seen_images = len(images)
+        markdown = _resolve_image_refs(
+            markdown, zf, chapter_dir, opf_dir, media_by_href, images
         ).strip()
-        # Image-only pages (cover art): trafilatura yields nothing but the
-        # sentinels still resolve to refs.
-        if not markdown and not found:
+        # Image-only pages (cover art): readability yields an empty body,
+        # but the kept `<img>` refs still resolve above.
+        if not markdown and len(images) == seen_images:
             continue
         if markdown and label != title and not _starts_with_heading(markdown, label):
             markdown = f"## {label}\n\n{markdown}"
+        elif markdown and label != title:
+            # `readability` keeps the chapter's own `<h1>` — fold it into
+            # the `##` label header so chapters stay uniformly nested.
+            rest = _strip_leading_heading(markdown)
+            markdown = f"## {label}\n\n{rest}" if rest else f"## {label}"
         elif not markdown:
             markdown = f"## {label}" if label != title else ""
             if not markdown:

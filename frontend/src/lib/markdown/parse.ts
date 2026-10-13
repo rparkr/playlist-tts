@@ -104,7 +104,7 @@ const HR_RE = /^\s*([-*_]\s*){3,}\s*$/;
 const BLOCKQUOTE_RE = /^\s*>/;
 const INDENTED_RE = /^(?:\t| {4})/;
 
-/** De-indent isolated indented lines (trafilatura centers titles with tabs).
+/** De-indent isolated indented lines (some extractors center titles with tabs).
  *
  * A single tab/space-indented line surrounded by blanks is a centered
  * title, not code — fully left-trim so it renders (and speaks) as prose.

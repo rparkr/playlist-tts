@@ -1,23 +1,26 @@
-"""Stateless article fetching — URL to Markdown via `trafilatura`.
+"""Stateless article fetching — URL to Markdown via `readability` + `markdownify`.
 
 No database: downloads the page, extracts readable Markdown, returns it.
 The frontend persists the result in IndexedDB as a playlist item. Runs
 fine on scale-to-zero hosts (Cloud Run) since nothing is stored server-side.
 
-`trafilatura.fetch_url` has no timeout/size knobs, so the download uses
-`httpx2` directly (20s timeout, ~5MB cap, custom UA) and `trafilatura` only
-for extraction.
+The download uses `httpx2` directly (20s timeout, ~5MB cap, custom UA);
+extraction is `readability-lxml` (content isolation) followed by
+`markdownify` (HTML → Markdown). Page metadata (author/site/date) comes
+from the page's own `<meta>` tags via stdlib parsing.
 """
 
 import ipaddress
 import re
 import socket
+from contextlib import suppress
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import httpx2
-import trafilatura
-from trafilatura.metadata import extract_metadata
+
+from backend.app.services.html_to_markdown import html_to_markdown
 
 FETCH_TIMEOUT_SECONDS = 20
 FETCH_MAX_BYTES = 5 * 1024 * 1024
@@ -142,11 +145,82 @@ async def _download_html(url: str) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
-def _clean_article_markdown(markdown: str, title: str | None) -> str:
-    """Tidy `trafilatura` output for the reader.
+class _MetaParser(HTMLParser):
+    """Collect `<meta>` content by name/property plus the `<title>` text."""
 
-    - Drop empty ATX headings (`#` followed by whitespace only) — trafilatura
-      emits these around extracted titles, leaving stray `#` + blank lines.
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: dict[str, str] = {}
+        self._in_title = False
+        self._title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.lower()
+        if name == "title":
+            self._in_title = True
+            return
+        if name != "meta":
+            return
+        lookup = {k.lower(): (v or "") for k, v in attrs}
+        key = lookup.get("name") or lookup.get("property") or lookup.get("itemprop")
+        content = lookup.get("content", "").strip()
+        if key and content and key.strip().lower() not in self.values:
+            self.values[key.strip().lower()] = content
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_parts.append(data)
+
+    @property
+    def title(self) -> str | None:
+        """Raw `<title>` text, if any."""
+        text = "".join(self._title_parts).strip()
+        return text or None
+
+
+def _first_meta(values: dict[str, str], *keys: str) -> str | None:
+    """First present metadata value across candidate key names."""
+    for key in keys:
+        value = values.get(key)
+        if value:
+            return value
+    return None
+
+
+def _extract_meta(html: str) -> dict[str, str | None]:
+    """Pull title/author/site/date/excerpt hints from the page's meta tags."""
+    parser = _MetaParser()
+    with suppress(Exception):
+        parser.feed(html[:1_000_000])
+    values = parser.values
+    return {
+        "title": _first_meta(values, "og:title", "twitter:title") or parser.title,
+        "author": _first_meta(
+            values, "author", "article:author", "og:author", "twitter:creator", "byl"
+        ),
+        "site": _first_meta(values, "og:site_name", "application-name"),
+        "date": _first_meta(
+            values,
+            "article:published_time",
+            "article:modified_time",
+            "og:published_time",
+            "datepublished",
+            "date",
+            "publish_date",
+            "dc.date.issued",
+        ),
+        "excerpt": _first_meta(values, "description", "og:description", "twitter:description"),
+    }
+
+
+def _clean_article_markdown(markdown: str, title: str | None) -> str:
+    """Tidy extracted Markdown for the reader.
+
+    - Drop empty ATX headings (`#` followed by whitespace only).
     - Collapse 3+ newlines to a paragraph break.
     - Ensure the article title leads as an `# h1` so listeners hear the
       article name when it starts (and to tell consecutive items apart).
@@ -168,25 +242,15 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
 
 def _extract_markdown(html: str, url: str) -> ArticleResult:
-    """Run `trafilatura` extraction and metadata parsing (sync, CPU-bound)."""
-    markdown = trafilatura.extract(
-        html,
-        url=url,
-        output_format="markdown",
-        include_formatting=True,
-        include_links=True,
-        include_tables=True,
-        include_images=True,
-        with_metadata=False,
-    )
+    """Run `readability` + `markdownify` extraction and metadata parsing."""
+    try:
+        markdown, readable_title = html_to_markdown(html, url=url)
+    except Exception:
+        raise ArticleFetchError("No readable article content found at that URL.", 422) from None
     if not markdown or not markdown.strip():
         raise ArticleFetchError("No readable article content found at that URL.", 422)
-    meta = None
-    try:
-        meta = extract_metadata(html, default_url=url)
-    except Exception:
-        meta = None
-    title = getattr(meta, "title", None) or None
+    meta = _extract_meta(html)
+    title = readable_title or meta["title"]
     cleaned = _clean_article_markdown(markdown, title)
     if not cleaned:
         raise ArticleFetchError("No readable article content found at that URL.", 422)
@@ -195,9 +259,9 @@ def _extract_markdown(html: str, url: str) -> ArticleResult:
     return ArticleResult(
         markdown=cleaned,
         title=title,
-        author=getattr(meta, "author", None) or None,
-        site=getattr(meta, "sitename", None) or None,
-        date=getattr(meta, "date", None) or None,
+        author=meta["author"],
+        site=meta["site"],
+        date=meta["date"],
         excerpt=excerpt_source[:280] if excerpt_source else None,
         url=url,
         domain=domain.lower(),

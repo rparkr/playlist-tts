@@ -61,7 +61,7 @@ export function speakable(text: string): string {
 		.replace(/…/g, '...')
 		.replace(/—/g, ', ')
 		.replace(/–/g, ', ')
-		// Stray pipes from flattened table soup (trafilatura) read as pauses.
+		// Stray pipes from flattened table text read as pauses.
 		.replace(/\|/g, ', ');
 	t = t.replace(URL_RE, (m) => {
 		const host = m

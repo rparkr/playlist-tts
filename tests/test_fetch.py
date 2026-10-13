@@ -70,7 +70,7 @@ def test_article_markdown_leads_with_h1_title():
 
 
 def test_article_markdown_drops_empty_headings_and_blank_runs():
-    """Trafilatura's stray `#` + whitespace and 3+ newline runs are tidied."""
+    """Stray `#` + whitespace and 3+ newline runs are tidied."""
     cleaned = article_service._clean_article_markdown(
         "# \n\t\n\t\tWind Farms\n\n\n\nBody text here.", "Wind Farms"
     )

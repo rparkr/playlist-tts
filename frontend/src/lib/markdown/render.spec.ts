@@ -72,6 +72,21 @@ describe('renderSectionBlocks', () => {
 		expect(html.match(/data-sentence-idx="\d+"/g)?.length).toBe(1);
 	});
 
+	it('highlights fenced code with a known language', () => {
+		const { html } = renderDoc('```js\nconst x = 1;\n```\n\nAfter code here.');
+		expect(html).toContain('<code class="hljs language-js">');
+		// Token spans from highlight.js, not sentence spans.
+		expect(html).toContain('hljs-');
+		expect(html.match(/data-sentence-idx="\d+"/g)?.length).toBe(1);
+	});
+
+	it('renders unknown-language fences as plain escaped code', () => {
+		const { html } = renderDoc('```nosuchlang\n<a>&"\n```\n\nAfter code here.');
+		expect(html).toContain('<pre><code>');
+		expect(html).not.toContain('hljs-');
+		expect(html).toContain('&lt;a&gt;');
+	});
+
 	it('renders links as anchors and keeps the sentence clickable', () => {
 		const { html } = renderDoc('Read [the docs](https://example.com/x) today.');
 		expect(html).toContain('<a href="https://example.com/x"');
@@ -94,12 +109,23 @@ describe('renderSectionBlocks', () => {
 });
 
 describe('injectSentences', () => {
-	it('falls back to plain HTML on text mismatch', () => {
+	it('falls back to plain HTML on text mismatch but still advances the index', () => {
 		const el = document.createElement('p');
 		el.textContent = 'Totally different words here.';
 		const next = injectSentences(el, ['Unrelated sentence here.'], 7);
-		expect(next).toBe(7);
+		expect(next).toBe(8);
 		expect(el.querySelector('[data-sentence-idx]')).toBeNull();
+	});
+
+	it('keeps later spans aligned past an unmappable table', () => {
+		const { html, sections } = renderDoc(
+			'First sentence here.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nSecond sentence here.'
+		);
+		const total = getGlobalSentences(sections).length;
+		// The table owns the middle sentences without spans; the final
+		// sentence keeps its global index instead of shifting down.
+		const span = html.match(/<span[^>]*data-sentence-idx="(\d+)"[^>]*>Second sentence here\./);
+		expect(span?.[1]).toBe(String(total - 1));
 	});
 
 	it('wraps sentences across inline element boundaries', () => {
@@ -125,7 +151,7 @@ describe('sanitized output', () => {
 
 describe('real article fixture', () => {
 	it('renders the Gemma report with links and spans (tables arrive as text soup)', () => {
-		// NOTE: trafilatura flattens GFM tables to plain text, so no
+		// NOTE: extracted tables may arrive as plain text, so no
 		// `<table>` is expected here; pipe tables are covered above.
 		const md = article('gemma-4-technical-report.md');
 		const { html, sections } = renderDoc(md);
