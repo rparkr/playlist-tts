@@ -7,7 +7,7 @@
  * used for new OCR jobs and for the pre-doc UI.
  */
 
-export type TtsEngine = 'device' | 'pocket' | 'browser';
+export type TtsEngine = 'device' | 'pocket';
 
 export const LS_KEYS = {
 	activeDocId: 'tts_active_doc_id',
@@ -39,7 +39,7 @@ export interface PostprocessFlags {
 export function parseEngine(value: string | null | undefined): TtsEngine | null {
 	if (value === 'pocket' || value === 'backend') return 'pocket';
 	if (value === 'device' || value === 'builtin') return 'device';
-	if (value === 'browser' || value === 'local') return 'browser';
+	// Retired: 'browser'/'local' (Kokoro WASM engine, removed) → null → default.
 	return null;
 }
 
@@ -118,25 +118,23 @@ export function progressKey(docId: string): string {
 export interface VoiceByEngine {
 	device: string | null;
 	pocket: string | null;
-	browser: string | null;
 }
 
-/** Parse a stored per-engine voice map; return null when absent/invalid. */
+/** Parse a stored per-engine voice map; return null when absent/invalid.
+ * A retired `browser` slot in older payloads is ignored (no migration). */
 export function parseVoiceByEngine(value: string | null | undefined): VoiceByEngine | null {
 	if (!value) return null;
 	try {
 		const p = JSON.parse(value) as Partial<VoiceByEngine>;
 		const device = p.device ?? null;
 		const pocket = p.pocket ?? null;
-		const browser = p.browser ?? null;
 		if (
 			(device !== null && typeof device !== 'string') ||
-			(pocket !== null && typeof pocket !== 'string') ||
-			(browser !== null && typeof browser !== 'string')
+			(pocket !== null && typeof pocket !== 'string')
 		) {
 			return null;
 		}
-		return { device, pocket, browser };
+		return { device, pocket };
 	} catch {
 		return null;
 	}
@@ -164,8 +162,7 @@ export function withVoiceForEngine(
 ): VoiceByEngine {
 	const next: VoiceByEngine = {
 		device: map?.device ?? null,
-		pocket: map?.pocket ?? null,
-		browser: map?.browser ?? null
+		pocket: map?.pocket ?? null
 	};
 	next[engine] = voiceId;
 	return next;

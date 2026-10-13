@@ -1,14 +1,7 @@
 <script lang="ts">
-	import { Check, Pencil, Trash2, X, Download } from 'lucide-svelte';
+	import { Check, Pencil, Trash2, X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
-	import { KOKORO_MODEL_BYTES, KOKORO_VOICES, type KokoroProgress } from '$lib/tts/kokoro';
 	import { sortVoiceOptions, type TtsEngine } from '$lib/settings';
-
-	function formatBytes(n: number): string {
-		if (n < 1024) return `${n} B`;
-		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-		return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-	}
 
 	interface Props {
 		open: boolean;
@@ -26,11 +19,6 @@
 		onRateChange: (rate: number) => void;
 		onVoiceFile: (e: Event) => void;
 		isBackendGenerating: boolean;
-		kokoroReady: boolean;
-		kokoroDownloading: boolean;
-		kokoroProgress: KokoroProgress | null;
-		kokoroError: string | null;
-		onDownloadKokoro: () => void;
 	}
 
 	let {
@@ -48,12 +36,7 @@
 		synthRate,
 		onRateChange,
 		onVoiceFile,
-		isBackendGenerating,
-		kokoroReady,
-		kokoroDownloading,
-		kokoroProgress,
-		kokoroError,
-		onDownloadKokoro
+		isBackendGenerating
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
@@ -163,48 +146,10 @@
 						>
 							Pocket TTS
 						</button>
-						<button
-							onclick={() => onEngineChange('browser')}
-							aria-label="Browser Kokoro"
-							class="px-3 py-1.5 text-sm font-medium transition-colors {ttsEngine === 'browser'
-								? 'bg-sky-600 text-white'
-								: 'bg-slate-700 text-slate-300 hover:bg-slate-600'}"
-						>
-							Browser
-						</button>
 					</div>
 				</div>
 				{#if ttsEngine !== 'device' && isBackendGenerating}
 					<div class="text-xs text-slate-400 -mt-3">Generating…</div>
-				{/if}
-				{#if ttsEngine === 'browser'}
-					<div class="flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-900/60 p-3">
-						<span class="text-xs font-medium text-slate-300">Browser voice model ({formatBytes(KOKORO_MODEL_BYTES)}, one-time)</span>
-						{#if kokoroReady}
-							<div class="text-xs text-emerald-400">✓ Downloaded — works offline, no server needed.</div>
-						{:else if kokoroDownloading}
-							<div class="h-2 rounded bg-slate-700 overflow-hidden">
-								<div
-									class="h-full bg-sky-500 transition-all"
-									style="width: {kokoroProgress && kokoroProgress.total > 0 ? Math.round((kokoroProgress.loaded / kokoroProgress.total) * 100) : 0}%"
-								></div>
-							</div>
-							<div class="text-xs text-slate-400 tabular-nums">
-								{kokoroProgress ? `${formatBytes(kokoroProgress.loaded)} / ${formatBytes(kokoroProgress.total)}` : 'Starting…'}
-							</div>
-						{:else}
-							<button
-								onclick={onDownloadKokoro}
-								class="inline-flex items-center gap-1.5 self-start text-xs px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium"
-							>
-								<Download size={13} /> Download model
-							</button>
-						{/if}
-						{#if kokoroError}
-							<div class="text-xs text-red-400">{kokoroError}</div>
-						{/if}
-						<div class="text-xs text-slate-500">Runs Kokoro in this tab (WebAssembly). Two top-grade voices; the model stays cached for offline use.</div>
-					</div>
 				{/if}
 
 				<!-- Voice -->
@@ -231,12 +176,6 @@
 							{#if synthVoices.length === 0}
 								<option value="">Default</option>
 							{/if}
-						</optgroup>
-					{:else if ttsEngine === 'browser'}
-						<optgroup label="Kokoro voices (browser)">
-							{#each KOKORO_VOICES as v}
-								<option value={v.id}>{v.label}</option>
-							{/each}
 						</optgroup>
 					{:else}
 						{#if sortedCustomVoices.length}
