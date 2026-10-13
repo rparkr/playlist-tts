@@ -242,14 +242,28 @@
 	// The view stays put while the active sentence is visible; once it moves
 	// off-page, scroll so it lands at the top of the viewer. Also syncs the
 	// rich-renderer highlight (injected spans are plain DOM, not Svelte).
+	// Exiting edit mode suppresses the scroll exactly once (see below): the
+	// transition effect restores the editor's position, and a smooth
+	// follow-scroll queued in the same flush would otherwise drag the view
+	// back to the active sentence.
+	let suppressFollowOnce = false;
 	$effect(() => {
 		const idx = globalIdx;
 		const viewer = viewerEl;
 		// Depend on the rendered output so fresh nodes get highlighted.
 		void richHtml;
 		void useRich;
-		if (isEditing || !viewer || totalSentences === 0) return;
+		if (isEditing || !viewer || totalSentences === 0) {
+			// Never leak a stale suppression into later follow-scrolls when
+			// the exit-triggered run bails before consuming it.
+			if (!isEditing) suppressFollowOnce = false;
+			return;
+		}
 		syncActiveHighlight(idx);
+		if (suppressFollowOnce) {
+			suppressFollowOnce = false;
+			return;
+		}
 		requestAnimationFrame(() => {
 			const el = viewer.querySelector(`[${SENTENCE_ATTR}="${idx}"]`) as HTMLElement | null;
 			if (!el) return;
@@ -279,6 +293,12 @@
 
 	export function prepareEditSwap(entering: boolean): void {
 		const scroller = viewerEl;
+		// Plain `let`, not `$state`: the follow-scroll effect consumes this
+		// without subscribing, so setting it never retriggers anything. Set
+		// before the parent flips `isEditing`, so the exit-triggered effect
+		// run sees it and skips its smooth scroll (which would otherwise
+		// fight the fraction restore below and yank to the active sentence).
+		if (!entering) suppressFollowOnce = true;
 		if (!scroller) {
 			pendingFraction = 0;
 			return;
