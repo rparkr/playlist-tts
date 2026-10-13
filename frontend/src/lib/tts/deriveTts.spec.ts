@@ -7,6 +7,7 @@ import {
 	chunkForSentence,
 	deriveTts,
 	extractCodeComments,
+	resolveCodeLanguage,
 	speakable,
 	splitLongSentence,
 	tableToRowRecords
@@ -79,6 +80,43 @@ describe('extractCodeComments', () => {
 	it('skips fences, shebangs, and comment-free blocks', () => {
 		expect(extractCodeComments('```python\nx = 1\ny = 2\n```')).toEqual([]);
 		expect(extractCodeComments('#!/usr/bin/env python\nx = 1')).toEqual([]);
+	});
+
+	it('captures trailing and block comments', () => {
+		const raw = '```js\nconst x = 1; // set the default\n/* multi\nline note */\nfoo();\n```';
+		expect(extractCodeComments(raw)).toEqual(['set the default', 'multi', 'line note']);
+	});
+
+	it('ignores markers inside strings and non-comment uses', () => {
+		const py = '```python\nurl = "http://example.com/x#frag"\nx = 1\n```';
+		expect(extractCodeComments(py)).toEqual([]);
+		// `#` starts a private field in JS, not a comment.
+		const js = '```js\nclass A {\n#count = 0;\n}\n```';
+		expect(extractCodeComments(js)).toEqual([]);
+	});
+
+	it('skips decorative rules and resolves shebangs', () => {
+		expect(extractCodeComments('```js\n// ======\n// real note\n```')).toEqual(['real note']);
+		expect(extractCodeComments('#!/bin/bash\n# deploy here\necho hi')).toEqual(['deploy here']);
+	});
+
+	it('detects unlabeled code and stays silent on unknown languages', () => {
+		expect(extractCodeComments('# Load weights\nmodel = load(path)\nprint(done)')).toEqual([
+			'Load weights'
+		]);
+		expect(extractCodeComments('```foobar\n# not a comment here\n```')).toEqual([]);
+		expect(extractCodeComments('Just some prose, no code at all.')).toEqual([]);
+	});
+
+	it('resolves languages from info strings, shebangs, and detection', () => {
+		expect(resolveCodeLanguage('```py\nx = 1\n```')).toBe('py');
+		expect(resolveCodeLanguage('#!/usr/bin/env node\nconsole.log(1)')).toBe('javascript');
+		expect(
+			resolveCodeLanguage(
+				'import os\nfrom pathlib import Path\n\n\ndef load(path):\n    # read it\n    return Path(path).read_text()'
+			)
+		).toBe('python');
+		expect(resolveCodeLanguage('Just some prose, no code at all.')).toBeNull();
 	});
 });
 

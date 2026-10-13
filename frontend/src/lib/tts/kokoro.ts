@@ -2,8 +2,8 @@
  *
  * No vendoring: the npm package (transformers.js + onnxruntime WASM) lazy-loads
  * on first use, and model bytes come from Hugging Face with transformers.js's
- * own Cache API persistence. Single voice (`af_heart`, the top-grade Kokoro
- * voice) keeps the picker and the download minimal (~86MB model + 0.5MB voice).
+ * own Cache API persistence. Two top-quality voices keep the picker and the
+ * download minimal (~86MB model + 0.5MB/voice).
  */
 
 export const KOKORO_MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';

@@ -21,6 +21,7 @@
  * - Over-long chunks split on natural breaks (`;`, `,`, parens, …).
  */
 
+import hljs from 'highlight.js/lib/common';
 import { getGlobalSentences, type Section } from '../markdown/parse';
 
 /** One TTS request: speakable text plus the global sentences it came from. */
@@ -120,23 +121,296 @@ export function splitLongSentence(text: string, max: number = MAX_TTS_CHUNK_CHAR
 
 const CODE_FENCE_RE = /^\s*```/;
 const SHEBANG_RE = /^\s*#!/;
-/** Leading comment markers across common languages (`#`, `//`, `--`, `%`,
- * `;`, `"`, `(*`, `<!--`). Only the remainder after the marker speaks. */
-const COMMENT_PREFIX_RE = /^\s*(?:#{1,3}|\/\/|--+|%%?|;;?|"|\(\*|<!--)\s*(.*?)\s*(?:\*\)|-->)?$/;
+/** `#!/usr/bin/env X` → comment-syntax key for common runtimes. */
+const SHEBANG_LANG: Record<string, string> = {
+	python: 'python',
+	python3: 'python',
+	bash: 'bash',
+	sh: 'bash',
+	zsh: 'bash',
+	fish: 'bash',
+	node: 'javascript',
+	deno: 'javascript',
+	bun: 'javascript',
+	ruby: 'ruby',
+	perl: 'perl',
+	php: 'php'
+};
+
+interface CodeCommentSyntax {
+	/** Whole-line and trailing comment markers (matched outside strings). */
+	line: string[];
+	/** Block comment delimiters (may span lines). */
+	block: [open: string, close: string][];
+}
+
+const C_FAMILY: CodeCommentSyntax = { line: ['//'], block: [['/*', '*/']] };
+const HASH_LINE: CodeCommentSyntax = { line: ['#'], block: [] };
+
+/** Comment syntax by lowercase language key (canonical ids and common
+ * aliases). Languages absent here contribute no comments — deterministic
+ * silence beats guessing markers for an unknown grammar. */
+const CODE_COMMENT_SYNTAX: Record<string, CodeCommentSyntax> = {
+	python: { line: ['#'], block: [['"""', '"""'], ["'''", "'''"]] },
+	py: { line: ['#'], block: [['"""', '"""'], ["'''", "'''"]] },
+	javascript: C_FAMILY,
+	js: C_FAMILY,
+	jsx: C_FAMILY,
+	typescript: C_FAMILY,
+	ts: C_FAMILY,
+	tsx: C_FAMILY,
+	java: C_FAMILY,
+	c: C_FAMILY,
+	h: C_FAMILY,
+	cpp: C_FAMILY,
+	'c++': C_FAMILY,
+	csharp: C_FAMILY,
+	'c#': C_FAMILY,
+	cs: C_FAMILY,
+	go: C_FAMILY,
+	rust: C_FAMILY,
+	rs: C_FAMILY,
+	swift: C_FAMILY,
+	kotlin: C_FAMILY,
+	kt: C_FAMILY,
+	scala: C_FAMILY,
+	dart: C_FAMILY,
+	json: { line: ['//'], block: [['/*', '*/']] },
+	php: { line: ['//', '#'], block: [['/*', '*/']] },
+	bash: HASH_LINE,
+	sh: HASH_LINE,
+	shell: HASH_LINE,
+	zsh: HASH_LINE,
+	fish: HASH_LINE,
+	dockerfile: HASH_LINE,
+	makefile: HASH_LINE,
+	mak: HASH_LINE,
+	cmake: HASH_LINE,
+	nginx: HASH_LINE,
+	yaml: HASH_LINE,
+	yml: HASH_LINE,
+	toml: HASH_LINE,
+	ruby: HASH_LINE,
+	rb: HASH_LINE,
+	perl: HASH_LINE,
+	pl: HASH_LINE,
+	r: HASH_LINE,
+	powershell: { line: ['#'], block: [['<#', '#>']] },
+	ps1: { line: ['#'], block: [['<#', '#>']] },
+	sql: { line: ['--'], block: [['/*', '*/']] },
+	lua: { line: ['--'], block: [['--[[', ']]']] },
+	haskell: { line: ['--'], block: [['{-', '-}']] },
+	ada: { line: ['--'], block: [] },
+	clojure: { line: [';'], block: [] },
+	lisp: { line: [';'], block: [] },
+	scheme: { line: [';'], block: [] },
+	elisp: { line: [';'], block: [] },
+	ini: { line: [';', '#'], block: [] },
+	matlab: { line: ['%'], block: [['%{', '%}']] },
+	octave: { line: ['%'], block: [['%{', '%}']] },
+	latex: { line: ['%'], block: [] },
+	tex: { line: ['%'], block: [] },
+	vim: { line: ['"'], block: [] },
+	css: { line: [], block: [['/*', '*/']] },
+	scss: C_FAMILY,
+	html: { line: [], block: [['<!--', '-->']] },
+	xml: { line: [], block: [['<!--', '-->']] },
+	vue: { line: [], block: [['<!--', '-->']] },
+	svelte: { line: [], block: [['<!--', '-->']] }
+};
+
+/** Candidate languages for `highlightAuto` fallback detection (filtered to
+ * grammars actually registered in the bundle). */
+const DETECT_SUBSET = [
+	'python',
+	'javascript',
+	'typescript',
+	'bash',
+	'sql',
+	'java',
+	'c',
+	'cpp',
+	'csharp',
+	'go',
+	'rust',
+	'swift',
+	'kotlin',
+	'ruby',
+	'perl',
+	'php',
+	'yaml',
+	'json',
+	'css',
+	'xml',
+	'lua',
+	'r',
+	'haskell',
+	'ini'
+].filter((id) => hljs.getLanguage(id));
+
+/** Resolve a fenced block's language key for comment extraction.
+ *
+ * Prefers the fence info string, then the shebang line, then
+ * `highlightAuto` over a small candidate set (relevance floor rejects
+ * prose). Returns null when the language is unknown — the block then
+ * contributes no comments rather than misread code. */
+export function resolveCodeLanguage(raw: string): string | null {
+	const lines = raw.split('\n');
+	const fence = lines.find((l) => CODE_FENCE_RE.test(l)) ?? '';
+	return resolveFromParts(parseFenceInfo(fence), lines.filter((l) => !CODE_FENCE_RE.test(l)));
+}
+
+/** Info-string language from a fence line (` ```py ` → `py`), if any. */
+function parseFenceInfo(fence: string): string | null {
+	const info = fence
+		.replace(/^\s*```+\s*/, '')
+		.trim()
+		.split(/\s+/)[0]
+		?.toLowerCase();
+	return info || null;
+}
+
+function resolveFromParts(fenceInfo: string | null, codeLines: string[]): string | null {
+	if (fenceInfo && hljs.getLanguage(fenceInfo)) return fenceInfo;
+	const firstCode = codeLines.find((l) => l.trim() !== '') ?? '';
+	const shebang = /^\s*#!\S*\b([A-Za-z0-9+#]+)\b/.exec(firstCode)?.[1]?.toLowerCase();
+	if (shebang && SHEBANG_LANG[shebang]) return SHEBANG_LANG[shebang];
+	const code = codeLines.join('\n');
+	if (!code.trim()) return null;
+	const detected = hljs.highlightAuto(code, DETECT_SUBSET);
+	if (detected.language && detected.relevance >= 3) return detected.language;
+	return null;
+}
+
+/** True when a comment body carries speakable words (skips decorative
+ * rules like `=====`, `-----`, `*****`). */
+function isSubstantiveComment(text: string): boolean {
+	return /[A-Za-z0-9]/.test(text);
+}
+
+/** Find the leftmost match of any token outside string literals.
+ *
+ * Tracks `'`, `"`, and backtick strings with backslash escapes so markers
+ * inside strings (URLs, `#` in `"a # b"`) never count. Tokens sharing a
+ * prefix must be longest-first so block opens win ties (`--[[` over `--`).
+ * Returns the token and its index, or null. */
+function earliestTokenOutsideStrings(
+	line: string,
+	tokens: string[]
+): { token: string; index: number } | null {
+	let quote: string | null = null;
+	let i = 0;
+	while (i < line.length) {
+		const ch = line[i];
+		if (quote !== null) {
+			if (ch === '\\') i += 2;
+			else {
+				if (ch === quote) quote = null;
+				i += 1;
+			}
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === '`') {
+			quote = ch;
+			i += 1;
+			continue;
+		}
+		for (const token of tokens) {
+			if (token && line.startsWith(token, i)) return { token, index: i };
+		}
+		i += 1;
+	}
+	return null;
+}
 
 /** Extract speakable comments from a fenced code block's raw source.
  *
- * Returns the comment bodies in order, without markers. Code itself never
- * speaks. Empty when the block holds no comments. */
+ * Language-aware: only that language's markers count, matched outside
+ * string literals, so `#private` fields in JS stay silent while `#`
+ * comments in Python speak. Captures full-line, trailing, and block
+ * comments in order; code itself never speaks. Empty when the language
+ * is unknown or the block holds no substantive comments. */
 export function extractCodeComments(raw: string): string[] {
-	const out: string[] = [];
+	// Each fenced region resolves its own language (a paste can hold
+	// several blocks); unfenced runs resolve together via shebang/auto.
+	interface Region {
+		fenceInfo: string | null;
+		lines: string[];
+	}
+	const regions: Region[] = [];
+	let cur: Region | null = null;
+	let inFence = false;
 	for (const line of raw.split('\n')) {
-		if (CODE_FENCE_RE.test(line) || SHEBANG_RE.test(line)) continue;
-		const m = COMMENT_PREFIX_RE.exec(line);
-		if (!m) continue;
-		const comment = m[1].trim();
-		if (!comment || CODE_FENCE_RE.test(comment)) continue;
-		out.push(comment);
+		if (CODE_FENCE_RE.test(line)) {
+			if (!inFence) {
+				if (cur) regions.push(cur);
+				cur = { fenceInfo: parseFenceInfo(line), lines: [] };
+				inFence = true;
+			} else {
+				if (cur) regions.push(cur);
+				cur = null;
+				inFence = false;
+			}
+			continue;
+		}
+		if (!cur) cur = { fenceInfo: null, lines: [] };
+		cur.lines.push(line);
+	}
+	if (cur) regions.push(cur);
+	return regions.flatMap((r) => extractFromLines(r.lines, resolveFromParts(r.fenceInfo, r.lines)));
+}
+
+/** Extract comments from de-fenced lines in a resolved language. */
+function extractFromLines(lines: string[], lang: string | null): string[] {
+	if (!lang) return [];
+	const syntax = CODE_COMMENT_SYNTAX[lang];
+	if (!syntax) return [];
+	const out: string[] = [];
+	const push = (body: string) => {
+		// JSDoc-style continuation stars carry no words of their own.
+		const clean = body.replace(/^\*\s?/, '').trim();
+		if (clean && isSubstantiveComment(clean)) out.push(clean);
+	};
+	let blockClose: string | null = null;
+	for (const line of lines) {
+		if (SHEBANG_RE.test(line)) continue;
+		let rest = line;
+		if (blockClose !== null) {
+			const closeLen = blockClose.length;
+			const end = rest.indexOf(blockClose);
+			if (end === -1) {
+				push(rest);
+				continue;
+			}
+			push(rest.slice(0, end));
+			blockClose = null;
+			rest = rest.slice(end + closeLen);
+			// Fall through: code after the close may hold a trailing comment.
+			if (!rest.trim()) continue;
+		}
+		const tokens = [...syntax.line, ...syntax.block.map(([open]) => open)].sort(
+			(a, b) => b.length - a.length
+		);
+		if (tokens.length === 0) continue;
+		const hit = earliestTokenOutsideStrings(rest, tokens);
+		if (!hit) continue;
+		const blockOpen = syntax.block.find(([open]) => open === hit.token);
+		if (blockOpen) {
+			const after = rest.slice(hit.index + hit.token.length);
+			const end = after.indexOf(blockOpen[1]);
+			if (end === -1) {
+				push(after);
+				blockClose = blockOpen[1];
+			} else {
+				push(after.slice(0, end));
+				const tail = after.slice(end + blockOpen[1].length);
+				// A line comment after the close still counts.
+				const tailHit = earliestTokenOutsideStrings(tail, syntax.line);
+				if (tailHit) push(tail.slice(tailHit.index + tailHit.token.length));
+			}
+		} else {
+			push(rest.slice(hit.index + hit.token.length));
+		}
 	}
 	return out;
 }

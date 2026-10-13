@@ -34,6 +34,26 @@ describe('reflowColumns', () => {
 		const out = reflowColumns(md);
 		expect(out).toContain('and continues here.');
 	});
+
+	it('keeps consecutive table rows in one block', () => {
+		const md = '| change | what it does |\n| --- | --- |\n| a | b |\n| c | d |';
+		const out = reflowColumns(md);
+		expect(out).toBe(md);
+	});
+
+	it('repairs blank lines between table rows', () => {
+		const md = '| change | what it does |\n\n| --- | --- |\n\n| a | b |';
+		const out = reflowColumns(md);
+		expect(out).toBe('| change | what it does |\n| --- | --- |\n| a | b |');
+	});
+
+	it('does not merge prose into a table run', () => {
+		const md = 'Intro text here.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nTrailing text here.';
+		const out = reflowColumns(md);
+		expect(out).toContain('| a | b |\n| --- | --- |\n| 1 | 2 |');
+		expect(out).toContain('Intro text here.');
+		expect(out).toContain('Trailing text here.');
+	});
 });
 
 describe('normalizeUppercase', () => {

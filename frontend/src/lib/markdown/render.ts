@@ -12,8 +12,37 @@
  * pipe syntax never survives cleaning) — readable, just not clickable.
  */
 
+import hljs from 'highlight.js/lib/common';
 import { marked } from 'marked';
 import type { BlockMeta } from './parse';
+
+/** Escape raw code text for the unhighlighted fallback path. */
+function escapeHtml(s: string): string {
+	return s
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;');
+}
+
+// Syntax-highlight fenced code with highlight.js (common languages). Known
+// info-string languages get token-colored HTML; unknown/missing languages
+// fall back to escaped plain code. Highlight spans live under `<pre>`,
+// which sentence mapping already excludes as unspeakable, so TTS indexing
+// is unaffected. Token colors come from the `github-dark` theme imported
+// in `routes/layout.css`; surfaces stay app-themed via `.md-body` rules.
+marked.use({
+	renderer: {
+		code({ text, lang }): string {
+			const language = (lang ?? '').trim().split(/\s+/)[0] ?? '';
+			if (language && hljs.getLanguage(language)) {
+				const value = hljs.highlight(text, { language }).value;
+				return `<pre><code class="hljs language-${escapeHtml(language)}">${value}</code></pre>\n`;
+			}
+			return `<pre><code>${escapeHtml(text)}</code></pre>\n`;
+		}
+	}
+});
 
 export const SENTENCE_ATTR = 'data-sentence-idx';
 export const SENTENCE_CLASS = 'tts-sent';
@@ -113,15 +142,17 @@ function wrapRange(root: Element, start: number, end: number, idx: number): void
 
 /** Inject sentence spans into a rendered block element.
  *
- * Returns the next free global index (unchanged when the block renders
- * plain due to a text mismatch).
+ * Always returns the next free global index, even when the block renders
+ * plain due to a text mismatch (tables, whose pipe syntax never survives
+ * cleaning): mismatched blocks still own their global sentences, so later
+ * spans must not reuse those indices or highlight drifts from speech.
  */
 export function injectSentences(el: Element, sentences: string[], startIdx: number): number {
 	if (sentences.length === 0) return startIdx;
 	// (Re)map after every wrap: extraction splits text nodes.
 	const expected = normalizeRenderedText(sentences.map(normalizedSentence).join(' '));
 	const actual = mapNormalizedPositions(el).text;
-	if (actual !== expected) return startIdx;
+	if (actual !== expected) return startIdx + sentences.length;
 	let cursor = 0;
 	for (let k = 0; k < sentences.length; k++) {
 		const len = normalizedSentence(sentences[k]).length;

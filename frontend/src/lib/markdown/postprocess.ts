@@ -156,17 +156,39 @@ function endsWithTerminal(text: string): boolean {
 	return TERMINAL_RE.test(text.trim());
 }
 
-/** Merge trailing paragraphs where a sentence continues across column/page. */
+/** True when every non-blank line is a GFM table row (header, delimiter, body). */
+function isTableBlock(text: string): boolean {
+	const lines = text.split('\n').filter((l) => l.trim() !== '');
+	return lines.length > 0 && lines.every((l) => TABLE_RE.test(l));
+}
+
+/** Merge trailing paragraphs where a sentence continues across column/page.
+ *
+ * Consecutive GFM table rows stay in one block (joined with `\n`): GFM
+ * ends a table at a blank line, so joining rows with `\n\n` would corrupt
+ * every table into literal pipe paragraphs. Blank lines *between* table
+ * rows are also dropped to repair already-split tables (e.g. from
+ * lenient exporters); two adjacent tables with no prose between them
+ * merge into one, which still renders readably.
+ */
 export function reflowColumns(markdown: string): string {
 	const lines = markdown.split('\n');
 	const paras: string[] = [];
 	let buf: string[] = [];
 	let inFence = false;
+	/** Open run of consecutive table rows (blank lines inside stay open). */
+	let tableRun: string[] = [];
 
 	const flushBuf = () => {
 		if (buf.length > 0) {
 			paras.push(buf.join('\n'));
 			buf = [];
+		}
+	};
+	const flushTable = () => {
+		if (tableRun.length > 0) {
+			paras.push(tableRun.join('\n'));
+			tableRun = [];
 		}
 	};
 
@@ -182,15 +204,23 @@ export function reflowColumns(markdown: string): string {
 			continue;
 		}
 		if (line.trim() === '') {
+			// Keep table runs open across blank lines (repair); prose and
+			// headings/ specials below flush the run when they arrive.
 			flushBuf();
+		} else if (TABLE_RE.test(line)) {
+			flushBuf();
+			tableRun.push(line);
 		} else if (HEADING_RE.test(line.trim()) || isSpecialBlock(line)) {
 			flushBuf();
+			flushTable();
 			paras.push(line);
 		} else {
+			flushTable();
 			buf.push(line);
 		}
 	}
 	flushBuf();
+	flushTable();
 	if (paras.length === 0) return markdown;
 
 	const resultParas: string[] = [];
@@ -198,7 +228,9 @@ export function reflowColumns(markdown: string): string {
 	while (i < paras.length) {
 		const cur = paras[i].trim();
 		const isHeader = HEADING_RE.test(cur);
-		const isSpecial = isSpecialBlock(cur) || cur.includes('```');
+		// `isSpecialBlock` only matches single lines; table runs are
+		// multi-line after grouping above, so check `isTableBlock` too.
+		const isSpecial = isSpecialBlock(cur) || isTableBlock(cur) || cur.includes('```');
 		if (isHeader || isSpecial) {
 			resultParas.push(cur);
 			i += 1;
@@ -210,7 +242,7 @@ export function reflowColumns(markdown: string): string {
 		if ((!endsTerminal || endsHyphen) && i + 1 < paras.length) {
 			const nxt = paras[i + 1].trim();
 			const nxtIsHeader = HEADING_RE.test(nxt);
-			const nxtIsSpecial = isSpecialBlock(nxt) || nxt.includes('```');
+			const nxtIsSpecial = isSpecialBlock(nxt) || isTableBlock(nxt) || nxt.includes('```');
 			if (!nxtIsHeader && !nxtIsSpecial) {
 				const nxtStripped = nxt.replace(/^\s+/, '');
 				const first = nxtStripped[0] ?? '';
