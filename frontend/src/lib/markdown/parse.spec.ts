@@ -7,6 +7,8 @@ import {
 	getGlobalSentences,
 	getSectionParagraphs,
 	globalToSectionChunk,
+	isBareItemLine,
+	isItemBoundary,
 	normalizeIndentedLines,
 	sectionChunkToGlobal,
 	selectSections,
@@ -153,6 +155,62 @@ describe('splitBlocks', () => {
 		const blocks = splitBlocks(['1. one here', '2. two here']);
 		expect(blocks.map((b) => b.kind)).toEqual(['list-item', 'list-item']);
 		expect(blocks.every((b) => b.ordered)).toBe(true);
+	});
+
+	it('keeps each bare pypdf table row as its own paragraph block', () => {
+		const blocks = splitBlocks([
+			'Encoder Embedder Einsums Drafter',
+			'E2B305M 150M 400M + 2,340M 1,870M 76M',
+			'E4B305M 150M 670M + 2,820M 3,940M 77M'
+		]);
+		expect(blocks.map((b) => b.kind)).toEqual(['paragraph', 'paragraph', 'paragraph']);
+		expect(getGlobalSentences(parseMarkdownStructure(blocks.map((b) => b.lines.join('\n')).join('\n')))).toEqual([
+			'Encoder Embedder Einsums Drafter',
+			'E2B305M 150M 400M + 2,340M 1,870M 76M',
+			'E4B305M 150M 670M + 2,820M 3,940M 77M'
+		]);
+	});
+
+	it('joins wrapped prose, dialogue, and citation wraps across lines', () => {
+		expect(
+			getGlobalSentences(
+				parseMarkdownStructure(
+					'The rapid evolution of large language models\nhas driven the need for open weights.'
+				)
+			)
+		).toEqual([
+			'The rapid evolution of large language models has driven the need for open weights.'
+		]);
+		expect(
+			getGlobalSentences(
+				parseMarkdownStructure('embeddings as in Gemma 3n (Gemma Team,\n2025b), making them effective.')
+			)
+		).toEqual(['embeddings as in Gemma 3n (Gemma Team, 2025b), making them effective.']);
+		expect(
+			getGlobalSentences(
+				parseMarkdownStructure('In this technical report, we presented Gemma\n4, an open-weight family.')
+			)
+		).toEqual(['In this technical report, we presented Gemma 4, an open-weight family.']);
+	});
+});
+
+describe('isBareItemLine / isItemBoundary', () => {
+	it('flags short unterminated lines but not prose wraps', () => {
+		expect(isBareItemLine('E2B305M 150M 400M + 2,340M')).toBe(true);
+		expect(isBareItemLine('Gemma 4 Technical Report')).toBe(true);
+		expect(isBareItemLine('most capable and efficient generation in the')).toBe(false);
+		expect(isBareItemLine('with RMSNorm (Zhang and Sennrich, 2019),')).toBe(false);
+		expect(isBareItemLine('Our models have pre-norm and post-norm.')).toBe(false);
+		expect(isBareItemLine('- marked item')).toBe(false);
+		expect(isBareItemLine('| piped | row |')).toBe(false);
+	});
+
+	it('splits on uppercase leads, guards proper-noun digit wraps', () => {
+		expect(isItemBoundary('Vision', 'Encoder Embedder')).toBe(true);
+		expect(isItemBoundary('E2B305M 150M', 'E4B305M 150M')).toBe(true);
+		expect(isItemBoundary('In this report, we presented Gemma', '4, an open family')).toBe(false);
+		expect(isItemBoundary('One morning, Norah said to me,', '"Arthur, take company"')).toBe(false);
+		expect(isItemBoundary('introduce a thinking mode (OpenAI, 2024) to', 'Gemma 4 models')).toBe(false);
 	});
 });
 

@@ -104,6 +104,42 @@ const HR_RE = /^\s*([-*_]\s*){3,}\s*$/;
 const BLOCKQUOTE_RE = /^\s*>/;
 const INDENTED_RE = /^(?:\t| {4})/;
 
+/** Widest a bare line can be and still read as one unmarked item (chars).
+ * pypdf table rows run ~10–55 chars; wrapped prose usually exceeds this,
+ * and the wrap-word/continuation guards below cover the rest. */
+const BARE_ITEM_MAX_CHARS = 60;
+
+/** True when `line` reads as one item of an unmarked list (bare table row,
+ * caption fragment, or title): short, unterminated, not ending on a
+ * continuation mark (`,`/`;`/`:`/hyphen wrap) or a wrap word (`the`, `of`,
+ * `your`, …), and not itself a structural line. */
+export function isBareItemLine(line: string): boolean {
+	const t = line.trim();
+	if (!t || t.length > BARE_ITEM_MAX_CHARS) return false;
+	if (/[.!?…]["'")\]]*\s*$/.test(t)) return false;
+	if (/[,;:—–-]\s*$/.test(t)) return false;
+	if (/^(#{1,6}\s+|\s*[-*+]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)/.test(line)) return false;
+	const last = (t.split(/\s+/).pop() ?? '').replace(/^[(["']+|[)\]"':;,.!?]+$/g, '');
+	if (/^[A-Za-z]{1,4}$/.test(last)) return false;
+	return true;
+}
+
+/** True when a paragraph line break separates two items rather than wrapping
+ * prose: the previous line is item-like and the next starts uppercase, or
+ * starts with a digit while the previous line does not end on a proper noun
+ * (`Gemma` / `4, an …` is a wrap, not two items). Quoted continuations
+ * (`"rambles…`) stay joined — only a bare `[A-Z0-9]` lead splits. */
+export function isItemBoundary(prev: string, next: string): boolean {
+	if (!isBareItemLine(prev)) return false;
+	const lead = next.trimStart();
+	if (/^[A-Z]/.test(lead)) return true;
+	if (/^[0-9]/.test(lead)) {
+		const last = (prev.trim().split(/\s+/).pop() ?? '').replace(/^[(["']+|[)\]"':;,.!?]+$/g, '');
+		return !/^[A-Z]/.test(last);
+	}
+	return false;
+}
+
 /** De-indent isolated indented lines (some extractors center titles with tabs).
  *
  * A single tab/space-indented line surrounded by blanks is a centered
@@ -245,6 +281,9 @@ export function splitBlocks(lines: string[]): RawBlock[] {
 			continue;
 		}
 		if (bufKind !== 'paragraph') flush();
+		// Unmarked item runs (bare pypdf table rows, title stacks): one
+		// block per line so items never collapse into a single sentence.
+		else if (buf.length > 0 && isItemBoundary(buf[buf.length - 1], line)) flush();
 		bufKind = 'paragraph';
 		buf.push(line);
 	}
