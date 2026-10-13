@@ -410,9 +410,12 @@
 
 	// Derived — sections live-parse the draft while it differs from the saved
 	// doc, so unsaved edits (and the save debounce window) reach the viewer
-	// and TTS immediately instead of only after persisting.
+	// and TTS immediately instead of only after persisting. Suspended while
+	// editing: the viewer is unmounted, so per-keystroke re-parses only feed
+	// a ~1s rich re-render (marked + sanitize) that nobody reads. The
+	// debounced autosave still parses once per idle window for persistence.
 	let sections: Section[] = $derived.by(() =>
-		selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
+		isEditing ? (activeDoc?.sections ?? []) : selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
 	);
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
 	// Speakable TTS view over the live sections (#63): re-derived on open and
@@ -429,8 +432,10 @@
 	// and deleted sentences can never sound after a pause/seek/resume. The
 	// snapshot holds derived speakable chunks; a paused player re-parks on
 	// the chunk for the current sentence, while a running chain picks the
-	// new text up from the next chunk.
+	// new text up from the next chunk. Suspended while editing (per-keystroke
+	// seek/resetElement churn); a single refresh runs on save instead.
 	$effect(() => {
+		if (isEditing) return;
 		const texts = tts.texts;
 		const player = sentencePlayer;
 		if (!player) return;

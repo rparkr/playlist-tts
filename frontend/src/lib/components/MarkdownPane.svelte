@@ -250,15 +250,18 @@
 	$effect(() => {
 		const idx = globalIdx;
 		const viewer = viewerEl;
-		// Depend on the rendered output so fresh nodes get highlighted.
-		void richHtml;
-		void useRich;
 		if (isEditing || !viewer || totalSentences === 0) {
 			// Never leak a stale suppression into later follow-scrolls when
 			// the exit-triggered run bails before consuming it.
 			if (!isEditing) suppressFollowOnce = false;
 			return;
 		}
+		// Depend on the rendered output so fresh nodes get highlighted.
+		// Read only on the viewing path: while editing these recompute a
+		// ~1s full-book render (marked + sanitize) per keystroke that the
+		// unmounted viewer never reads.
+		void richHtml;
+		void useRich;
 		syncActiveHighlight(idx);
 		if (suppressFollowOnce) {
 			suppressFollowOnce = false;
