@@ -74,8 +74,17 @@ describe('resolveWithUrlPrecedence', () => {
 
 describe('postprocess flags', () => {
 	it('round-trips through JSON', () => {
-		const flags = { combine: true, uppercase: false, punct: true, pageMarkers: false };
+		const flags = { combine: true, uppercase: false, pageMarkers: false };
 		expect(parsePostprocessFlags(serializePostprocessFlags(flags))).toEqual(flags);
+	});
+
+	it('ignores the retired punct key from older payloads', () => {
+		const legacy = '{"combine": true, "uppercase": false, "punct": true, "pageMarkers": false}';
+		expect(parsePostprocessFlags(legacy)).toEqual({
+			combine: true,
+			uppercase: false,
+			pageMarkers: false
+		});
 	});
 
 	it('rejects malformed payloads', () => {

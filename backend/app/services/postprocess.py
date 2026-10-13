@@ -16,8 +16,6 @@ _TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
 # Terminal punctuation including optional closing quote/parens — used to decide
 # whether a paragraph ends a sentence.  Handles:  .  ."  .'  ?"  .") etc.
 _TERMINAL_RE = re.compile(r'[.!?…]["\'\)\]]*\s*$')
-# For headers — same idea but without trailing whitespace concern
-_HEADER_TERMINAL_RE = re.compile(r'[.!?…]["\'\)\]]*\s*$')
 
 # Uppercase word detection
 _UPPER_WORD_RE = re.compile(r"\b[A-Z]{2,}\b")
@@ -59,9 +57,7 @@ def is_bare_item_line(line: str) -> bool:
         return False
     last = t.split()[-1] if t.split() else ""
     last = re.sub(r"^[(\[\"']+|[)\]\"':;,.!?]+$", "", last)
-    if _BARE_ITEM_WRAP_WORD_RE.match(last):
-        return False
-    return True
+    return not _BARE_ITEM_WRAP_WORD_RE.match(last)
 
 
 _IMAGE_COMMENT_RE = re.compile(r"^\s*<!--\s*image\s*-->\s*$", re.IGNORECASE)
@@ -359,43 +355,7 @@ def normalize_uppercase(markdown: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. Ensure punctuation
-# ---------------------------------------------------------------------------
-
-
-def ensure_punctuation(markdown: str) -> str:
-    """Ensure headers and paragraphs end with terminal punctuation."""
-    lines = markdown.split("\n")
-    out: list[str] = []
-    in_fence = False
-
-    for line in lines:
-        if _CODE_FENCE_RE.match(line):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        if in_fence:
-            out.append(line)
-            continue
-
-        m = _HEADING_RE.match(line.strip())
-        if m:
-            hashes, title = m.groups()
-            title = title.strip()
-            if title and not _HEADER_TERMINAL_RE.search(title) and not _TABLE_RE.match(title):
-                title = title + "."
-            out.append(f"{hashes} {title}")
-        elif _TABLE_RE.match(line) or line.strip() == "" or _is_special_block(line):
-            out.append(line)
-        else:
-            # Don't mutate list/table rows globally; handled per line above.
-            out.append(line)
-
-    return "\n".join(out)
-
-
-# ---------------------------------------------------------------------------
-# 4. Page markers
+# 3. Page markers
 # ---------------------------------------------------------------------------
 
 
@@ -1076,8 +1036,6 @@ def apply_postprocessing(
                 p = reflow_columns(p)
             if opts.normalize_uppercase:
                 p = normalize_uppercase(p)
-            if opts.ensure_punctuation:
-                p = ensure_punctuation(p)
             processed.append(p)
         md, new_map = join_pages_with_markers(
             processed,
@@ -1099,9 +1057,6 @@ def apply_postprocessing(
 
     if opts.normalize_uppercase:
         md = normalize_uppercase(md)
-
-    if opts.ensure_punctuation:
-        md = ensure_punctuation(md)
 
     sections = parse_markdown_structure(md)
 

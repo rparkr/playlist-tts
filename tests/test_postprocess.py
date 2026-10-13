@@ -1,4 +1,4 @@
-"""Tests for postprocessing pipeline — reflow, uppercase, punctuation, parsing."""
+"""Tests for postprocessing pipeline — reflow, uppercase, item lines, parsing."""
 
 from backend.app.models.schemas import PostprocessOptions
 from backend.app.services.postprocess import (
@@ -6,7 +6,6 @@ from backend.app.services.postprocess import (
     build_page_map,
     chunk_text_into_sentences,
     dehyphenate,
-    ensure_punctuation,
     is_bare_item_line,
     join_pages_strict,
     normalize_uppercase,
@@ -85,13 +84,6 @@ def test_postprocess_options_uppercase_back_compat():
     assert PostprocessOptions(normalize_uppercase="title").normalize_uppercase is True  # type: ignore[arg-type]
 
 
-def test_ensure_punctuation_header():
-    """Header without punctuation should get period."""
-    md = "## Chapter overview\n\nContent here."
-    out = ensure_punctuation(md)
-    assert "## Chapter overview." in out
-
-
 def test_parse_markdown_structure():
     """Parse sections and sentence chunks."""
     md = (
@@ -120,13 +112,12 @@ def test_apply_postprocessing_integration():
     opts = PostprocessOptions(
         combine_columns=True,
         normalize_uppercase=True,
-        ensure_punctuation=True,
         insert_page_markers=False,
     )
     out_md, sections, page_map = apply_postprocessing(md, opts, None)
     assert sections
     assert page_map
-    assert "Title." in out_md or "Title" in out_md
+    assert "Title" in out_md
 
 
 def test_build_page_map():

@@ -31,7 +31,6 @@ from backend.app.services.llm_logging import configure_llm_logging, log_llm_even
 from backend.app.services.ocr_service import OCRJob, get_page_count
 from backend.app.services.postprocess import (
     dehyphenate,
-    ensure_punctuation,
     join_pages_strict,
     normalize_uppercase,
     parse_markdown_structure,
@@ -456,8 +455,6 @@ async def convert_pdf_with_llm(
             text = reflow_columns(text)
         if opts.normalize_uppercase:
             text = normalize_uppercase(text)
-        if opts.ensure_punctuation:
-            text = ensure_punctuation(text)
         processed.append(text)
     md, page_map = join_pages_strict(
         processed,

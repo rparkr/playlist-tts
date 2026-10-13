@@ -5,11 +5,9 @@
 		open: boolean;
 		onClose: () => void;
 		optCombine: boolean;
-		optPunct: boolean;
 		optPageMarkers: boolean;
 		optUppercase: boolean;
 		onCombineChange: (v: boolean) => void;
-		onPunctChange: (v: boolean) => void;
 		onPageMarkersChange: (v: boolean) => void;
 		onUppercaseChange: (v: boolean) => void;
 		optFirstPageMarker: boolean;
@@ -24,11 +22,9 @@
 		open,
 		onClose,
 		optCombine,
-		optPunct,
 		optPageMarkers,
 		optUppercase,
 		onCombineChange,
-		onPunctChange,
 		onPageMarkersChange,
 		onUppercaseChange,
 		optFirstPageMarker,
@@ -98,47 +94,6 @@
 										role="tooltip"
 										class="pointer-events-none absolute top-full left-1/2 z-20 mt-2 w-56 -translate-x-1/2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs font-normal text-slate-300 shadow-xl"
 										>Combine trailing paragraphs where a sentence continues in the next column or page.</span
-									>
-								{/if}
-							</span>
-						</span>
-					</span>
-				</label>
-
-				<label class="flex items-start gap-3 cursor-pointer">
-					<input
-						type="checkbox"
-						checked={optPunct}
-						onchange={(e) => onPunctChange((e.target as HTMLInputElement).checked)}
-						class="mt-0.5 accent-sky-500"
-					/>
-					<span class="flex-1">
-						<span class="text-sm text-slate-200 flex items-center gap-1">
-							Ensure punctuation
-							<span class="relative inline-flex">
-								<button
-									type="button"
-									class="text-slate-400 hover:text-slate-200"
-									aria-label="Info about ensure punctuation"
-									aria-describedby={tooltip === 'punct' ? 'tooltip-punct' : undefined}
-									onmouseenter={() => (tooltip = 'punct')}
-									onmouseleave={() => (tooltip = null)}
-									onfocus={() => (tooltip = 'punct')}
-									onblur={() => (tooltip = null)}
-									onclick={(e) => {
-										e.preventDefault();
-										e.stopPropagation();
-										tooltip = tooltip === 'punct' ? null : 'punct';
-									}}
-								>
-									<Info size={14} />
-								</button>
-								{#if tooltip === 'punct'}
-									<span
-										id="tooltip-punct"
-										role="tooltip"
-										class="pointer-events-none absolute top-full left-1/2 z-20 mt-2 w-56 -translate-x-1/2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs font-normal text-slate-300 shadow-xl"
-										>Add terminal punctuation to paragraphs (e.g., headers) to improve TTS pauses.</span
 									>
 								{/if}
 							</span>

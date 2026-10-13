@@ -30,7 +30,6 @@ export const URL_PARAMS = {
 export interface PostprocessFlags {
 	combine: boolean;
 	uppercase: boolean;
-	punct: boolean;
 	pageMarkers: boolean;
 	firstPageMarker?: boolean;
 	firstPageNumber?: number;
@@ -91,12 +90,11 @@ export function parsePostprocessFlags(value: string | null | undefined): Postpro
 		if (
 			typeof p.combine !== 'boolean' ||
 			typeof p.uppercase !== 'boolean' ||
-			typeof p.punct !== 'boolean' ||
 			typeof p.pageMarkers !== 'boolean'
 		) {
 			return null;
 		}
-		const out: PostprocessFlags = { combine: p.combine, uppercase: p.uppercase, punct: p.punct, pageMarkers: p.pageMarkers };
+		const out: PostprocessFlags = { combine: p.combine, uppercase: p.uppercase, pageMarkers: p.pageMarkers };
 		if (typeof p.firstPageMarker === 'boolean') out.firstPageMarker = p.firstPageMarker;
 		if (typeof p.firstPageNumber === 'number' && Number.isFinite(p.firstPageNumber) && p.firstPageNumber >= 1) {
 			out.firstPageNumber = Math.floor(p.firstPageNumber);

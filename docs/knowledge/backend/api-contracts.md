@@ -22,7 +22,6 @@ generated:
 class PostprocessOptions(BaseModel):
     combine_columns: bool = True
     normalize_uppercase: Literal["off","title","lower_long"]="off"
-    ensure_punctuation: bool=False
     insert_page_markers: bool=True
 class JobStatus(str, Enum): queued|running|done|error
 class PageMapItem(BaseModel): page:int; charStart:int; charEnd:int; startLine:int

@@ -11,7 +11,6 @@ class PostprocessOptions(BaseModel):
 
     combine_columns: bool = True
     normalize_uppercase: bool = False
-    ensure_punctuation: bool = False
     insert_page_markers: bool = True
     # Emit a `Page N.` marker for the first page too (default on: the PDF
     # viewer needs it for back-navigation to page 1).

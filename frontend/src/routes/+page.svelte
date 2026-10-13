@@ -161,7 +161,6 @@
 
 	let optCombine: boolean = $state(true);
 	let optUppercase: boolean = $state(true);
-	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
 	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
@@ -183,7 +182,6 @@
 		return {
 			combine_columns: optCombine,
 			normalize_uppercase: optUppercase,
-			ensure_punctuation: optPunct,
 			insert_page_markers: optPageMarkers,
 			first_page_marker: optFirstPageMarker,
 			first_page_number: optFirstPageNumber,
@@ -197,7 +195,6 @@
 		if (!doc?.postprocess) return;
 		optCombine = doc.postprocess.combine_columns;
 		optUppercase = doc.postprocess.normalize_uppercase;
-		optPunct = doc.postprocess.ensure_punctuation;
 		optPageMarkers = doc.postprocess.insert_page_markers;
 		optFirstPageMarker = doc.postprocess.first_page_marker ?? false;
 		const n = doc.postprocess.first_page_number ?? 1;
@@ -209,7 +206,6 @@
 					serializePostprocessFlags({
 						combine: optCombine,
 						uppercase: optUppercase,
-						punct: optPunct,
 						pageMarkers: optPageMarkers,
 						firstPageMarker: optFirstPageMarker,
 						firstPageNumber: optFirstPageNumber
@@ -334,7 +330,6 @@
 		if (storedPostprocess) {
 			optCombine = storedPostprocess.combine;
 			optUppercase = storedPostprocess.uppercase;
-			optPunct = storedPostprocess.punct;
 			optPageMarkers = storedPostprocess.pageMarkers;
 			if (typeof storedPostprocess.firstPageMarker === 'boolean') optFirstPageMarker = storedPostprocess.firstPageMarker;
 			if (typeof storedPostprocess.firstPageNumber === 'number') optFirstPageNumber = storedPostprocess.firstPageNumber;
@@ -405,7 +400,6 @@
 			serializePostprocessFlags({
 				combine: optCombine,
 				uppercase: optUppercase,
-				punct: optPunct,
 				pageMarkers: optPageMarkers,
 				firstPageMarker: optFirstPageMarker,
 				firstPageNumber: optFirstPageNumber
@@ -2592,11 +2586,9 @@
 		open={showPostprocess}
 		onClose={() => (showPostprocess = false)}
 		{optCombine}
-		{optPunct}
 		{optPageMarkers}
 		{optUppercase}
 		onCombineChange={(v) => (optCombine = v)}
-		onPunctChange={(v) => (optPunct = v)}
 		onPageMarkersChange={(v) => (optPageMarkers = v)}
 		onUppercaseChange={(v) => (optUppercase = v)}
 		optFirstPageMarker={optFirstPageMarker}

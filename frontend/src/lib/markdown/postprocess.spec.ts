@@ -3,7 +3,6 @@ import {
 	applyPostprocessing,
 	buildPageMap,
 	dehyphenate,
-	ensurePunctuation,
 	insertPageMarkers,
 	normalizeUppercase,
 	reflowColumns,
@@ -82,14 +81,6 @@ describe('normalizeUppercase', () => {
 	});
 });
 
-describe('ensurePunctuation', () => {
-	it('adds period to headers lacking terminal', () => {
-		expect(ensurePunctuation('## Chapter overview\n\nContent here.')).toContain(
-			'## Chapter overview.'
-		);
-	});
-});
-
 describe('page markers', () => {
 	it('strips previously-inserted markers so re-render from edits toggles cleanly', () => {
 		const withMarkers = 'First page text.\n\nPage 2.\n\nSecond page text.';
@@ -146,7 +137,7 @@ describe('applyPostprocessing', () => {
 		const raw = '# Title\n\nTHIS IS A SECTION\n\nContent here. Another sentence.';
 		const withUpper = applyPostprocessing(
 			raw,
-			{ ...DEFAULT_POSTPROCESS, normalize_uppercase: true, ensure_punctuation: true },
+			{ ...DEFAULT_POSTPROCESS, normalize_uppercase: true },
 			null
 		);
 		expect(withUpper.sections.length).toBeGreaterThan(0);
@@ -154,7 +145,7 @@ describe('applyPostprocessing', () => {
 
 		const withoutUpper = applyPostprocessing(
 			raw,
-			{ ...DEFAULT_POSTPROCESS, normalize_uppercase: false, ensure_punctuation: false },
+			{ ...DEFAULT_POSTPROCESS, normalize_uppercase: false },
 			null
 		);
 		// Toggling changes rendered output deterministically from same raw.
