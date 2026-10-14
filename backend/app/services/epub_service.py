@@ -31,6 +31,7 @@ from backend.app.services.html_to_markdown import render_markdown
 EPUB_MAX_BYTES = 100 * 1024 * 1024
 
 _MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
+_CHAPTER_PREAMBLE_RE = re.compile(r"<\?[^?]*\?>\s*|<!DOCTYPE[^>]*>\s*", re.IGNORECASE)
 _HEADING_RE = re.compile(r"<h([1-3])\b[^>]*>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -300,6 +301,10 @@ def convert_epub(data: bytes) -> EpubResult:
         chapter_key = _rel(zip_path)
         label = _chapter_title(raw_html, labels.get(chapter_key), posixpath.basename(rel_href))
 
+        # Real-world chapters open with an XML declaration / DOCTYPE that
+        # markdownify keeps as literal text (and that breaks chapter-heading
+        # folding below, duplicating the heading). Strip it first.
+        raw_html = _CHAPTER_PREAMBLE_RE.sub("", raw_html)
         try:
             markdown = render_markdown(raw_html)
         except Exception:

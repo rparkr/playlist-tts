@@ -157,3 +157,16 @@ def test_convert_endpoint_rejects_pdf():
         files={"file": ("doc.pdf", b"%PDF-1.4 fake", "application/pdf")},
     )
     assert resp.status_code == 400
+
+
+def test_convert_strips_xml_preamble_and_folds_heading():
+    """XML declarations/DOCTYPE never leak as chapter text or duplicate headings."""
+    ch = (
+        '<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head>'
+        "<body><h1>First Steps</h1><p>Body text here for listening.</p></body></html>"
+    )
+    result = convert_epub(build_epub(ch1=ch))
+    assert "xml version" not in result.markdown
+    assert "DOCTYPE" not in result.markdown
+    assert result.markdown.count("First Steps") == 1
