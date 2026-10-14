@@ -75,9 +75,9 @@ function cleanForSentences(text: string): string {
 	// `- ` lines — the splitter assigns those to items — so nested markers
 	// strip safely); ordered at block start or when indented (a `2. Model`
 	// plain-text heading at column 0 keeps its number, matching the render).
-	t = t.replace(/^\s*[-*+]\s+\[[ xX]\]\s+/, '');
-	t = t.replace(/^[ \t]+[-*+]\s+\[[ xX]\]\s+/gm, '');
-	t = t.replace(/^\s*[-*+]\s+/gm, '');
+	t = t.replace(/^\s*[-*+•]\s+\[[ xX]\]\s+/, '');
+	t = t.replace(/^[ \t]+[-*+•]\s+\[[ xX]\]\s+/gm, '');
+	t = t.replace(/^\s*[-*+•]\s+/gm, '');
 	t = t.replace(/^\s*\d{1,3}[.)]\s+/, '');
 	t = t.replace(/^[ \t]+\d{1,3}[.)]\s+/gm, '');
 	t = t.replace(/^#{1,6}\s+/gm, '');
@@ -87,18 +87,39 @@ function cleanForSentences(text: string): string {
 	return t.trim();
 }
 
+/** Whitespace where a sentence ends: terminal punctuation with optional
+ * closing quotes/parens/brackets (`."`, `?"`, `.)`) before the gap, and a
+ * capital, digit, or quote starting the next sentence (a paren/bracket only
+ * counts when a capital/digit/quote follows, so `U.S. (founded…)` stays
+ * joined). Match-based (not lookbehind) so it runs on older mobile browsers
+ * without variable-length lookbehind support. */
+const QUOTED_BOUNDARY_RE = /[.!?]["')\]]*(\s+)(?=[A-Z0-9"']|[(\[]["'A-Z0-9])/g;
+
+/** Split on `QUOTED_BOUNDARY_RE`, keeping punctuation+closers with the left. */
+function splitQuotedSentences(clean: string): string[] {
+	const parts: string[] = [];
+	let start = 0;
+	QUOTED_BOUNDARY_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = QUOTED_BOUNDARY_RE.exec(clean)) !== null) {
+		parts.push(clean.slice(start, m.index + m[0].length - m[1].length));
+		start = m.index + m[0].length;
+	}
+	parts.push(clean.slice(start));
+	return parts.map((s) => s.trim()).filter(Boolean);
+}
+
 export function chunkTextIntoSentences(text: string): string[] {
 	const clean = cleanForSentences(text);
 	if (!clean) return [];
-	// Primary: split on punctuation + space + capital/quote
-	let parts = clean.split(/(?<=[.!?])\s+(?=[A-Z0-9"'])/).map((s) => s.trim()).filter(Boolean);
-	if (parts.length === 1) {
-		parts = clean.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
-	}
-	return parts;
+	// Primary: split on punctuation + space + capital/quote/paren — closers
+	// (`."`, `?")`, `.)`) stay with the sentence they terminate.
+	const parts = splitQuotedSentences(clean);
+	if (parts.length > 1) return parts;
+	return clean.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
 }
 
-const LIST_ITEM_RE = /^(\s*)([-*+]|\d{1,3}[.)])(\s+|\s*$)/;
+const LIST_ITEM_RE = /^(\s*)([-*+•]|\d{1,3}[.)])(\s+|\s*$)/;
 const TABLE_ROW_RE = /^\s*\|/;
 const HR_RE = /^\s*([-*_]\s*){3,}\s*$/;
 const BLOCKQUOTE_RE = /^\s*>/;
@@ -118,7 +139,7 @@ export function isBareItemLine(line: string): boolean {
 	if (!t || t.length > BARE_ITEM_MAX_CHARS) return false;
 	if (/[.!?…]["'")\]]*\s*$/.test(t)) return false;
 	if (/[,;:—–-]\s*$/.test(t)) return false;
-	if (/^(#{1,6}\s+|\s*[-*+]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)/.test(line)) return false;
+	if (/^(#{1,6}\s+|\s*[-*+•]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)/.test(line)) return false;
 	const last = (t.split(/\s+/).pop() ?? '').replace(/^[(["']+|[)\]"':;,.!?]+$/g, '');
 	if (/^[A-Za-z]{1,4}$/.test(last)) return false;
 	return true;
@@ -247,6 +268,9 @@ export function splitBlocks(lines: string[]): RawBlock[] {
 		if (listMatch) {
 			const ordered = /^\d/.test(listMatch[2]);
 			const itemNumber = ordered ? parseInt(listMatch[2], 10) : 0;
+			// pypdf bullets (`• item`) normalize to `-` so strips, rendering,
+			// and TTS treat them as ordinary list items.
+			const itemLine = line.replace(/^(\s*)•(\s+)/, '$1-$2');
 			// CommonMark: an ordered item only interrupts a paragraph when it
 			// starts with 1 (so `2.3. Encoder…` mid-paragraph stays prose).
 			// Unordered markers always interrupt.
@@ -258,12 +282,12 @@ export function splitBlocks(lines: string[]): RawBlock[] {
 			const indent = listMatch[1].replace(/\t/g, '    ').length;
 			if (openItem === null || indent <= listBaseIndent) {
 				// New top-level item: one block per item for sentence parity.
-				openItem = { kind: 'list-item', lines: [line], ordered };
+				openItem = { kind: 'list-item', lines: [itemLine], ordered };
 				blocks.push(openItem);
 				listBaseIndent = indent;
 			} else {
 				// Nested item / continuation belongs to the open item.
-				openItem.lines.push(line);
+				openItem.lines.push(itemLine);
 			}
 			continue;
 		}

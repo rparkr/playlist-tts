@@ -25,6 +25,25 @@ _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])')
 # Stray leading quotes after split are stripped in post-cleanup; an optional
 # closing quote stays with the prior sentence via _TERMINAL_RE detection
 
+# Quote/paren-aware boundary: terminal punctuation with optional closing
+# quotes/parens/brackets (`."`, `?"`, `.)`) before the gap. Match-based
+# (`finditer`, not lookbehind) because `re` lookbehind must be fixed-width.
+# A paren/bracket only counts when a capital/digit/quote follows, so
+# `U.S. (founded…)` stays joined.
+_QUOTED_SENTENCE_BOUNDARY_RE = re.compile(r"""[.!?]["'\)\]]*(\s+)(?=[A-Z0-9"']|[(\[]["'A-Z0-9])""")
+
+
+def _split_quoted_sentences(clean: str) -> list[str]:
+    """Split on quote/paren-aware boundaries, keeping closers with the left."""
+    parts: list[str] = []
+    start = 0
+    for m in _QUOTED_SENTENCE_BOUNDARY_RE.finditer(clean):
+        parts.append(clean[start : m.start(1)])
+        start = m.end(1)
+    parts.append(clean[start:])
+    return [s.strip() for s in parts if s.strip()]
+
+
 # Line-break hyphenation: a word split across lines/columns as `dete- rioration`
 # or `dete-\nrioration`. Letters-only on both sides so digit ranges (`1990- 1995`)
 # and spaced dashes (`word - word`) are left alone. `fiber-optic` (no space)
@@ -36,7 +55,7 @@ _SOFT_HYPHEN_RE = re.compile(r"­\s*")
 #: Widest a bare line can be and still read as one unmarked item (chars).
 BARE_ITEM_MAX_CHARS = 60
 _BARE_ITEM_WRAP_WORD_RE = re.compile(r"^[A-Za-z]{1,4}$")
-_BARE_ITEM_STRUCT_RE = re.compile(r"^(#{1,6}\s+|\s*[-*+]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)")
+_BARE_ITEM_STRUCT_RE = re.compile(r"^(#{1,6}\s+|\s*[-*+•]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)")
 
 
 def is_bare_item_line(line: str) -> bool:
@@ -263,7 +282,7 @@ def reflow_columns(markdown: str) -> str:
                         merged = cur.rstrip()[:-1] + nxt_stripped
                     else:
                         merged = cur + " " + nxt_stripped
-                    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(merged) if s.strip()]
+                    sentences = _split_quoted_sentences(merged)
                     if len(sentences) >= 2:
                         result_paras.append(sentences[0])
                         remainder = " ".join(sentences[1:])
@@ -518,7 +537,7 @@ def _clean_for_sentences(text: str) -> str:
     text = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"(\*\*|__|\*|_|~~)", "", text)
-    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*+•]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
     return text.strip()
@@ -527,8 +546,9 @@ def _clean_for_sentences(text: str) -> str:
 def chunk_text_into_sentences(text: str) -> list[str]:
     """Split prose into speech-ready sentence chunks."""
     clean = _clean_for_sentences(text)
-    # Split on terminal punctuation — quote attached to prior sentence via _SENTENCE_SPLIT_RE
-    parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", clean) if s.strip()]
+    # Split on terminal punctuation — closers (`."`, `?")`, `.)`) stay with
+    # the sentence they terminate via _split_quoted_sentences.
+    parts = _split_quoted_sentences(clean)
     # Handle case where next char is lowercase (continuation) — fallback to simple split
     if len(parts) == 1 and clean:
         parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean) if s.strip()]
@@ -639,7 +659,9 @@ def parse_markdown_structure(md_text: str) -> list[Section]:
             # approximate but preserves ordered breadcrumbs.
             pending_heading = title
         else:
-            current_lines.append(line)
+            # pypdf bullets (`• item`) normalize to `-` so downstream list
+            # handling sees ordinary unordered markers (mirrors frontend).
+            current_lines.append(re.sub(r"^(\s*)•(\s+)", r"\1- ", line))
 
     flush_section()
     _fix_flat_headings(sections)

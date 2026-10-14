@@ -315,3 +315,33 @@ def test_flat_h2_breadcrumbs_promote_chapters():
     sections = parse_markdown_structure(md)
     radio = next(s for s in sections if (s.heading or "") == "Radio Antenna Towers.")
     assert radio.titles == ["Communications", "Radio Antenna Towers"]
+
+
+def test_chunk_sentences_quote_paren_boundaries():
+    """Closers (quotes/parens) stay with the sentence they terminate."""
+    assert chunk_text_into_sentences('She said "stop." He left.') == [
+        'She said "stop."',
+        "He left.",
+    ]
+    assert chunk_text_into_sentences("A first thought (then more). A new start.") == [
+        "A first thought (then more).",
+        "A new start.",
+    ]
+    # Mid-sentence quotes and lowercase parentheticals stay joined.
+    assert chunk_text_into_sentences('He whispered "wait, really?" and left.') == [
+        'He whispered "wait, really?" and left.'
+    ]
+    assert chunk_text_into_sentences("That ends it. (A new thought begins.)") == [
+        "That ends it.",
+        "(A new thought begins.)",
+    ]
+
+
+def test_bullet_marker_normalizes_to_list():
+    """Bulleted lines parse without leaking the marker into sentences."""
+    from backend.app.services.postprocess import parse_markdown_structure
+
+    sections = parse_markdown_structure("• First item\n• Second item\n")
+    text = " ".join(s for sec in sections for para in sec.paragraphs for s in para)
+    assert "•" not in text
+    assert "First item" in text and "Second item" in text

@@ -309,3 +309,45 @@ describe('flat-h2 breadcrumbs', () => {
 		expect(radio?.titles).toEqual(['Communications', 'Radio Antenna Towers']);
 	});
 });
+
+describe('chunkTextIntoSentences quote/paren boundaries', () => {
+	it('splits after closing quotes and parens', () => {
+		expect(chunkTextIntoSentences('She said "stop." He left.')).toEqual([
+			'She said "stop."',
+			'He left.'
+		]);
+		expect(chunkTextIntoSentences('Was it true?" She nodded.')).toEqual([
+			'Was it true?"',
+			'She nodded.'
+		]);
+		expect(chunkTextIntoSentences('A first thought (then more). A new start.')).toEqual([
+			'A first thought (then more).',
+			'A new start.'
+		]);
+	});
+
+	it('keeps mid-sentence quotes and lowercase parentheticals joined', () => {
+		expect(chunkTextIntoSentences('He whispered "wait, really?" and left.')).toEqual([
+			'He whispered "wait, really?" and left.'
+		]);
+		expect(chunkTextIntoSentences('The idea (quite simply) works.')).toEqual([
+			'The idea (quite simply) works.'
+		]);
+	});
+
+	it('splits before a parenthesized new sentence', () => {
+		expect(chunkTextIntoSentences('That ends it. (A new thought begins.)')).toEqual([
+			'That ends it.',
+			'(A new thought begins.)'
+		]);
+	});
+});
+
+describe('bullet marker normalization', () => {
+	it('treats • lines as list items', () => {
+		const sections = parseMarkdownStructure('• First item\n• Second item\n');
+		const kinds = sections.flatMap((s) => s.blocks.map((b) => b.kind));
+		expect(kinds).toEqual(['list-item', 'list-item']);
+		expect(sections[0].blocks[0].raw).toBe('- First item');
+	});
+});
