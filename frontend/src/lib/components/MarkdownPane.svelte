@@ -12,7 +12,8 @@
 		SENTENCE_ATTR,
 		renderSectionBlocks
 	} from '$lib/markdown/render';
-	import { getDocAsset } from '$lib/stores/library';
+	import { clickOutside } from '$lib/actions/clickOutside';
+import { getDocAsset } from '$lib/stores/library';
 
 	interface Props {
 		markdownDraft: string;
@@ -304,7 +305,7 @@
 			<button onclick={onOpenPostprocess} aria-label="Postprocessing settings" class="w-8 h-8 flex items-center justify-center rounded hover:bg-slate-700 text-slate-300">
 				<Settings size={16} />
 			</button>
-			<div class="relative">
+			<div class="relative" use:clickOutside={() => (showOverflow = false)}>
 				<button
 					onclick={() => (showOverflow = !showOverflow)}
 					aria-label="More actions"

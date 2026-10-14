@@ -16,6 +16,7 @@ import {
 	FileStack,
 	RefreshCw
 } from 'lucide-svelte';
+import { clickOutside } from '$lib/actions/clickOutside';
 import type { Playlist, PlaylistItem } from '$lib/playlists/model';
 import { sourceLabel } from '$lib/playlists/model';
 
@@ -182,7 +183,7 @@ function itemPercent(id: string): number {
 			</button>
 		</div>
 	{:else}
-		<div class="shrink-0 px-4 py-3 border-b border-slate-700">
+		<div class="shrink-0 px-4 py-3 border-b border-slate-700" use:clickOutside={() => (menuOpen = false)}>
 			<div class="flex items-center gap-2">
 				<div class="flex-1 min-w-0">
 					<h2 class="text-base font-semibold text-slate-100 truncate">{playlist.name}</h2>
