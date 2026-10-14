@@ -32,6 +32,8 @@ import { getDocAsset } from '$lib/stores/library';
 		/** Owning doc id for resolving relative ePub image refs (null skips). */
 		assetDocId?: string | null;
 		onSentenceClick?: (idx: number) => void;
+		/** Blend into the page background (no card chrome) for the focused reader. */
+		bare?: boolean;
 	}
 
 	let {
@@ -49,7 +51,8 @@ import { getDocAsset } from '$lib/stores/library';
 		onSaveAudio,
 		hasActiveDoc,
 		assetDocId = null,
-		onSentenceClick
+		onSentenceClick,
+		bare = false
 	}: Props = $props();
 
 	let viewerEl: HTMLDivElement | null = $state(null);
@@ -285,9 +288,9 @@ import { getDocAsset } from '$lib/stores/library';
 	});
 </script>
 
-<div class="bg-slate-800 rounded-xl border border-slate-700 flex flex-col overflow-hidden min-h-[420px] max-h-[70vh] md:max-h-none md:min-h-0 md:h-full">
+<div class={bare ? 'flex flex-col overflow-hidden min-h-[60vh] md:min-h-0 md:h-full' : 'bg-slate-800 rounded-xl border border-slate-700 flex flex-col overflow-hidden min-h-[420px] max-h-[70vh] md:max-h-none md:min-h-0 md:h-full'}>
 	<!-- Pane header -->
-	<div class="shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 bg-slate-800">
+	<div class={bare ? 'shrink-0 flex items-center justify-between gap-2 px-1 py-2' : 'shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 bg-slate-800'}>
 		<span class="text-xs font-medium text-slate-400">Markdown</span>
 		<div class="flex items-center gap-1">
 			{#if isEditing}
@@ -342,7 +345,7 @@ import { getDocAsset } from '$lib/stores/library';
 	</div>
 
 	<!-- Content -->
-	<div class="flex-1 min-h-0 bg-slate-900/30 overflow-auto" bind:this={viewerEl}>
+	<div class={bare ? 'flex-1 min-h-0 overflow-y-auto overflow-x-hidden' : 'flex-1 min-h-0 bg-slate-900/30 overflow-auto'} bind:this={viewerEl}>
 		{#if isEditing}
 			<textarea
 				bind:this={editorEl}

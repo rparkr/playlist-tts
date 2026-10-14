@@ -16,7 +16,7 @@ export const LS_KEYS = {
 	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
 	postprocess: 'tts_postprocess',
-	paneSplit: 'tts_pane_split',
+	pdfSplit: 'tts_pdf_split',
 	offlineFmt: 'tts_offline_fmt',
 	offlineUse: 'tts_offline_use'
 } as const;

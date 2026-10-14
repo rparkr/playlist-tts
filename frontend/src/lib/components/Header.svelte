@@ -1,16 +1,14 @@
 <script lang="ts">
-	import { LibraryBig, PanelLeft } from 'lucide-svelte';
+	import { LibraryBig } from 'lucide-svelte';
 
 	interface Props {
 		activeTitle: string | null;
 		breadcrumbs: string;
-		leftPaneVisible: boolean;
 		onLogoClick: () => void;
 		onLibraryClick: () => void;
-		onToggleLeftPane: () => void;
 	}
 
-	let { activeTitle, breadcrumbs, leftPaneVisible, onLogoClick, onLibraryClick, onToggleLeftPane }: Props = $props();
+	let { activeTitle, breadcrumbs, onLogoClick, onLibraryClick }: Props = $props();
 </script>
 
 <header class="sticky top-0 z-30 w-full bg-slate-900 border-b border-slate-800">
@@ -34,14 +32,6 @@
 
 		<!-- Actions -->
 		<div class="flex items-center gap-2 shrink-0">
-			<button
-				onclick={onToggleLeftPane}
-				aria-label={leftPaneVisible ? 'Hide side pane' : 'Show side pane'}
-				title="Show/hide the PDF / Playlist / Library pane"
-				class="w-9 h-9 flex items-center justify-center rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 transition-colors {leftPaneVisible ? '' : 'opacity-60'}"
-			>
-				<PanelLeft size={20} />
-			</button>
 			<button
 				onclick={onLibraryClick}
 				aria-label="Open library"
