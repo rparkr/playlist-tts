@@ -12,13 +12,6 @@
 		SENTENCE_ATTR,
 		renderSectionBlocks
 	} from '$lib/markdown/render';
-	import {
-		candidateLines,
-		collapseWs,
-		createLineMirror,
-		snippetForSourceLine,
-		snippetForText
-	} from '$lib/markdown/scrollAnchor';
 	import { getDocAsset } from '$lib/stores/library';
 
 	interface Props {
@@ -249,20 +242,12 @@
 	// The view stays put while the active sentence is visible; once it moves
 	// off-page, scroll so it lands at the top of the viewer. Also syncs the
 	// rich-renderer highlight (injected spans are plain DOM, not Svelte).
-	// Exiting edit mode suppresses the scroll exactly once (see below): the
-	// transition effect restores the editor's position, and a smooth
-	// follow-scroll queued in the same flush would otherwise drag the view
-	// back to the active sentence.
-	let suppressFollowOnce = false;
+	// This is also what restores the view after editing: exiting edit mode
+	// re-runs this effect, which scrolls to the sentence TTS is on.
 	$effect(() => {
 		const idx = globalIdx;
 		const viewer = viewerEl;
-		if (isEditing || !viewer || totalSentences === 0) {
-			// Never leak a stale suppression into later follow-scrolls when
-			// the exit-triggered run bails before consuming it.
-			if (!isEditing) suppressFollowOnce = false;
-			return;
-		}
+		if (isEditing || !viewer || totalSentences === 0) return;
 		// Depend on the rendered output so fresh nodes get highlighted.
 		// Read only on the viewing path: while editing these recompute a
 		// ~1s full-book render (marked + sanitize) per keystroke that the
@@ -270,10 +255,6 @@
 		void richHtml;
 		void useRich;
 		syncActiveHighlight(idx);
-		if (suppressFollowOnce) {
-			suppressFollowOnce = false;
-			return;
-		}
 		requestAnimationFrame(() => {
 			const el = viewer.querySelector(`[${SENTENCE_ATTR}="${idx}"]`) as HTMLElement | null;
 			if (!el) return;
@@ -286,192 +267,18 @@
 		});
 	});
 
-	// Preserve scroll across the viewer↔editor swap by text identity: the
-	// topmost visible unit on one side is located by content on the other,
-	// so the same words stay in view despite different fonts and layouts.
-	// Capture must happen pre-swap (the parent calls `prepareEditSwap`
-	// before flipping `isEditing`). A plain scroll fraction is kept as the
-	// fallback whenever the anchor text cannot be found. The transition
-	// effect below applies the captured anchor post-swap.
-	interface EditAnchor {
-		/** Target editor logical line + in-view offset (entering; the editor
-		 * mounts only post-swap, so metrics resolve in the effect). */
-		editorLine?: number;
-		editorDelta?: number;
-		/** Snippet to locate in the viewer (exiting) with its in-view offset. */
-		viewerSnippet?: string;
-		viewerDelta?: number;
-	}
-	let pendingAnchor: EditAnchor | null = null;
-	let pendingFraction: number | null = null;
-	let editorMinHeight: string | null = $state(null);
-
-	/** Topmost visible sentence span in the viewer (O(1) hit-test + scan fallback). */
-	function topVisibleSentence(viewer: HTMLElement): HTMLElement | null {
-		const rect = viewer.getBoundingClientRect();
-		try {
-			const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 3);
-			const span = hit?.closest?.(`[${SENTENCE_ATTR}]`) as HTMLElement | null;
-			if (span && viewer.contains(span)) return span;
-		} catch {
-			// fall through to the scan
-		}
-		const spans = viewer.querySelectorAll(`[${SENTENCE_ATTR}]`);
-		for (const el of spans) {
-			const r = (el as HTMLElement).getBoundingClientRect();
-			if (r.bottom > rect.top + 1) return el as HTMLElement;
-		}
-		return null;
-	}
-
-	export function prepareEditSwap(entering: boolean): void {
-		const scroller = viewerEl;
-		// Plain `let`, not `$state`: the follow-scroll effect consumes this
-		// without subscribing, so setting it never retriggers anything. Set
-		// before the parent flips `isEditing`, so the exit-triggered effect
-		// run sees it and skips its smooth scroll (which would otherwise
-		// fight the anchor restore below and yank to the active sentence).
-		if (!entering) suppressFollowOnce = true;
-		pendingAnchor = null;
-		if (!scroller) {
-			pendingFraction = 0;
-			return;
-		}
-		const maxBefore = scroller.scrollHeight - scroller.clientHeight;
-		const fraction =
-			maxBefore > 0 ? Math.max(0, Math.min(1, scroller.scrollTop / maxBefore)) : 0;
-		pendingFraction = fraction;
-		if (entering) {
-			// Anchor to the visible view (not the active sentence): locate
-			// the topmost sentence in the draft. The editor mounts only
-			// post-swap, so only the logical line is captured here; metrics
-			// resolve in the transition effect.
-			const span = topVisibleSentence(scroller);
-			const viewerRect = scroller.getBoundingClientRect();
-			if (span) {
-				const snippet = snippetForText(span.textContent ?? '');
-				const lines = markdownDraft.split('\n');
-				const guessLine = Math.round(fraction * Math.max(0, lines.length - 1));
-				const hits = candidateLines(lines, snippet, guessLine);
-				if (snippet && hits.length > 0) {
-					pendingAnchor = {
-						editorLine: hits[0],
-						editorDelta: Math.max(0, span.getBoundingClientRect().top - viewerRect.top)
-					};
-				}
-			}
-			// Keep the scroll range stable across the swap; cleared on save/cancel.
-			editorMinHeight =
-				scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
-		} else {
-			// Anchor to the editor's top logical line: the scroll container
-			// (not the h-full textarea) carries the scroll, so map its
-			// position into the textarea and locate that line in the viewer.
-			const editor = editorEl;
-			if (editor) {
-				const lines = editor.value.split('\n');
-				const mirror = createLineMirror(editor, lines);
-				if (mirror) {
-					try {
-						const scrollerRect = scroller.getBoundingClientRect();
-						const editorRect = editor.getBoundingClientRect();
-						// Viewport top in text coords: the editor's box top
-						// sits `scrollerRect.top - editorRect.top` above the
-						// viewport, minus its padding-top.
-						const padTop =
-							parseFloat(getComputedStyle(editor).paddingTop) || 0;
-						const viewInText = Math.max(
-							0,
-							scrollerRect.top - editorRect.top - padTop
-						);
-						const line = mirror.lineAtScroll(viewInText);
-						// The viewport top can sit on a blank line — walk
-						// forward to the first line with searchable text,
-						// keeping the (possibly negative) delta so the
-						// restore reproduces the exact view.
-						let snippet = '';
-						let anchorLine = line;
-						for (let l = line; l < Math.min(line + 8, lines.length); l++) {
-							const s = snippetForSourceLine(lines[l] ?? '');
-							if (s) {
-								snippet = s;
-								anchorLine = l;
-								break;
-							}
-						}
-						if (snippet) {
-							pendingAnchor = {
-								viewerSnippet: snippet,
-								viewerDelta: viewInText - mirror.topOfLine(anchorLine)
-							};
-						}
-					} finally {
-						mirror.dispose();
-					}
-				}
-			}
-		}
-	}
-
+	// Entering edit mode starts at the beginning of the document (a
+	// predictable jump-to-top is easier to follow than a near-miss
+	// restore). Exiting needs no code: the follow-scroll effect above
+	// re-runs and brings the active TTS sentence back into view.
 	let prevEditing = false;
 	$effect(() => {
 		if (isEditing === prevEditing) return;
 		prevEditing = isEditing;
-		const anchor = pendingAnchor;
-		pendingAnchor = null;
-		const fraction = pendingFraction;
-		pendingFraction = null;
-		if (anchor === null && fraction === null) return;
+		if (!isEditing) return;
 		void tick().then(() => {
 			requestAnimationFrame(() => {
-				const el = viewerEl;
-				if (!el) return;
-				if (anchor?.editorLine !== undefined) {
-					// Entering: the editor mounts only post-swap — mirror its
-					// layout now and scroll the container to the anchored line.
-					const editor = editorEl;
-					const lines = editor ? editor.value.split('\n') : [];
-					const mirror = editor ? createLineMirror(editor, lines) : null;
-					if (editor && mirror) {
-						try {
-							const line = Math.max(0, Math.min(anchor.editorLine, lines.length - 1));
-							const viewerRect = el.getBoundingClientRect();
-							const editorRect = editor.getBoundingClientRect();
-							const padTop = parseFloat(getComputedStyle(editor).paddingTop) || 0;
-							const textTop = el.scrollTop + (editorRect.top - viewerRect.top);
-							el.scrollTop = Math.max(
-								0,
-								textTop + mirror.topOfLine(line) - (anchor.editorDelta ?? 0) + padTop
-							);
-						} finally {
-							mirror.dispose();
-						}
-						return;
-					}
-				}
-				if (anchor?.viewerSnippet) {
-					// Exiting: find the editor's top line in the fresh view.
-					const spans = el.querySelectorAll(`[${SENTENCE_ATTR}]`);
-					for (const node of spans) {
-						const text = collapseWs((node as HTMLElement).textContent ?? '');
-						if (text.includes(anchor.viewerSnippet)) {
-							const viewerRect = el.getBoundingClientRect();
-							const r = (node as HTMLElement).getBoundingClientRect();
-							// Signed delta: the anchor line sat `delta` below
-							// the editor's viewport top; reproduce that here.
-							el.scrollTop = Math.max(
-								0,
-								el.scrollTop + (r.top - viewerRect.top) + (anchor.viewerDelta ?? 0)
-							);
-							return;
-						}
-					}
-				}
-				if (fraction === null) return;
-				const maxAfter = el.scrollHeight - el.clientHeight;
-				if (maxAfter <= 0) return;
-				// Assigning scrollTop cancels any in-flight smooth follow-scroll.
-				el.scrollTop = fraction * maxAfter;
+				viewerEl?.scrollTo({ top: 0 });
 			});
 		});
 	});
@@ -540,7 +347,6 @@
 				bind:this={editorEl}
 				value={markdownDraft}
 				oninput={(e) => onDraftChange((e.target as HTMLTextAreaElement).value)}
-				style={editorMinHeight ? `min-height: ${editorMinHeight};` : ''}
 				class="w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500"
 				placeholder="Markdown…"
 			></textarea>

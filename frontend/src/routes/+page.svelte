@@ -1662,12 +1662,9 @@
 		if (!activeDoc) return;
 		if (!isEditing) {
 			editBackup = markdownDraft;
-			// Capture scroll pre-swap so edit mode lands at the same view.
-			markdownPaneRef?.prepareEditSwap?.(true);
 			isEditing = true;
 		} else {
 			// shouldn't happen because save/cancel handle
-			markdownPaneRef?.prepareEditSwap?.(false);
 			isEditing = false;
 		}
 	}
@@ -1677,7 +1674,6 @@
 			clearTimeout(saveDebounce);
 			saveDebounce = null;
 		}
-		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 		activeDoc.markdown = markdownDraft;
 		activeDoc.sections = parseMarkdownStructure(markdownDraft);
@@ -1691,7 +1687,6 @@
 			saveDebounce = null;
 		}
 		markdownDraft = editBackup;
-		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {
