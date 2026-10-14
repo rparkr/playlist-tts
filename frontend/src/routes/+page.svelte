@@ -1038,6 +1038,10 @@
 			} else {
 				activePlaylistId = null;
 				activeItemId = null;
+				// Standalone docs land in the unassigned library section - refresh
+				// so LibraryPane shows them without a manual revisit.
+				// (Playlist branch already refreshes via attach/openPlaylistItem.)
+				await refreshPlaylistData();
 			}
 			showToast('OCR completed');
 			ocrSucceeded = true;
@@ -1588,6 +1592,10 @@
 			else await openDoc(doc.id);
 		} else {
 			await openDoc(doc.id);
+			// Standalone (unassigned) add: openDoc does not touch library
+			// state, so refresh here or the new doc stays invisible until
+			// the user manually revisits the overview/library.
+			await refreshPlaylistData();
 		}
 		view = 'reader';
 	}
