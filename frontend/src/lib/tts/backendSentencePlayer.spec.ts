@@ -282,14 +282,14 @@ describe('BackendSentencePlayer fetch injection', () => {
 		await sleep(300);
 	});
 
-	it('uses the injected fetch (browser WASM path) instead of the backend', async () => {
+	it('uses the injected fetch (custom audio source) instead of the backend', async () => {
 		const calls: string[] = [];
 		player.setFetchAudio(async (text) => {
 			calls.push(text);
-			return { url: `browser:${text}` };
+			return { url: `custom:${text}` };
 		});
-		void player.play(['Alpha.', 'Bravo.'], 0, 'browser', null, null, 1);
-		await vi.waitFor(() => expect(audio().src).toBe('browser:Alpha.'));
+		void player.play(['Alpha.', 'Bravo.'], 0, 'custom', null, null, 1);
+		await vi.waitFor(() => expect(audio().src).toBe('custom:Alpha.'));
 		expect(calls).toContain('Alpha.');
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(started).toEqual([0]);

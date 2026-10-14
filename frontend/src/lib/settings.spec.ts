@@ -74,8 +74,17 @@ describe('resolveWithUrlPrecedence', () => {
 
 describe('postprocess flags', () => {
 	it('round-trips through JSON', () => {
-		const flags = { combine: true, uppercase: false, punct: true, pageMarkers: false };
+		const flags = { combine: true, uppercase: false, pageMarkers: false };
 		expect(parsePostprocessFlags(serializePostprocessFlags(flags))).toEqual(flags);
+	});
+
+	it('ignores the retired punct key from older payloads', () => {
+		const legacy = '{"combine": true, "uppercase": false, "punct": true, "pageMarkers": false}';
+		expect(parsePostprocessFlags(legacy)).toEqual({
+			combine: true,
+			uppercase: false,
+			pageMarkers: false
+		});
 	});
 
 	it('rejects malformed payloads', () => {
@@ -102,15 +111,14 @@ describe('parseSentenceIndex', () => {
 
 describe('voice by engine', () => {
 	it('round-trips through JSON', () => {
-		const map = { device: 'Google US English', pocket: 'alba', browser: 'alba' };
+		const map = { device: 'Google US English', pocket: 'alba' };
 		expect(parseVoiceByEngine(serializeVoiceByEngine(map))).toEqual(map);
 	});
 
-	it('fills a missing browser slot with null (migration-free)', () => {
-		expect(parseVoiceByEngine('{"device":"a","pocket":"b"}')).toEqual({
+	it('drops the retired browser slot from older payloads (migration-free)', () => {
+		expect(parseVoiceByEngine('{"device":"a","pocket":"b","browser":"c"}')).toEqual({
 			device: 'a',
-			pocket: 'b',
-			browser: null
+			pocket: 'b'
 		});
 	});
 
@@ -118,27 +126,26 @@ describe('voice by engine', () => {
 		expect(parseVoiceByEngine(null)).toBeNull();
 		expect(parseVoiceByEngine('not-json')).toBeNull();
 		expect(parseVoiceByEngine('{"device": 42}')).toBeNull();
-		expect(parseVoiceByEngine('{"browser": 42}')).toBeNull();
+		expect(parseVoiceByEngine('{"pocket": 42}')).toBeNull();
 	});
 
 	it('reads each engine slot with fallback', () => {
-		const map = { device: 'a', pocket: 'b', browser: 'c' };
+		const map = { device: 'a', pocket: 'b' };
 		expect(voiceForEngine(map, 'device', 'fb')).toBe('a');
 		expect(voiceForEngine(map, 'pocket', 'fb')).toBe('b');
-		expect(voiceForEngine(map, 'browser', 'fb')).toBe('c');
-		expect(voiceForEngine({ device: null, pocket: null, browser: null }, 'browser', 'fb')).toBe('fb');
+		expect(voiceForEngine({ device: null, pocket: null }, 'pocket', 'fb')).toBe('fb');
 		expect(voiceForEngine(null, 'device', 'fb')).toBe('fb');
 	});
 
 	it('sets one slot without touching the others', () => {
-		const next = withVoiceForEngine({ device: 'a', pocket: 'b', browser: null }, 'pocket', 'c');
-		expect(next).toEqual({ device: 'a', pocket: 'c', browser: null });
+		const next = withVoiceForEngine({ device: 'a', pocket: null }, 'pocket', 'c');
+		expect(next).toEqual({ device: 'a', pocket: 'c' });
 	});
 
 	it('keeps separate selections across engine toggles', () => {
 		// Simulate: pick device voice, toggle to pocket (carries over), pick a
 		// pocket voice, toggle back — the device voice is restored.
-		let map = { device: null as string | null, pocket: null as string | null, browser: null as string | null };
+		let map = { device: null as string | null, pocket: null as string | null };
 		map = withVoiceForEngine(map, 'device', 'Google US English');
 		let current = voiceForEngine(map, 'device', 'alba');
 		// toggle to pocket (no stored pocket voice yet → carries current over)

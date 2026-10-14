@@ -16,8 +16,6 @@ _TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
 # Terminal punctuation including optional closing quote/parens — used to decide
 # whether a paragraph ends a sentence.  Handles:  .  ."  .'  ?"  .") etc.
 _TERMINAL_RE = re.compile(r'[.!?…]["\'\)\]]*\s*$')
-# For headers — same idea but without trailing whitespace concern
-_HEADER_TERMINAL_RE = re.compile(r'[.!?…]["\'\)\]]*\s*$')
 
 # Uppercase word detection
 _UPPER_WORD_RE = re.compile(r"\b[A-Z]{2,}\b")
@@ -34,6 +32,32 @@ _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"\'])')
 _DEHYPHEN_RE = re.compile(r"(?<=[A-Za-z])-\s+(?=[A-Za-z])")
 # Soft hyphen (U+00AD) — invisible break hint; always drop, incl. trailing space.
 _SOFT_HYPHEN_RE = re.compile(r"­\s*")
+
+#: Widest a bare line can be and still read as one unmarked item (chars).
+BARE_ITEM_MAX_CHARS = 60
+_BARE_ITEM_WRAP_WORD_RE = re.compile(r"^[A-Za-z]{1,4}$")
+_BARE_ITEM_STRUCT_RE = re.compile(r"^(#{1,6}\s+|\s*[-*+]\s+|\s*\d{1,3}[.)]\s+|\s*>\s*|\s*\|)")
+
+
+def is_bare_item_line(line: str) -> bool:
+    """Whether `line` reads as one item of an unmarked list.
+
+    Short, unterminated, not ending on a continuation mark or a wrap word
+    (`the`, `of`, `your`, …), and not itself a structural line. Mirrors
+    `isBareItemLine` in `frontend/src/lib/markdown/parse.ts`.
+    """
+    t = line.strip()
+    if not t or len(t) > BARE_ITEM_MAX_CHARS:
+        return False
+    if _TERMINAL_RE.search(t):
+        return False
+    if re.search(r"[,;:—–-]\s*$", t):
+        return False
+    if _BARE_ITEM_STRUCT_RE.match(line):
+        return False
+    last = t.split()[-1] if t.split() else ""
+    last = re.sub(r"^[(\[\"']+|[)\]\"':;,.!?]+$", "", last)
+    return not _BARE_ITEM_WRAP_WORD_RE.match(last)
 
 
 _IMAGE_COMMENT_RE = re.compile(r"^\s*<!--\s*image\s*-->\s*$", re.IGNORECASE)
@@ -213,8 +237,15 @@ def reflow_columns(markdown: str) -> str:
             nxt_is_special = _is_special_block(nxt) or "```" in nxt
             if not nxt_is_header and not nxt_is_special:
                 nxt_stripped = nxt.lstrip()
+                # Unmarked item runs (bare table rows) stay separate: an
+                # item-like line never merges into a digit/paren-led next
+                # line (`E4B…77M` / `12B- …`), though hyphen wraps still join.
+                cur_last = cur.split("\n")[-1] if "\n" in cur else cur
+                nxt_lead = nxt_stripped[:1]
+                item_break = is_bare_item_line(cur_last) and (nxt_lead == "(" or nxt_lead.isdigit())
                 should_merge = bool(
                     nxt_stripped
+                    and not item_break
                     and (
                         ends_hyphen
                         or nxt_stripped[0].islower()
@@ -324,43 +355,7 @@ def normalize_uppercase(markdown: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. Ensure punctuation
-# ---------------------------------------------------------------------------
-
-
-def ensure_punctuation(markdown: str) -> str:
-    """Ensure headers and paragraphs end with terminal punctuation."""
-    lines = markdown.split("\n")
-    out: list[str] = []
-    in_fence = False
-
-    for line in lines:
-        if _CODE_FENCE_RE.match(line):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        if in_fence:
-            out.append(line)
-            continue
-
-        m = _HEADING_RE.match(line.strip())
-        if m:
-            hashes, title = m.groups()
-            title = title.strip()
-            if title and not _HEADER_TERMINAL_RE.search(title) and not _TABLE_RE.match(title):
-                title = title + "."
-            out.append(f"{hashes} {title}")
-        elif _TABLE_RE.match(line) or line.strip() == "" or _is_special_block(line):
-            out.append(line)
-        else:
-            # Don't mutate list/table rows globally; handled per line above.
-            out.append(line)
-
-    return "\n".join(out)
-
-
-# ---------------------------------------------------------------------------
-# 4. Page markers
+# 3. Page markers
 # ---------------------------------------------------------------------------
 
 
@@ -1041,8 +1036,6 @@ def apply_postprocessing(
                 p = reflow_columns(p)
             if opts.normalize_uppercase:
                 p = normalize_uppercase(p)
-            if opts.ensure_punctuation:
-                p = ensure_punctuation(p)
             processed.append(p)
         md, new_map = join_pages_with_markers(
             processed,
@@ -1064,9 +1057,6 @@ def apply_postprocessing(
 
     if opts.normalize_uppercase:
         md = normalize_uppercase(md)
-
-    if opts.ensure_punctuation:
-        md = ensure_punctuation(md)
 
     sections = parse_markdown_structure(md)
 

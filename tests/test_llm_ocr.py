@@ -180,11 +180,11 @@ def test_heading_stays_on_its_own_page(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(svc, "extract_pdf_pages", lambda _p: _image_contents(3))
     client = FakeClient(
         [
-            (0.0, "OUTER ISLAND\nDINOTOPIA\nSTATUTE MILES"),
+            (0.0, "NORTH REACH\nISLE OF GULLS\nLEAGUES"),
             (
                 0.0,
-                "3 HOW I DISCOVERED THE SKETCHBOOK\n\nEARLY A YEAR has gone by "
-                "since I first made the discovery.",
+                "3 HOW I FOUND THE LOGBOOK\n\nNEARLY A YEAR has gone by "
+                "since that first evening in the cove.",
             ),
             (0.0, "It was purely by chance."),
         ]
@@ -197,8 +197,8 @@ def test_heading_stays_on_its_own_page(monkeypatch: pytest.MonkeyPatch) -> None:
             client=cast("AsyncOpenAI", client),
         )
     )
-    assert md.index("STATUTE MILES") < md.index("Page 2.") < md.index("HOW I DISCOVERED")
-    assert md.index("discovery.") < md.index("Page 3.") < md.index("purely by chance")
+    assert md.index("LEAGUES") < md.index("Page 2.") < md.index("HOW I FOUND")
+    assert md.index("cove.") < md.index("Page 3.") < md.index("purely by chance")
     assert [p.page for p in page_map] == [1, 2, 3]
 
 

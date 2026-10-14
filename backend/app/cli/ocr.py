@@ -101,9 +101,6 @@ def convert(
         "--normalize-uppercase/--no-normalize-uppercase",
         help="Normalize uppercase spans to Title Case for TTS.",
     ),
-    ensure_punctuation: bool = typer.Option(
-        False, "--ensure-punctuation", help="Ensure headers end with punctuation."
-    ),
     no_page_markers: bool = typer.Option(False, "--no-page-markers", help="Disable page markers."),
     first_page_marker: bool = typer.Option(
         False, "--first-page-marker", help="Emit a Page 1. marker (LLM engine)."
@@ -130,7 +127,6 @@ def convert(
     opts = PostprocessOptions(
         combine_columns=not no_reflow,
         normalize_uppercase=normalize_uppercase,
-        ensure_punctuation=ensure_punctuation,
         insert_page_markers=not no_page_markers,
         first_page_marker=first_page_marker,
     )

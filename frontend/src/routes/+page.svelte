@@ -55,14 +55,6 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
-	import {
-		KOKORO_DEFAULT_VOICE,
-		KOKORO_VOICES,
-		KokoroEngine,
-		encodeWavBlob,
-		isKokoroVoice,
-		type KokoroProgress
-	} from '$lib/tts/kokoro';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
@@ -155,13 +147,12 @@
 	let sentencePlayer: BackendSentencePlayer | null = $state.raw(null);
 	let selectedVoiceId: string = $state('alba');
 	// Per-engine voice memory: each TTS engine remembers its own selection.
-	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null, browser: null });
+	let voiceByEngine: VoiceByEngine = $state({ device: null, pocket: null });
 	let synthRate: number = $state(1.0);
 	let toast: string | null = $state(null);
 
 	let optCombine: boolean = $state(true);
 	let optUppercase: boolean = $state(true);
-	let optPunct: boolean = $state(true);
 	let optPageMarkers: boolean = $state(true);
 	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
@@ -183,7 +174,6 @@
 		return {
 			combine_columns: optCombine,
 			normalize_uppercase: optUppercase,
-			ensure_punctuation: optPunct,
 			insert_page_markers: optPageMarkers,
 			first_page_marker: optFirstPageMarker,
 			first_page_number: optFirstPageNumber,
@@ -197,7 +187,6 @@
 		if (!doc?.postprocess) return;
 		optCombine = doc.postprocess.combine_columns;
 		optUppercase = doc.postprocess.normalize_uppercase;
-		optPunct = doc.postprocess.ensure_punctuation;
 		optPageMarkers = doc.postprocess.insert_page_markers;
 		optFirstPageMarker = doc.postprocess.first_page_marker ?? false;
 		const n = doc.postprocess.first_page_number ?? 1;
@@ -209,7 +198,6 @@
 					serializePostprocessFlags({
 						combine: optCombine,
 						uppercase: optUppercase,
-						punct: optPunct,
 						pageMarkers: optPageMarkers,
 						firstPageMarker: optFirstPageMarker,
 						firstPageNumber: optFirstPageNumber
@@ -319,8 +307,7 @@
 		// The URL carries clone *names* (slugified); stored state keeps IDs.
 		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
 			device: null,
-			pocket: null,
-			browser: null
+			pocket: null
 		};
 		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
 		if (voiceParam) {
@@ -334,7 +321,6 @@
 		if (storedPostprocess) {
 			optCombine = storedPostprocess.combine;
 			optUppercase = storedPostprocess.uppercase;
-			optPunct = storedPostprocess.punct;
 			optPageMarkers = storedPostprocess.pageMarkers;
 			if (typeof storedPostprocess.firstPageMarker === 'boolean') optFirstPageMarker = storedPostprocess.firstPageMarker;
 			if (typeof storedPostprocess.firstPageNumber === 'number') optFirstPageNumber = storedPostprocess.firstPageNumber;
@@ -405,7 +391,6 @@
 			serializePostprocessFlags({
 				combine: optCombine,
 				uppercase: optUppercase,
-				punct: optPunct,
 				pageMarkers: optPageMarkers,
 				firstPageMarker: optFirstPageMarker,
 				firstPageNumber: optFirstPageNumber
@@ -425,9 +410,12 @@
 
 	// Derived — sections live-parse the draft while it differs from the saved
 	// doc, so unsaved edits (and the save debounce window) reach the viewer
-	// and TTS immediately instead of only after persisting.
+	// and TTS immediately instead of only after persisting. Suspended while
+	// editing: the viewer is unmounted, so per-keystroke re-parses only feed
+	// a ~1s rich re-render (marked + sanitize) that nobody reads. The
+	// debounced autosave still parses once per idle window for persistence.
 	let sections: Section[] = $derived.by(() =>
-		selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
+		isEditing ? (activeDoc?.sections ?? []) : selectSections(activeDoc?.sections, activeDoc?.markdown, markdownDraft)
 	);
 	let totalSentences: number = $derived(getGlobalSentences(sections).length);
 	// Speakable TTS view over the live sections (#63): re-derived on open and
@@ -444,8 +432,10 @@
 	// and deleted sentences can never sound after a pause/seek/resume. The
 	// snapshot holds derived speakable chunks; a paused player re-parks on
 	// the chunk for the current sentence, while a running chain picks the
-	// new text up from the next chunk.
+	// new text up from the next chunk. Suspended while editing (per-keystroke
+	// seek/resetElement churn); a single refresh runs on save instead.
 	$effect(() => {
+		if (isEditing) return;
 		const texts = tts.texts;
 		const player = sentencePlayer;
 		if (!player) return;
@@ -1672,12 +1662,9 @@
 		if (!activeDoc) return;
 		if (!isEditing) {
 			editBackup = markdownDraft;
-			// Capture scroll pre-swap so edit mode lands at the same view.
-			markdownPaneRef?.prepareEditSwap?.(true);
 			isEditing = true;
 		} else {
 			// shouldn't happen because save/cancel handle
-			markdownPaneRef?.prepareEditSwap?.(false);
 			isEditing = false;
 		}
 	}
@@ -1687,7 +1674,6 @@
 			clearTimeout(saveDebounce);
 			saveDebounce = null;
 		}
-		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 		activeDoc.markdown = markdownDraft;
 		activeDoc.sections = parseMarkdownStructure(markdownDraft);
@@ -1701,7 +1687,6 @@
 			saveDebounce = null;
 		}
 		markdownDraft = editBackup;
-		markdownPaneRef?.prepareEditSwap?.(false);
 		isEditing = false;
 	}
 	function handleSentenceClick(idx: number) {
@@ -1729,10 +1714,7 @@
 		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
 		// current selection over so nothing unexpectedly resets to a default.
-		let next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
-		if (ttsEngine === 'browser' && !isKokoroVoice(next)) {
-			next = KOKORO_DEFAULT_VOICE;
-		}
+		const next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
 		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, next);
 		selectedVoiceId = next;
 	}
@@ -1796,8 +1778,7 @@
 		const fallback = builtinVoices[0]?.name ?? 'alba';
 		voiceByEngine = {
 			device: voiceByEngine.device === id ? fallback : voiceByEngine.device,
-			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket,
-			browser: voiceByEngine.browser === id ? fallback : voiceByEngine.browser
+			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket
 		};
 		if (selectedVoiceId === id) {
 			selectedVoiceId = fallback;
@@ -1851,36 +1832,6 @@
 	// Player
 	let isBackendGenerating: boolean = $state(false);
 
-	// Browser Kokoro engine: module singleton plus download progress/error
-	// state for the settings modal's explicit download.
-	let kokoroEngine: KokoroEngine | null = null;
-	let kokoroReady = $state(false);
-	let kokoroBusy = $state(false);
-	let kokoroDl: KokoroProgress | null = $state(null);
-	let kokoroError: string | null = $state(null);
-
-	function getKokoroEngine(): KokoroEngine {
-		if (!kokoroEngine) kokoroEngine = new KokoroEngine();
-		return kokoroEngine;
-	}
-
-	async function downloadKokoroModel() {
-		kokoroError = null;
-		kokoroBusy = true;
-		try {
-			await getKokoroEngine().ensureReady((p) => {
-				kokoroDl = p;
-			});
-			kokoroReady = true;
-			showToast('Browser voice model ready');
-		} catch (e: unknown) {
-			kokoroError = (e as Error)?.message ?? String(e);
-			showToast(`Model download failed: ${kokoroError}`);
-		} finally {
-			kokoroBusy = false;
-		}
-	}
-
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
 			sentencePlayer = new BackendSentencePlayer();
@@ -1913,7 +1864,7 @@
 					})();
 				},
 				onError: (msg) => {
-					showToast(`${ttsEngine === 'browser' ? 'Browser TTS' : 'Backend TTS'} failed: ${msg}`);
+					showToast(`Backend TTS failed: ${msg}`);
 					isPlaying = false;
 				},
 				onLoadingChange: (loading) => {
@@ -1930,12 +1881,8 @@
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start sentence-player playback — server pocket or browser Kokoro. */
+	/** Start sentence-player playback (server pocket or device speech chain). */
 	function playSentencePlayer() {
-		if (ttsEngine === 'browser') {
-			void playKokoro();
-			return;
-		}
 		if (!activeDoc) return;
 		const texts = tts.texts;
 		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
@@ -1948,51 +1895,6 @@
 		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
 	}
 
-	/** Start browser-Kokoro playback from `globalIdx` (model first). */
-	async function playKokoro() {
-		if (!activeDoc) return;
-		const texts = tts.texts;
-		if (texts.length === 0 || texts.slice(chunkForSentence(tts, globalIdx)).every((s) => !s.trim())) {
-			isPlaying = false;
-			return;
-		}
-		const engine = getKokoroEngine();
-		if (engine.status !== 'ready') {
-			kokoroBusy = true;
-			try {
-				await engine.ensureReady((p) => {
-					kokoroDl = p;
-				});
-				kokoroReady = true;
-				kokoroError = null;
-			} catch (e: unknown) {
-				kokoroError = (e as Error)?.message ?? String(e);
-				isPlaying = false;
-				showToast('Browser voice model not ready — download it in TTS settings');
-				showTtsSettings = true;
-				return;
-			} finally {
-				kokoroBusy = false;
-			}
-		}
-		const voice = isKokoroVoice(selectedVoiceId) ? selectedVoiceId : KOKORO_DEFAULT_VOICE;
-		const player = getSentencePlayer();
-		player.setFetchAudio(async (text) => {
-			// Synthesize at 1x; the player element applies `synthRate` so
-			// ETA stats stay comparable with the server engine.
-			const audio = await engine.generate(text, { voice, speed: 1.0 });
-			return { url: URL.createObjectURL(encodeWavBlob(audio.samples, audio.sampleRate)) };
-		});
-		isBackendGenerating = true;
-		void player.play(
-			texts,
-			chunkForSentence(tts, globalIdx),
-			`kokoro::${voice}`,
-			null,
-			null,
-			synthRate
-		);
-	}
 	function playWebSpeechCorrect() {
 		if (!isPlaying || !activeDoc) { isPlaying = false; return; }
 		const all = getGlobalSentences(sections);
@@ -2581,22 +2483,15 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
-		{kokoroReady}
-		kokoroDownloading={kokoroBusy}
-		kokoroProgress={kokoroDl}
-		{kokoroError}
-		onDownloadKokoro={downloadKokoroModel}
 	/>
 
 	<PostprocessingModal
 		open={showPostprocess}
 		onClose={() => (showPostprocess = false)}
 		{optCombine}
-		{optPunct}
 		{optPageMarkers}
 		{optUppercase}
 		onCombineChange={(v) => (optCombine = v)}
-		onPunctChange={(v) => (optPunct = v)}
 		onPageMarkersChange={(v) => (optPageMarkers = v)}
 		onUppercaseChange={(v) => (optUppercase = v)}
 		optFirstPageMarker={optFirstPageMarker}

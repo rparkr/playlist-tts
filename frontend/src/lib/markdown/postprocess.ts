@@ -7,12 +7,12 @@
  */
 
 import { parseMarkdownStructure, type PageMapItem, type Section } from './parse';
+import { isBareItemLine } from './parse';
 
 /** User-configurable post-processing flags (snake_case to match backend JSON). */
 export interface PostprocessOptions {
 	combine_columns: boolean;
 	normalize_uppercase: boolean;
-	ensure_punctuation: boolean;
 	insert_page_markers: boolean;
 	first_page_marker?: boolean;
 	/** Extraction engine override for `/api/ocr/jobs` (`llm` routes to `/api/ocr/llm`). */
@@ -30,7 +30,6 @@ export interface PostprocessOptions {
 export const DEFAULT_POSTPROCESS: PostprocessOptions = {
 	combine_columns: true,
 	normalize_uppercase: false,
-	ensure_punctuation: false,
 	insert_page_markers: true,
 	first_page_marker: true,
 	first_page_number: 1,
@@ -44,7 +43,6 @@ const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const CODE_FENCE_RE = /^\s*```/;
 const TABLE_RE = /^\s*\|.*\|\s*$/;
 const TERMINAL_RE = /[.!?…]["'\)\]]*\s*$/;
-const HEADER_TERMINAL_RE = /[.!?…]["'\)\]]*\s*$/;
 const UPPER_WORD_RE = /\b[A-Z]{2,}\b/;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z0-9"'])/;
 const IMAGE_COMMENT_RE = /^\s*<!--\s*image\s*-->\s*$/i;
@@ -247,8 +245,16 @@ export function reflowColumns(markdown: string): string {
 				const nxtStripped = nxt.replace(/^\s+/, '');
 				const first = nxtStripped[0] ?? '';
 				const isLowerLetter = first >= 'a' && first <= 'z';
+				// Unmarked item runs (bare table rows) stay separate: an
+				// item-like line never merges into a digit/paren-led next
+				// line. Mirrors the `isItemBoundary` rule in `parse.ts`.
+				const curLines = cur.split('\n');
+				const itemBreak =
+					isBareItemLine(curLines[curLines.length - 1] ?? '') &&
+					(/[0-9]/.test(first) || first === '(');
 				const shouldMerge =
 					nxtStripped.length > 0 &&
+					!itemBreak &&
 					(endsHyphen || isLowerLetter || /[0-9]/.test(first) || first === '(');
 				if (shouldMerge) {
 					let merged: string;
@@ -337,36 +343,6 @@ export function normalizeUppercase(markdown: string): string {
 function toTitle(word: string): string {
 	if (!word) return word;
 	return word[0].toUpperCase() + word.slice(1).toLowerCase();
-}
-
-/** Ensure headers and paragraphs end with terminal punctuation. */
-export function ensurePunctuation(markdown: string): string {
-	const lines = markdown.split('\n');
-	const out: string[] = [];
-	let inFence = false;
-	for (const line of lines) {
-		if (CODE_FENCE_RE.test(line)) {
-			inFence = !inFence;
-			out.push(line);
-			continue;
-		}
-		if (inFence) {
-			out.push(line);
-			continue;
-		}
-		const m = HEADING_RE.exec(line.trim());
-		if (m) {
-			const hashes = m[1];
-			let title = m[2].trim();
-			if (title && !HEADER_TERMINAL_RE.test(title) && !TABLE_RE.test(title)) title += '.';
-			out.push(`${hashes} ${title}`);
-		} else if (TABLE_RE.test(line) || line.trim() === '' || isSpecialBlock(line)) {
-			out.push(line);
-		} else {
-			out.push(line);
-		}
-	}
-	return out.join('\n');
 }
 
 /** Insert `Page N.` markers at page boundaries after sentence completion. */
@@ -655,7 +631,6 @@ export function applyPostprocessing(
 				p = reflowColumns(p);
 			}
 			if (opts.normalize_uppercase) p = normalizeUppercase(p);
-			if (opts.ensure_punctuation) p = ensurePunctuation(p);
 			return p;
 		});
 		const joined = joinPagesWithMarkers(processed, opts.insert_page_markers, {
@@ -672,7 +647,6 @@ export function applyPostprocessing(
 		md = reflowColumns(md);
 	}
 	if (opts.normalize_uppercase) md = normalizeUppercase(md);
-	if (opts.ensure_punctuation) md = ensurePunctuation(md);
 
 	let sections = parseMarkdownStructure(md);
 	let newMap: PageMapItem[];

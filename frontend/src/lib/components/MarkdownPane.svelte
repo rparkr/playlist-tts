@@ -242,13 +242,18 @@
 	// The view stays put while the active sentence is visible; once it moves
 	// off-page, scroll so it lands at the top of the viewer. Also syncs the
 	// rich-renderer highlight (injected spans are plain DOM, not Svelte).
+	// This is also what restores the view after editing: exiting edit mode
+	// re-runs this effect, which scrolls to the sentence TTS is on.
 	$effect(() => {
 		const idx = globalIdx;
 		const viewer = viewerEl;
+		if (isEditing || !viewer || totalSentences === 0) return;
 		// Depend on the rendered output so fresh nodes get highlighted.
+		// Read only on the viewing path: while editing these recompute a
+		// ~1s full-book render (marked + sanitize) per keystroke that the
+		// unmounted viewer never reads.
 		void richHtml;
 		void useRich;
-		if (isEditing || !viewer || totalSentences === 0) return;
 		syncActiveHighlight(idx);
 		requestAnimationFrame(() => {
 			const el = viewer.querySelector(`[${SENTENCE_ATTR}="${idx}"]`) as HTMLElement | null;
@@ -262,60 +267,18 @@
 		});
 	});
 
-	// Preserve scroll across the viewer↔editor swap so editing a long doc
-	// lands at the same position instead of jumping to the top. The outer
-	// scroll container persists, but the editor (`h-full` textarea) is much
-	// shorter than rendered prose: without compensation the browser clamps
-	// `scrollTop` to 0 when entering edit mode, and there are no sentence
-	// spans to anchor to when leaving it.
-	//
-	// Capture must happen pre-swap (the parent calls `prepareEditSwap`
-	// before flipping `isEditing`): on entering, pin the textarea's
-	// min-height to the pre-swap scroll height (keeping the scroll range
-	// stable); on exit, just carry the textarea's fraction over. The
-	// transition effect below only restores the captured fraction post-swap.
-	let pendingFraction: number | null = null;
-	let editorMinHeight: string | null = $state(null);
-
-	export function prepareEditSwap(entering: boolean): void {
-		const scroller = viewerEl;
-		if (!scroller) {
-			pendingFraction = 0;
-			return;
-		}
-		const maxBefore = scroller.scrollHeight - scroller.clientHeight;
-		const active = scroller.querySelector(
-			`[data-sentence-idx="${globalIdx}"]`
-		) as HTMLElement | null;
-		let fraction: number;
-		if (active && entering) {
-			const viewerRect = scroller.getBoundingClientRect();
-			const elRect = active.getBoundingClientRect();
-			const absTop = scroller.scrollTop + (elRect.top - viewerRect.top);
-			fraction = scroller.scrollHeight > 0 ? absTop / scroller.scrollHeight : 0;
-		} else {
-			fraction = maxBefore > 0 ? scroller.scrollTop / maxBefore : 0;
-		}
-		pendingFraction = Math.max(0, Math.min(1, fraction));
-		// Keep the scroll range stable across the swap; cleared on save/cancel.
-		editorMinHeight = entering && scroller.scrollHeight > 0 ? `${scroller.scrollHeight}px` : null;
-	}
-
+	// Entering edit mode starts at the beginning of the document (a
+	// predictable jump-to-top is easier to follow than a near-miss
+	// restore). Exiting needs no code: the follow-scroll effect above
+	// re-runs and brings the active TTS sentence back into view.
 	let prevEditing = false;
 	$effect(() => {
 		if (isEditing === prevEditing) return;
 		prevEditing = isEditing;
-		const fraction = pendingFraction;
-		pendingFraction = null;
-		if (fraction === null) return;
+		if (!isEditing) return;
 		void tick().then(() => {
 			requestAnimationFrame(() => {
-				const el = viewerEl;
-				if (!el) return;
-				const maxAfter = el.scrollHeight - el.clientHeight;
-				if (maxAfter <= 0) return;
-				// Assigning scrollTop cancels any in-flight smooth follow-scroll.
-				el.scrollTop = fraction * maxAfter;
+				viewerEl?.scrollTo({ top: 0 });
 			});
 		});
 	});
@@ -384,7 +347,6 @@
 				bind:this={editorEl}
 				value={markdownDraft}
 				oninput={(e) => onDraftChange((e.target as HTMLTextAreaElement).value)}
-				style={editorMinHeight ? `min-height: ${editorMinHeight};` : ''}
 				class="w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500"
 				placeholder="Markdown…"
 			></textarea>

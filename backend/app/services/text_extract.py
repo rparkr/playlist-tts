@@ -18,7 +18,6 @@ from pathlib import Path
 from backend.app.models.schemas import PageMapItem, PostprocessOptions, Section
 from backend.app.services.postprocess import (
     dehyphenate,
-    ensure_punctuation,
     join_pages_strict,
     normalize_page_overrides,
     normalize_uppercase,
@@ -147,8 +146,6 @@ def convert_pdf_with_text(
             text = reflow_columns(text)
         if opts.normalize_uppercase:
             text = normalize_uppercase(text)
-        if opts.ensure_punctuation:
-            text = ensure_punctuation(text)
         processed.append(text)
     md, page_map = join_pages_strict(
         processed,

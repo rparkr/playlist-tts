@@ -21,7 +21,6 @@ generated:
 2. **Post-processing pipeline** `backend/app/services/postprocess.py` (all unit-tested, user-configurable flags):
    - **Reflow:** merge trailing paragraphs continuing across column/page — heuristic `![.!?"')]?$` + next para lowercase; handle quote-terminated `."` as terminal; insert `Page N.` *after* sentence boundary, not mid-sentence.
    - **Normalize uppercase** (`off | title | lower_long`): consecutive uppercase words → titlecase / words >5 chars all-upper → lower (preserve acronyms ≤5).
-   - **Ensure punctuation:** headers without terminal `.!?` + closing quote → append `.` (skip code fences/tables).
    - **Page markers** (`insert_page_markers` bool).
    - **Tokenizer-aware chunking:** `split_into_best_sentences(tokenizer, 50)` (`pocket-tts/default_parameters.py: MAX_TOKEN_PER_CHUNK=50`) — fixes `fixes-for-tts-from-line-length.txt:14` skipped words.
 

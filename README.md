@@ -63,7 +63,7 @@ Both commands reuse the backend services and are installed as console scripts:
 # PDF → Markdown via granite-docling
 uv run ocr input.pdf -o out.md [--no-reflow] \
   [--normalize-uppercase off|title|lower_long] \
-  [--ensure-punctuation] [--no-page-markers]
+  [--no-page-markers]
 
 # Markdown → audio via pocket-tts
 uv run tts input.md -v alba -o out.wav [--format wav|mp3|webm] [--quantize]

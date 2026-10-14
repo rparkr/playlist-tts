@@ -17,7 +17,7 @@ generated:
 POST /api/ocr/jobs
   multipart: file: UploadFile (.pdf, ≤100 MB) | postprocess: JSON PostprocessOptions
          {combine_columns:true, normalize_uppercase:"off"|"title"|"lower_long",
-          ensure_punctuation:bool, insert_page_markers:bool}
+          insert_page_markers:bool}
   → 202 {jobId}  (also sync alias POST /api/ocr awaits job with poll fallback for CLI)
 
 GET  /api/ocr/jobs/{id}       → {status: queued|running|done|error, progress:{done,total}, result?:{markdown, sections, pageMap, meta:{pageCount, ms}}}

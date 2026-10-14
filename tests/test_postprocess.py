@@ -1,4 +1,4 @@
-"""Tests for postprocessing pipeline — reflow, uppercase, punctuation, parsing."""
+"""Tests for postprocessing pipeline — reflow, uppercase, item lines, parsing."""
 
 from backend.app.models.schemas import PostprocessOptions
 from backend.app.services.postprocess import (
@@ -6,7 +6,7 @@ from backend.app.services.postprocess import (
     build_page_map,
     chunk_text_into_sentences,
     dehyphenate,
-    ensure_punctuation,
+    is_bare_item_line,
     join_pages_strict,
     normalize_uppercase,
     parse_markdown_structure,
@@ -29,6 +29,27 @@ def test_reflow_merges_continuation():
     out = reflow_columns(md)
     # First para should now be completed sentence + remainder
     assert "and continues here." in out
+
+
+def test_reflow_keeps_bare_item_rows_separate():
+    """Item-like line never merges into a digit-led next line."""
+    md = "E4B305M 150M 670M + 2,820M 3,940M 77M\n\n12B- - 1,000M 10,890M 400M"
+    out = reflow_columns(md)
+    assert out.count("\n\n") >= 1
+    # Citation wraps still merge (trailing comma defeats item-likeness).
+    cite = "embeddings as in Gemma 3n (Gemma Team,\n\n2025b), making them effective."
+    assert "\n\n" not in reflow_columns(cite)
+
+
+def test_is_bare_item_line():
+    """Short unterminated lines flag; wraps and structural lines do not."""
+    assert is_bare_item_line("E2B305M 150M 400M + 2,340M") is True
+    assert is_bare_item_line("Gemma 4 Technical Report") is True
+    assert is_bare_item_line("most capable and efficient generation in the") is False
+    assert is_bare_item_line("with RMSNorm (Zhang and Sennrich, 2019),") is False
+    assert is_bare_item_line("Our models have pre-norm and post-norm.") is False
+    assert is_bare_item_line("- marked item") is False
+    assert is_bare_item_line("| piped | row |") is False
 
 
 def test_normalize_uppercase_single_long_word():
@@ -63,13 +84,6 @@ def test_postprocess_options_uppercase_back_compat():
     assert PostprocessOptions(normalize_uppercase="title").normalize_uppercase is True  # type: ignore[arg-type]
 
 
-def test_ensure_punctuation_header():
-    """Header without punctuation should get period."""
-    md = "## Chapter overview\n\nContent here."
-    out = ensure_punctuation(md)
-    assert "## Chapter overview." in out
-
-
 def test_parse_markdown_structure():
     """Parse sections and sentence chunks."""
     md = (
@@ -98,13 +112,12 @@ def test_apply_postprocessing_integration():
     opts = PostprocessOptions(
         combine_columns=True,
         normalize_uppercase=True,
-        ensure_punctuation=True,
         insert_page_markers=False,
     )
     out_md, sections, page_map = apply_postprocessing(md, opts, None)
     assert sections
     assert page_map
-    assert "Title." in out_md or "Title" in out_md
+    assert "Title" in out_md
 
 
 def test_build_page_map():
@@ -193,13 +206,13 @@ def test_join_pages_strict_never_carries_next_page_content():
     before `Page 2.`; the strict join must not.
     """
     md, page_map = join_pages_strict(
-        ["OUTER ISLAND\nDINOTOPIA\nSTATUTE MILES", "HOW I DISCOVERED THE SKETCHBOOK"],
+        ["NORTH REACH\nISLE OF GULLS\nLEAGUES", "HOW I FOUND THE LOGBOOK"],
         True,
     )
-    assert md.index("STATUTE MILES") < md.index("Page 2.")
-    assert md.index("Page 2.") < md.index("HOW I DISCOVERED")
+    assert md.index("LEAGUES") < md.index("Page 2.")
+    assert md.index("Page 2.") < md.index("HOW I FOUND")
     assert [p.page for p in page_map] == [1, 2]
-    assert md[page_map[1].char_start : page_map[1].char_end] == "HOW I DISCOVERED THE SKETCHBOOK"
+    assert md[page_map[1].char_start : page_map[1].char_end] == "HOW I FOUND THE LOGBOOK"
 
 
 def test_join_pages_strict_keeps_empty_pages_aligned():
