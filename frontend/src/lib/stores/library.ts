@@ -223,14 +223,30 @@ export async function deleteOfflineAudioByDoc(docId: string): Promise<void> {
 	}
 }
 
-/** Lightweight `{ key, bytes }` listing for offline-audio storage UI. */
-export async function getOfflineAudioSizes(): Promise<Record<string, number>> {
+/** Lightweight per-file listing for offline-audio storage UI (no blob reads by caller). */
+export interface OfflineAudioMeta {
+	bytes: number;
+	textHash: string;
+	docId: string;
+	voiceKey: string;
+	fmt: string;
+}
+
+export async function getOfflineAudioMeta(): Promise<Record<string, OfflineAudioMeta>> {
 	const db = await getDB();
 	try {
 		const all = await db.getAll('audio');
-		const sizes: Record<string, number> = {};
-		for (const r of all) sizes[r.key] = r.bytes;
-		return sizes;
+		const meta: Record<string, OfflineAudioMeta> = {};
+		for (const r of all) {
+			meta[r.key] = {
+				bytes: r.bytes,
+				textHash: r.textHash,
+				docId: r.docId,
+				voiceKey: r.voiceKey,
+				fmt: r.fmt
+			};
+		}
+		return meta;
 	} catch {
 		return {};
 	}

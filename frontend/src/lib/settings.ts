@@ -16,7 +16,9 @@ export const LS_KEYS = {
 	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
 	postprocess: 'tts_postprocess',
-	paneSplit: 'tts_pane_split'
+	paneSplit: 'tts_pane_split',
+	offlineFmt: 'tts_offline_fmt',
+	offlineUse: 'tts_offline_use'
 } as const;
 
 export const URL_PARAMS = {
@@ -40,6 +42,13 @@ export function parseEngine(value: string | null | undefined): TtsEngine | null 
 	if (value === 'pocket' || value === 'backend') return 'pocket';
 	if (value === 'device' || value === 'builtin') return 'device';
 	// Retired: 'browser'/'local' (Kokoro WASM engine, removed) → null → default.
+	return null;
+}
+
+/** Parse an offline-use flag (`'1'` on, `'0'` off); null when absent/invalid. */
+export function parseOfflineUse(value: string | null | undefined): boolean | null {
+	if (value === '1') return true;
+	if (value === '0') return false;
 	return null;
 }
 

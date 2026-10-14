@@ -2,6 +2,7 @@
 	import { Check, Pencil, Trash2, X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
 	import { sortVoiceOptions, type TtsEngine } from '$lib/settings';
+	import { OFFLINE_FMTS, type OfflineAudioFmt } from '$lib/tts/offlineAudio';
 
 	interface Props {
 		open: boolean;
@@ -19,6 +20,10 @@
 		onRateChange: (rate: number) => void;
 		onVoiceFile: (e: Event) => void;
 		isBackendGenerating: boolean;
+		offlineFmt: OfflineAudioFmt;
+		onOfflineFmtChange: (fmt: OfflineAudioFmt) => void;
+		offlineUse: boolean;
+		onOfflineUseChange: (use: boolean) => void;
 	}
 
 	let {
@@ -36,7 +41,11 @@
 		synthRate,
 		onRateChange,
 		onVoiceFile,
-		isBackendGenerating
+		isBackendGenerating,
+		offlineFmt,
+		onOfflineFmtChange,
+		offlineUse,
+		onOfflineUseChange
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
@@ -300,6 +309,32 @@
 						<span class="text-xs text-slate-400">x</span>
 					</div>
 					<div class="text-xs text-slate-500">0.5x – 2.0x, step 0.1</div>
+				</div>
+				<!-- Offline chapter audio -->
+				<div class="flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-900/60 p-2.5">
+					<span class="text-sm font-medium text-slate-200">Offline chapter audio</span>
+					<label class="flex items-center gap-2 text-xs text-slate-300">
+						<input
+							type="checkbox"
+							checked={offlineUse}
+							onchange={(e) => onOfflineUseChange((e.target as HTMLInputElement).checked)}
+							class="w-4 h-4 accent-sky-500"
+						/>
+						Play pre-generated file when available (lock-screen proof)
+					</label>
+					<label class="flex items-center gap-2 text-xs text-slate-300">
+						Format
+						<select
+							value={offlineFmt}
+							onchange={(e) => onOfflineFmtChange((e.target as HTMLSelectElement).value as OfflineAudioFmt)}
+							class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-sky-500"
+						>
+							{#each OFFLINE_FMTS as fmt}
+								<option value={fmt}>{fmt === 'webm' ? 'webm (smallest)' : fmt === 'mp3' ? 'mp3 (compatible)' : 'wav (largest)'}</option>
+							{/each}
+						</select>
+					</label>
+					<div class="text-xs text-slate-500">Pre-generate from the playlist item card; files live in the browser.</div>
 				</div>
 			</div>
 		</div>

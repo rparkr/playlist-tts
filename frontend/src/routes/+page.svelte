@@ -19,6 +19,11 @@
 		getPdf,
 		deletePdf,
 		getPdfSizes,
+		deleteOfflineAudio,
+		getOfflineAudio,
+		getOfflineAudioMeta,
+		offlineAudioKey,
+		saveOfflineAudio,
 		saveDocAssets,
 		hasDocAssets,
 		createPlaylist,
@@ -35,6 +40,7 @@
 		movePlaylistItem,
 		updatePlaylistItemProgress,
 		type Doc,
+		type OfflineAudioMeta,
 		type VoiceRecord,
 		type Playlist,
 		type PlaylistItem,
@@ -62,6 +68,15 @@
 		updateMediaMetadata
 	} from '$lib/tts/mediaSession';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
+	import {
+		generateOfflineAudioBlob,
+		hashSpeakableText,
+		isOfflineAudioStale,
+		joinSpeakableTexts,
+		parseOfflineFmt,
+		type OfflineAudioFmt
+	} from '$lib/tts/offlineAudio';
+	import { OfflinePlayer } from '$lib/tts/offlinePlayer';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
@@ -69,7 +84,10 @@
 		type OverviewPlaylistStat,
 		type OverviewSearchHit
 	} from '$lib/components/Overview.svelte';
-	import PlaylistPane, { type PlaylistItemStat } from '$lib/components/PlaylistPane.svelte';
+	import PlaylistPane, {
+		type PlaylistItemStat,
+		type PlaylistOfflineState
+	} from '$lib/components/PlaylistPane.svelte';
 	import LibraryPane, { type LibraryPlaylistStat } from '$lib/components/LibraryPane.svelte';
 	import TtsSettingsModal from '$lib/components/TtsSettingsModal.svelte';
 	import PostprocessingModal from '$lib/components/PostprocessingModal.svelte';
@@ -83,6 +101,7 @@
 		LS_KEYS,
 		URL_PARAMS,
 		parseEngine,
+		parseOfflineUse,
 		parseRate,
 		parseSentenceIndex,
 		parsePostprocessFlags,
@@ -368,6 +387,8 @@
 			// Restore the cached PDF so the viewer renders after reload/deep-link.
 			await loadCachedPdf(activeDoc.id);
 		}
+		offlineFmt = parseOfflineFmt(localStorage.getItem(LS_KEYS.offlineFmt)) ?? 'webm';
+		offlineUse = parseOfflineUse(localStorage.getItem(LS_KEYS.offlineUse)) ?? true;
 		await refreshPlaylistData();
 		// Fresh profiles (no restored doc) land on the overview page.
 		if (!activeDoc) view = 'overview';
@@ -392,6 +413,8 @@
 		localStorage.setItem(LS_KEYS.voice, selectedVoiceId);
 		localStorage.setItem(LS_KEYS.voiceByEngine, serializeVoiceByEngine(voiceByEngine));
 		localStorage.setItem(LS_KEYS.engine, ttsEngine);
+		localStorage.setItem(LS_KEYS.offlineFmt, offlineFmt);
+		localStorage.setItem(LS_KEYS.offlineUse, offlineUse ? '1' : '0');
 		localStorage.setItem(
 			LS_KEYS.postprocess,
 			serializePostprocessFlags({
@@ -1064,6 +1087,7 @@
 		}
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
 		sentencePlayer?.stop();
+		stopOffline();
 		isPlaying = false;
 		beginOcrProgress();
 		try {
@@ -1113,6 +1137,7 @@
 		if (!d) return;
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
 		sentencePlayer?.stop();
+		stopOffline();
 		isPlaying = false;
 		pdfPendingOcr = false;
 		pendingPdfName = '';
@@ -1143,6 +1168,7 @@
 		docs = await getAllDocs();
 		await refreshPlaylistData();
 		if (activeDoc?.id === id) {
+			stopOffline();
 			activeDoc = null;
 			activeItemId = null;
 			markdownDraft = '';
@@ -1193,6 +1219,7 @@
 		if (activeItemId && !playlistItems.some((i) => i.id === activeItemId)) activeItemId = null;
 		await refreshUnassigned();
 		await refreshItemStats();
+		await refreshOfflineStates();
 		await refreshLibraryStats();
 	}
 
@@ -1310,10 +1337,165 @@
 		overviewSearch = idx;
 	}
 
+	// Pocket-tts voice selection for offline files (independent of the
+	// current engine, so cards can pre-generate while listening on device).
+	function pocketVoiceId(): string {
+		if (ttsEngine === 'pocket') return selectedVoiceId;
+		return voiceByEngine.pocket ?? 'alba';
+	}
+	function resolvePocketVoice(): { voiceKey: string; voiceId: string | null; blob: Blob | null } {
+		const id = pocketVoiceId();
+		const custom = customVoices.find((v) => v.id === id);
+		if (custom) return { voiceKey: custom.id, voiceId: null, blob: custom.blob };
+		return { voiceKey: id, voiceId: id, blob: null };
+	}
+	function getOfflinePlayer(): OfflinePlayer {
+		if (!offlinePlayer) {
+			offlinePlayer = new OfflinePlayer();
+			offlinePlayer.setCallbacks({
+				onTimeIndex: (chunkIdx) => {
+					// Chunk space back to global sentences for the highlight.
+					const g = tts.chunks[chunkIdx]?.sentenceIndices[0];
+					if (g !== undefined) globalIdx = g;
+				},
+				onEnded: () => {
+					void (async () => {
+						const advanced = await advanceToNextItem();
+						if (!advanced) {
+							isPlaying = false;
+							offlineActive = false;
+							globalIdx = Math.max(0, getGlobalSentences(sections).length - 1);
+						}
+					})();
+				},
+				onError: (msg) => {
+					showToast(`Offline audio failed: ${msg}`);
+					isPlaying = false;
+					offlineActive = false;
+				}
+			});
+		}
+		return offlinePlayer;
+	}
+	/** Tear down the offline session (doc switch, engine change, voice change). */
+	function stopOffline(): void {
+		offlinePlayer?.unload();
+		offlineActive = false;
+	}
+	/** Per-card offline state for the open playlist at the pocket voice+fmt. */
+	async function refreshOfflineStates(): Promise<void> {
+		try {
+			offlineMeta = await getOfflineAudioMeta();
+		} catch {
+			offlineMeta = {};
+		}
+		const pocketKey = pocketVoiceId();
+		const next: Record<string, PlaylistOfflineState> = {};
+		for (const item of playlistItems) {
+			const doc = await getDoc(item.docId);
+			if (!doc) {
+				next[item.id] = { state: 'none', bytes: 0 };
+				continue;
+			}
+			if (offlineGenerating[doc.id]) {
+				next[item.id] = { state: 'generating', bytes: offlineMeta[offlineAudioKey(doc.id, pocketKey, offlineFmt)]?.bytes ?? 0 };
+				continue;
+			}
+			const meta = offlineMeta[offlineAudioKey(doc.id, pocketKey, offlineFmt)];
+			if (!meta) {
+				next[item.id] = { state: 'none', bytes: 0 };
+				continue;
+			}
+			const hash = hashSpeakableText(joinSpeakableTexts(deriveTts(doc.sections).texts));
+			next[item.id] = {
+				state: isOfflineAudioStale(meta.textHash, hash) ? 'stale' : 'fresh',
+				bytes: meta.bytes
+			};
+		}
+		offlineItemState = next;
+	}
+	async function handleGenerateOfflineItem(itemId: string): Promise<void> {
+		const item = playlistItems.find((i) => i.id === itemId);
+		if (!item) return;
+		const doc = await getDoc(item.docId);
+		if (!doc) {
+			showToast('Document not found');
+			return;
+		}
+		if (offlineGenerating[doc.id]) return;
+		const { voiceKey, voiceId, blob } = resolvePocketVoice();
+		const text = joinSpeakableTexts(deriveTts(doc.sections).texts);
+		if (!text.trim()) {
+			showToast('Nothing speakable to generate');
+			return;
+		}
+		offlineGenerating = { ...offlineGenerating, [doc.id]: true };
+		await refreshOfflineStates();
+		try {
+			showToast('Generating offline audio — keep the app open');
+			const audioBlob = await generateOfflineAudioBlob({ text, voiceId, voiceBlob: blob, fmt: offlineFmt });
+			await saveOfflineAudio({
+				docId: doc.id,
+				voiceKey,
+				fmt: offlineFmt,
+				blob: audioBlob,
+				mediaType: audioBlob.type || `audio/${offlineFmt}`,
+				textHash: hashSpeakableText(text)
+			});
+			showToast(`Offline audio saved (${(audioBlob.size / 1024 / 1024).toFixed(1)} MB)`);
+		} catch (e: unknown) {
+			showToast(`Offline generation failed: ${(e as Error)?.message ?? e}`);
+		} finally {
+			const nextGen = { ...offlineGenerating };
+			delete nextGen[doc.id];
+			offlineGenerating = nextGen;
+			await refreshOfflineStates();
+		}
+	}
+	async function handleDeleteOfflineItem(itemId: string): Promise<void> {
+		const item = playlistItems.find((i) => i.id === itemId);
+		if (!item) return;
+		const { voiceKey } = resolvePocketVoice();
+		if (!confirm('Delete the pre-generated offline audio? The text stays.')) return;
+		await deleteOfflineAudio(item.docId, voiceKey, offlineFmt);
+		if (activeDoc?.id === item.docId && offlineActive) {
+			stopOffline();
+			isPlaying = false;
+		}
+		await refreshOfflineStates();
+		showToast('Offline audio deleted');
+	}
+	/** Load the cached file for the active doc when fresh; else false. */
+	async function startOfflineIfAvailable(): Promise<boolean> {
+		if (!activeDoc || ttsEngine === 'device' || !offlineUse) return false;
+		const texts = tts.texts;
+		if (texts.length === 0) return false;
+		const { voiceKey } = resolvePocketVoice();
+		let rec;
+		try {
+			rec = await getOfflineAudio(activeDoc.id, voiceKey, offlineFmt);
+		} catch {
+			return false;
+		}
+		if (!rec) return false;
+		if (isOfflineAudioStale(rec.textHash, hashSpeakableText(joinSpeakableTexts(texts)))) return false;
+		sentencePlayer?.stop();
+		const player = getOfflinePlayer();
+		player.load(rec.blob, texts.map((t) => t.length));
+		offlineActive = true;
+		isPlaying = true;
+		await player.playFromIndex(chunkForSentence(tts, globalIdx), synthRate);
+		return true;
+	}
 	/** Start (or resume) playback from the current sentence. */
-	function startPlayback() {
+	async function startPlayback() {
 		isPlaying = true;
 		if (ttsEngine !== 'device') {
+			if (offlineActive && offlinePlayer) {
+				await offlinePlayer.resume(synthRate);
+				return;
+			}
+			if (await startOfflineIfAvailable()) return;
 			if (sentencePlayer?.canResume()) void sentencePlayer.resume();
 			else playSentencePlayer();
 		} else playWebSpeechCorrect();
@@ -1337,6 +1519,7 @@
 		}
 		if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
 		sentencePlayer?.stop();
+		stopOffline();
 		isPlaying = false;
 		pdfPendingOcr = false;
 		pendingPdfName = '';
@@ -1359,7 +1542,7 @@
 		await refreshPlaylistData();
 		await tick();
 		await loadCachedPdf(d.id);
-		if (opts?.autoplay) startPlayback();
+		if (opts?.autoplay) void startPlayback();
 	}
 
 	/** Autoplay: after the last sentence, continue with the next playlist item. */
@@ -1707,7 +1890,11 @@
 		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, id);
 		// Cache keys are voice-scoped, so just restart the chain: the new
 		// voice synthesizes from the current sentence, nothing earlier.
-		if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
+		// Offline files are voice-specific too — drop the old voice's session.
+		const wasPlaying = isPlaying;
+		stopOffline();
+		if (wasPlaying && ttsEngine !== 'device') void startPlayback();
+		void refreshOfflineStates();
 	}
 
 	function handleEngineChange(engine: TtsEngine) {
@@ -1716,6 +1903,7 @@
 		// Stop any running chain — audio must never bleed across engines.
 		cancelSpeech();
 		sentencePlayer?.stop();
+		stopOffline();
 		isPlaying = false;
 		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
@@ -1837,6 +2025,15 @@
 
 	// Player
 	let isBackendGenerating: boolean = $state(false);
+	// Offline chapter audio: pre-generated single file per doc+voice+format.
+	let offlineFmt: OfflineAudioFmt = $state('webm');
+	let offlineUse: boolean = $state(true);
+	let offlinePlayer: OfflinePlayer | null = $state.raw(null);
+	// True while an offline file is loaded for the active doc (playing or paused).
+	let offlineActive: boolean = $state(false);
+	let offlineMeta: Record<string, OfflineAudioMeta> = $state({});
+	let offlineGenerating: Record<string, boolean> = $state({});
+	let offlineItemState: Record<string, PlaylistOfflineState> = $state({});
 
 	function getSentencePlayer(): BackendSentencePlayer {
 		if (!sentencePlayer) {
@@ -1934,8 +2131,9 @@
 			cancelSpeech();
 			// Pause keeps cached sentence audio + position for instant resume.
 			sentencePlayer?.pause();
+			offlinePlayer?.pause();
 		} else {
-			startPlayback();
+			void startPlayback();
 		}
 	}
 	/** Move to `idx`, keeping backend playback going from there when playing. */
@@ -1943,6 +2141,10 @@
 		const total = getGlobalSentences(sections).length;
 		const next = Math.max(0, Math.min(idx, total - 1));
 		globalIdx = next;
+		if (offlineActive) {
+			offlinePlayer?.seek(chunkForSentence(tts, next));
+			return;
+		}
 		if (ttsEngine !== 'device') {
 			// When paused this just parks the resume position; when playing it
 			// aborts in-flight requests and starts at the new sentence. The
@@ -1975,6 +2177,14 @@
 	function updateRate(v: number) {
 		synthRate = v;
 		sentencePlayer?.setRate(v);
+		offlinePlayer?.setRate(v);
+	}
+	function handleOfflineFmtChange(fmt: OfflineAudioFmt) {
+		offlineFmt = fmt;
+		void refreshOfflineStates();
+	}
+	function handleOfflineUseChange(use: boolean) {
+		offlineUse = use;
 	}
 
 	// Lock-screen controls (Media Session API): metadata + headset /
@@ -1983,7 +2193,7 @@
 	$effect(() => {
 		setMediaActionHandlers({
 			onPlay: () => {
-				if (!isPlaying) startPlayback();
+				if (!isPlaying) void startPlayback();
 			},
 			onPause: () => {
 				if (isPlaying) handleToggle();
@@ -2307,6 +2517,9 @@
 							onDropItem={handleDropPlaylistItem}
 							onShowPdf={handleShowItemPdf}
 							onClearItemPdf={handleClearItemPdf}
+							offline={offlineItemState}
+							onGenerateOffline={(id) => void handleGenerateOfflineItem(id)}
+							onDeleteOffline={(id) => void handleDeleteOfflineItem(id)}
 							onReprocessItem={handleReprocessItem}
 							onOpenLibrary={() => (leftPane = 'library')}
 							onUploadDoc={handlePlaylistDocUpload}
@@ -2520,6 +2733,10 @@
 		onRateChange={updateRate}
 		onVoiceFile={onVoiceFile}
 		{isBackendGenerating}
+		{offlineFmt}
+		onOfflineFmtChange={handleOfflineFmtChange}
+		offlineUse
+		onOfflineUseChange={handleOfflineUseChange}
 	/>
 
 	<PostprocessingModal

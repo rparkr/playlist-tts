@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	isBuiltinVoiceName,
 	parseEngine,
+	parseOfflineUse,
 	parseRate,
 	parseSentenceIndex,
 	parsePostprocessFlags,
@@ -30,6 +31,16 @@ describe('parseEngine', () => {
 		expect(parseEngine(null)).toBeNull();
 		expect(parseEngine('')).toBeNull();
 		expect(parseEngine('turbo')).toBeNull();
+	});
+});
+
+describe('parseOfflineUse', () => {
+	it('parses 1/0 flags and rejects the rest', () => {
+		expect(parseOfflineUse('1')).toBe(true);
+		expect(parseOfflineUse('0')).toBe(false);
+		expect(parseOfflineUse('true')).toBeNull();
+		expect(parseOfflineUse(null)).toBeNull();
+		expect(parseOfflineUse(undefined)).toBeNull();
 	});
 });
 

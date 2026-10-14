@@ -102,6 +102,17 @@ describe('OfflinePlayer', () => {
 		expect(seen).toEqual([1]);
 	});
 
+	it('resumes without seeking', async () => {
+		player.load(new Blob(['x']), [50, 50]);
+		await player.playFromIndex(1, 1);
+		audios[0].currentTime = 60;
+		player.pause();
+		await player.resume(1.5);
+		expect(audios[0].currentTime).toBe(60);
+		expect(audios[0].playbackRate).toBe(1.5);
+		expect(player.isRunning).toBe(true);
+	});
+
 	it('fires onEnded when the file completes', async () => {
 		let ended = 0;
 		player.setCallbacks({ onEnded: () => ended++ });

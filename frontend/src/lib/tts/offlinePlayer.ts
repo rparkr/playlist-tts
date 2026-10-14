@@ -124,6 +124,20 @@ export class OfflinePlayer {
 		}
 	}
 
+	/** Resume a paused file without seeking (pause keeps position). */
+	async resume(rate: number): Promise<void> {
+		const audio = this.audio;
+		if (!audio || !this.url) return;
+		audio.playbackRate = rate;
+		this.running = true;
+		try {
+			await audio.play();
+		} catch (e) {
+			this.running = false;
+			this.cb.onError?.(e instanceof Error ? e.message : String(e));
+		}
+	}
+
 	/** Seek within a playing file; no-op when nothing is loaded. */
 	seek(idx: number): void {
 		const audio = this.audio;

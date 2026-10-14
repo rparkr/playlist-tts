@@ -11,6 +11,7 @@ import {
 	Upload,
 	X,
 	ClipboardPaste,
+	Download,
 	LibraryBig,
 	FileStack,
 	RefreshCw
@@ -24,6 +25,12 @@ export interface PlaylistItemStat {
 	estTotal: string;
 	estRemaining: string;
 	hasPdf: boolean;
+}
+
+/** Pre-generated offline chapter state for the current voice+format. */
+export interface PlaylistOfflineState {
+	state: 'fresh' | 'stale' | 'generating' | 'none';
+	bytes: number;
 }
 
 export type ReprocessEngine = 'auto' | 'text' | 'docling' | 'llm';
@@ -52,6 +59,9 @@ interface Props {
 	onClearItemPdf: (id: string) => void;
 	onReprocessItem: (id: string, engine: ReprocessEngine) => void;
 	onOpenLibrary: () => void;
+	offline: Record<string, PlaylistOfflineState>;
+	onGenerateOffline: (id: string) => void;
+	onDeleteOffline: (id: string) => void;
 	onUploadDoc: () => void;
 	onPasteText: (title: string, text: string) => void;
 	onFetchUrl: (url: string) => void;
@@ -74,6 +84,9 @@ let {
 	onClearItemPdf,
 	onReprocessItem,
 	onOpenLibrary,
+	offline,
+	onGenerateOffline,
+	onDeleteOffline,
 	onUploadDoc,
 	onPasteText,
 	onFetchUrl,
@@ -318,6 +331,24 @@ function itemPercent(id: string): number {
 								{/if}
 							{/if}
 						</div>
+						{#if !editMode}
+						{#key offline[item.id]?.state}
+						{@const o = offline[item.id] ?? { state: 'none', bytes: 0 }}
+						<div class="mt-1.5 flex items-center gap-1.5">
+						{#if o.state === 'generating'}
+							<span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border border-sky-500/40 text-sky-300">Generating offline audio…</span>
+						{:else if o.state === 'fresh'}
+							<span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border border-emerald-500/40 text-emerald-300"><Download size={11} /> Offline · {(o.bytes / 1024 / 1024).toFixed(1)} MB</span>
+							<button onclick={() => onDeleteOffline(item.id)} aria-label="Delete offline audio" title="Delete offline audio to save storage" class="text-[11px] text-slate-500 hover:text-red-400 underline">Delete</button>
+						{:else if o.state === 'stale'}
+							<button onclick={() => onGenerateOffline(item.id)} aria-label="Regenerate offline audio" title="Text changed — regenerate the offline file" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border border-amber-500/40 text-amber-300 hover:bg-amber-500/10"><Download size={11} /> Update offline audio</button>
+							<button onclick={() => onDeleteOffline(item.id)} aria-label="Delete offline audio" title="Delete offline audio to save storage" class="text-[11px] text-slate-500 hover:text-red-400 underline">Delete</button>
+						{:else}
+							<button onclick={() => onGenerateOffline(item.id)} aria-label="Pre-generate offline audio" title="Pre-generate audio for offline, lock-screen listening" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"><Download size={11} /> Pre-generate offline audio</button>
+						{/if}
+						</div>
+						{/key}
+						{/if}
 						{#if editMode && reprocessId === item.id}
 							<div class="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
 								<span class="text-[11px] text-amber-200/90 mr-1">Re-extract with:</span>
