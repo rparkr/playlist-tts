@@ -5,12 +5,21 @@
  * `localStorage` (keyed `voice + engine`), so estimates converge across
  * sessions: `remaining = remainingChars / charsPerSecond / rate`. With no
  * samples yet, estimates fall back to a cold-start pace of ~150wpm.
+ *
+ * Cold-start smoothing: a fresh key starts seeded with `COLD_START_PRIOR`
+ * worth of cold-start pace, so the first real samples nudge the estimate
+ * instead of swinging it — ETA settles monotonically rather than jumping
+ * with every sentence until the average converges. The seed washes out as
+ * real evidence accumulates.
  */
 
 export type TtsEngineKey = 'device' | 'pocket';
 
 /** Cold-start pace (~150wpm at ~6 chars/word including spaces). */
 export const COLD_START_CPS = 15;
+
+/** Seed weight for a fresh key, in seconds of cold-start speech (~900 chars). */
+export const COLD_START_PRIOR_SECONDS = 60;
 
 const STORAGE_KEY = 'tts_eta_stats_v1';
 
@@ -79,7 +88,12 @@ export function recordEtaSample(
 	if (chars <= 0 || secondsAt1x <= 0) return;
 	const all = readAll(store);
 	const key = statsKey(voice, engine);
-	const prev = all[key] ?? { chars: 0, seconds: 0 };
+	// Fresh keys start seeded with cold-start pace so early samples smooth
+	// toward the measured pace instead of jumping straight to it.
+	const prev = all[key] ?? {
+		chars: COLD_START_CPS * COLD_START_PRIOR_SECONDS,
+		seconds: COLD_START_PRIOR_SECONDS
+	};
 	let next = { chars: prev.chars + chars, seconds: prev.seconds + secondsAt1x };
 	if (next.chars > STATS_CHAR_CAP) {
 		next = { chars: next.chars / 2, seconds: next.seconds / 2 };
