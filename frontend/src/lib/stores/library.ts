@@ -32,6 +32,7 @@ interface OCRTTSDB extends DBSchema {
 	voices: { key: string; value: VoiceRecord };
 	pdfs: { key: string; value: PdfRecord };
 	assets: { key: string; value: DocAsset };
+	audio: { key: string; value: OfflineAudioRecord };
 	playlists: { key: string; value: Playlist };
 	items: { key: string; value: PlaylistItem; indexes: { 'by-playlist': string } };
 }
@@ -68,8 +69,27 @@ export interface DocAsset {
 	createdAt: number;
 }
 
+/** Pre-generated single-file chapter audio for offline / lock-screen listening.
+ *
+ * Key `${docId}::${voiceKey}::${fmt}` — one file per voice+format combo.
+ * `textHash` marks the exact speakable text it was built from so edits can
+ * flag the file as stale instead of silently playing outdated audio.
+ */
+export interface OfflineAudioRecord {
+	/** Composite key: owning `Doc.id` + voice + container format. */
+	key: string;
+	docId: string;
+	voiceKey: string;
+	fmt: string;
+	blob: Blob;
+	bytes: number;
+	mediaType: string;
+	textHash: string;
+	createdAt: number;
+}
+
 const DB_NAME = 'ocr-tts';
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 
 function getDB() {
 	return openDB<OCRTTSDB>(DB_NAME, DB_VERSION, {
@@ -86,6 +106,9 @@ function getDB() {
 			}
 			if (!db.objectStoreNames.contains('assets')) {
 				db.createObjectStore('assets', { keyPath: 'key' });
+			}
+			if (!db.objectStoreNames.contains('audio')) {
+				db.createObjectStore('audio', { keyPath: 'key' });
 			}
 			// Phase 3 playlist library (IndexedDB-only MVP): docs/voices/pdfs
 			// stay as-is; playlists order items via `itemIds`, items link to
@@ -146,6 +169,71 @@ export async function saveDoc(doc: Doc): Promise<void> {
 	const storable = JSON.parse(JSON.stringify(doc)) as Doc;
 	const db = await getDB();
 	await db.put('docs', storable);
+}
+
+/** Pre-generated offline chapter audio (one file per doc+voice+format). */
+
+export function offlineAudioKey(docId: string, voiceKey: string, fmt: string): string {
+	return `${docId}::${voiceKey}::${fmt}`;
+}
+
+/** Persist a generated chapter file for offline / lock-screen playback. */
+export async function saveOfflineAudio(record: Omit<OfflineAudioRecord, 'key' | 'bytes' | 'createdAt'> & { blob: Blob }): Promise<OfflineAudioRecord> {
+	const db = await getDB();
+	const stored: OfflineAudioRecord = {
+		...record,
+		key: offlineAudioKey(record.docId, record.voiceKey, record.fmt),
+		bytes: record.blob.size,
+		createdAt: Date.now()
+	};
+	await db.put('audio', stored);
+	return stored;
+}
+
+/** Load a cached chapter file for an exact doc+voice+format combo. */
+export async function getOfflineAudio(docId: string, voiceKey: string, fmt: string): Promise<OfflineAudioRecord | undefined> {
+	const db = await getDB();
+	try {
+		return await db.get('audio', offlineAudioKey(docId, voiceKey, fmt));
+	} catch {
+		return undefined;
+	}
+}
+
+/** Remove one cached chapter file to free storage; keeps the doc itself. */
+export async function deleteOfflineAudio(docId: string, voiceKey: string, fmt: string): Promise<void> {
+	const db = await getDB();
+	try {
+		await db.delete('audio', offlineAudioKey(docId, voiceKey, fmt));
+	} catch {
+		// ignore — store may not exist yet
+	}
+}
+
+/** Remove every cached chapter file for a doc (all voices/formats). */
+export async function deleteOfflineAudioByDoc(docId: string): Promise<void> {
+	const db = await getDB();
+	try {
+		const keys = await db.getAllKeys('audio');
+		for (const k of keys) {
+			if (k === docId || k.startsWith(`${docId}::`)) await db.delete('audio', k);
+		}
+	} catch {
+		// ignore — store may not exist yet
+	}
+}
+
+/** Lightweight `{ key, bytes }` listing for offline-audio storage UI. */
+export async function getOfflineAudioSizes(): Promise<Record<string, number>> {
+	const db = await getDB();
+	try {
+		const all = await db.getAll('audio');
+		const sizes: Record<string, number> = {};
+		for (const r of all) sizes[r.key] = r.bytes;
+		return sizes;
+	} catch {
+		return {};
+	}
 }
 
 export function slugify(title: string): string {
@@ -242,6 +330,7 @@ export async function deleteDoc(id: string): Promise<void> {
 		// ignore — pdfs store may be missing on very old profiles until upgrade
 	}
 	await deleteDocAssets(id);
+	await deleteOfflineAudioByDoc(id);
 }
 
 /** Re-export defaults for UI state initialisation. */
