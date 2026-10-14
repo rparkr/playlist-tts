@@ -55,6 +55,12 @@
 	} from '$lib/markdown/parse';
 	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import {
+		clearMediaMetadata,
+		setMediaActionHandlers,
+		setMediaPlaybackState,
+		updateMediaMetadata
+	} from '$lib/tts/mediaSession';
 	import { chunkForSentence, deriveTts, speakable } from '$lib/tts/deriveTts';
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
@@ -1970,6 +1976,37 @@
 		synthRate = v;
 		sentencePlayer?.setRate(v);
 	}
+
+	// Lock-screen controls (Media Session API): metadata + headset /
+	// lock-screen buttons. Best-effort only — it does not keep audio
+	// alive in the background, it just exposes what is already playing.
+	$effect(() => {
+		setMediaActionHandlers({
+			onPlay: () => {
+				if (!isPlaying) startPlayback();
+			},
+			onPause: () => {
+				if (isPlaying) handleToggle();
+			},
+			onPrev: () => skipSentence(-1),
+			onNext: () => skipSentence(1)
+		});
+	});
+	$effect(() => {
+		const title = activeDoc?.title ?? null;
+		if (!title) {
+			clearMediaMetadata();
+			return;
+		}
+		const total = totalSentences;
+		const pos = total > 0 ? Math.max(0, Math.min(globalIdx, total - 1)) + 1 : 0;
+		updateMediaMetadata({
+			title,
+			artist: total > 0 ? `Sentence ${pos} of ${total}` : 'OCR-TTS Reader',
+			album: ttsEngine === 'device' ? 'Device voice' : 'Pocket TTS'
+		});
+		setMediaPlaybackState(isPlaying);
+	});
 
 	// Header actions
 	async function handleLogoClick() {

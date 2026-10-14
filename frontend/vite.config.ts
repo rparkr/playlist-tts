@@ -22,7 +22,11 @@ export default defineConfig({
 				description: 'OCR PDFs to Markdown and listen with TTS',
 				theme_color: '#121212',
 				background_color: '#121212',
-				display: 'standalone'
+				display: 'standalone',
+				icons: [
+					{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+					{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }
+				]
 			},
 			workbox: {
 				globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
