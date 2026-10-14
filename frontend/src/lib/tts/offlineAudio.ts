@@ -36,3 +36,66 @@ export function joinSpeakableTexts(texts: string[]): string {
 export function isOfflineAudioStale(cachedHash: string, currentHash: string): boolean {
 	return cachedHash !== currentHash;
 }
+
+export interface OfflineJobDeps {
+	createJob: (
+		text: string,
+		voiceId: string | null,
+		voiceBlob: Blob | null,
+		fmt: string
+	) => Promise<string>;
+	pollJob: (jobId: string) => Promise<{ status: string; error?: string }>;
+	download: (jobId: string) => Promise<Blob>;
+}
+
+export interface OfflineJobOptions {
+	text: string;
+	voiceId: string | null;
+	voiceBlob: Blob | null;
+	fmt: string;
+	onProgress?: () => void;
+	pollIntervalMs?: number;
+	maxPolls?: number;
+	deps?: OfflineJobDeps;
+}
+
+function defaultDeps(): OfflineJobDeps {
+	return {
+		createJob: async (text, voiceId, voiceBlob, fmt) => {
+			const { createTTSFileJob } = await import('./backendStream');
+			return createTTSFileJob(text, voiceId, voiceBlob, fmt);
+		},
+		pollJob: async (jobId) => {
+			const { pollTTSJob } = await import('./backendStream');
+			return pollTTSJob(jobId);
+		},
+		download: async (jobId) => {
+			const { getTTSDownloadUrl } = await import('./backendStream');
+			const resp = await fetch(getTTSDownloadUrl(jobId));
+			if (!resp.ok) throw new Error(`Offline audio download failed ${resp.status}`);
+			return resp.blob();
+		}
+	};
+}
+
+/** Generate a whole-chapter file via `POST /api/tts/jobs` and return its blob.
+ *
+ * Polls until done (server synthesizes ~4–6× real-time on CPU, so long docs
+ * take minutes — callers show progress meanwhile). `deps` injection keeps
+ * this testable without a network.
+ */
+export async function generateOfflineAudioBlob(opts: OfflineJobOptions): Promise<Blob> {
+	const deps = opts.deps ?? defaultDeps();
+	const onProgress = opts.onProgress ?? (() => {});
+	const interval = opts.pollIntervalMs ?? 2000;
+	const maxPolls = opts.maxPolls ?? 300;
+	const jobId = await deps.createJob(opts.text, opts.voiceId, opts.voiceBlob, opts.fmt);
+	for (let i = 0; i < maxPolls; i++) {
+		const status = await deps.pollJob(jobId);
+		if (status.status === 'done') return deps.download(jobId);
+		if (status.status === 'error') throw new Error(status.error || 'Offline audio job failed');
+		onProgress();
+		await new Promise((r) => setTimeout(r, interval));
+	}
+	throw new Error('Offline audio job timed out');
+}

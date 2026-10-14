@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
+	generateOfflineAudioBlob,
 	hashSpeakableText,
 	isOfflineAudioStale,
 	joinSpeakableTexts,
@@ -30,6 +31,68 @@ describe('joinSpeakableTexts', () => {
 	it('joins chunks with single spaces', () => {
 		expect(joinSpeakableTexts(['Alpha.', 'Bravo.'])).toBe('Alpha. Bravo.');
 		expect(joinSpeakableTexts([])).toBe('');
+	});
+});
+
+describe('generateOfflineAudioBlob', () => {
+	it('polls until done, then downloads', async () => {
+		const progress = vi.fn();
+		const deps = {
+			createJob: vi.fn(async () => 'job1'),
+			pollJob: vi.fn(async () => ({ status: 'running' })),
+			download: vi.fn(async () => new Blob(['audio']))
+		};
+		deps.pollJob.mockResolvedValueOnce({ status: 'running' }).mockResolvedValueOnce({ status: 'done' });
+		const blob = await generateOfflineAudioBlob({
+			text: 'Alpha. Bravo.',
+			voiceId: 'alba',
+			voiceBlob: null,
+			fmt: 'webm',
+			pollIntervalMs: 1,
+			onProgress: progress,
+			deps
+		});
+		expect(await blob.text()).toBe('audio');
+		expect(deps.createJob).toHaveBeenCalledWith('Alpha. Bravo.', 'alba', null, 'webm');
+		expect(deps.pollJob).toHaveBeenCalledTimes(2);
+		expect(progress).toHaveBeenCalledTimes(1);
+	});
+
+	it('throws on job error', async () => {
+		const deps = {
+			createJob: vi.fn(async () => 'job1'),
+			pollJob: vi.fn(async () => ({ status: 'error', error: 'boom' })),
+			download: vi.fn(async () => new Blob())
+		};
+		await expect(
+			generateOfflineAudioBlob({
+				text: 'Alpha.',
+				voiceId: null,
+				voiceBlob: null,
+				fmt: 'mp3',
+				pollIntervalMs: 1,
+				deps
+			})
+		).rejects.toThrow('boom');
+	});
+
+	it('throws on timeout', async () => {
+		const deps = {
+			createJob: vi.fn(async () => 'job1'),
+			pollJob: vi.fn(async () => ({ status: 'running' })),
+			download: vi.fn(async () => new Blob())
+		};
+		await expect(
+			generateOfflineAudioBlob({
+				text: 'Alpha.',
+				voiceId: null,
+				voiceBlob: null,
+				fmt: 'mp3',
+				pollIntervalMs: 1,
+				maxPolls: 2,
+				deps
+			})
+		).rejects.toThrow('timed out');
 	});
 });
 
