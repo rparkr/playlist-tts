@@ -121,3 +121,12 @@ def test_ocr_sync_alias():
     # Blank PDF should succeed (maybe empty markdown) but not error 404/405
     assert resp.status_code in (200, 500, 504)  # allow docling failure on blank
     tmp_path.unlink(missing_ok=True)
+
+
+def test_v1_models_stub():
+    """OpenAI-compat stub answers external /v1/models probes (no more 404 noise)."""
+    resp = client.get("/v1/models")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["object"] == "list"
+    assert isinstance(data["data"], list) and len(data["data"]) >= 1

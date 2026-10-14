@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from rich.console import Console
 
+from backend.app.api.compat import router as compat_router
 from backend.app.api.convert import router as convert_router
 from backend.app.api.fetch import router as fetch_router
 from backend.app.api.ocr import router as ocr_router
@@ -40,6 +41,7 @@ app.add_middleware(
 
 app.include_router(ocr_router)
 app.include_router(ocr_llm_router)
+app.include_router(compat_router)
 app.include_router(convert_router)
 app.include_router(fetch_router)
 app.include_router(parse_router)
