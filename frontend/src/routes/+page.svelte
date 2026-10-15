@@ -80,7 +80,8 @@
 	import { estimateRemainingSeconds, recordEtaSample } from '$lib/tts/etaStats';
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
-	import { BookOpen, FileText, ListMusic, LibraryBig, X } from 'lucide-svelte';
+	import { fly } from 'svelte/transition';
+	import { FileText, ListMusic, LibraryBig, X } from 'lucide-svelte';
 	import Overview, {
 		type OverviewPlaylistStat,
 		type OverviewSearchHit
@@ -136,13 +137,10 @@
 	// reaction belongs to that manual navigation, so it must not overwrite
 	// the explicitly chosen page (missing-marker snap-back, #75).
 	let pdfManualNav = false;
-	// Bottom-sheet drawer (Phase 4 tabs redesign): the reader is
-	// Markdown-focused; PDF / playlist / library open docked above the
-	// player instead of in a side-by-side left pane.
-	let drawer: 'pdf' | 'playlist' | 'library' | null = $state(null);
-	// Wide-screen PDF comparison: when the PDF drawer is open on md+
-	// screens, pin it side-by-side with the Markdown instead of docking.
-	let pdfSplit: boolean = $state(false);
+	// Phase 4 panel: slide-over overlay on mobile, left sidebar on
+	// desktop. The reader stays Markdown-focused; PDF / playlist /
+	// library live in the panel and are switched from its tab bar.
+	let panel: 'pdf' | 'playlist' | 'library' | null = $state(null);
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
 	let ocrStartAt: number | null = $state(null);
@@ -228,7 +226,7 @@
 	let showTtsSettings = $state(false);
 	let showPostprocess = $state(false);
 	// Phase 4: overview view + Markdown-focused reader with a bottom-sheet
-	// drawer (PDF | Playlist | Library). The logo lands on the overview.
+	// panel (PDF | Playlist | Library). The logo lands on the overview.
 	let view: 'overview' | 'reader' = $state('reader');
 	let isEditing = $state(false);
 	let editBackup: string = $state('');
@@ -376,9 +374,6 @@
 		await refreshPlaylistData();
 		// Fresh profiles (no restored doc) land on the overview page.
 		if (!activeDoc) view = 'overview';
-		try {
-			pdfSplit = localStorage.getItem(LS_KEYS.pdfSplit) === '1';
-		} catch {}
 		settingsHydrated = true;
 	});
 
@@ -398,7 +393,6 @@
 		localStorage.setItem(LS_KEYS.engine, ttsEngine);
 		localStorage.setItem(LS_KEYS.offlineFmt, offlineFmt);
 		localStorage.setItem(LS_KEYS.offlineUse, offlineUse ? '1' : '0');
-		localStorage.setItem(LS_KEYS.pdfSplit, pdfSplit ? '1' : '0');
 		localStorage.setItem(
 			LS_KEYS.postprocess,
 			serializePostprocessFlags({
@@ -467,7 +461,7 @@
 		pdfManualNav = false;
 		// Manual PDF paging owns the viewer until playback/seek moves on.
 		if (manual) return;
-		if (drawer !== 'pdf' || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
+		if (panel !== 'pdf' || !pdfDoc || pdfTotalPages <= 0 || isOcrRunning || pdfPendingOcr) return;
 		const sentences = getGlobalSentences(sens);
 		if (sentences.length === 0) return;
 		const logical = findPageForSentence(sentences, idx);
@@ -598,7 +592,7 @@
 		pendingPdfName = file.name;
 		pageOverrides = {};
 		pdfPendingOcr = true;
-		drawer = 'pdf';
+		panel = 'pdf';
 		// Stage the PDF for preview + options — do NOT POST yet. The user
 		// presses "Extract text" (staging bar) to kick off OCR (#6).
 		await loadPdf();
@@ -610,7 +604,7 @@
 		pendingPdfName = '';
 		pageOverrides = {};
 		pendingPlaylistId = null;
-		drawer = null;
+		panel = null;
 		clearPdfViewer();
 		if (activeDoc) void loadCachedPdf(activeDoc.id);
 	}
@@ -708,7 +702,7 @@
 				pdfPendingOcr = false;
 				pendingPdfName = '';
 				pageOverrides = {};
-				drawer = 'pdf';
+				panel = 'pdf';
 				syncPostprocessOptsFromDoc(doc, true);
 				showToast('PDF + Markdown imported');
 			} catch (err: any) {
@@ -788,8 +782,8 @@
 	async function renderPdfPage() {
 		if (!pdfDoc) return;
 		// The PdfPane canvas unmounts while OCR progress is shown and when
-		// the PDF drawer is closed, so wait for it to be bound before drawing.
-		if (drawer !== 'pdf') return;
+		// the PDF panel is closed, so wait for it to be bound before drawing.
+		if (panel !== 'pdf') return;
 		let tries = 0;
 		while (!canvasEl && tries < 40) {
 			await new Promise((r) => setTimeout(r, 50));
@@ -1010,7 +1004,7 @@
 			pendingPdfName = '';
 			pageOverrides = {};
 			// Focus the fresh Markdown; the PDF stays one tab away.
-			drawer = null;
+			panel = null;
 			if (pendingPlaylistId) {
 				const item = await attachDocAsItem(pendingPlaylistId, doc, { kind: 'pdf-upload' });
 				pendingPlaylistId = null;
@@ -1129,7 +1123,7 @@
 		pdfPendingOcr = false;
 		pendingPdfName = '';
 		pageOverrides = {};
-		drawer = null;
+		panel = null;
 		// Standalone doc (outside any playlist item).
 		activePlaylistId = null;
 		activeItemId = null;
@@ -1526,7 +1520,7 @@
 		await updatePlaylistItemProgress(itemId, globalIdx, total);
 		await touchPlaylistListened(playlistId);
 		view = 'reader';
-		drawer = null;
+		panel = null;
 		await refreshPlaylistData();
 		await tick();
 		await loadCachedPdf(d.id);
@@ -1600,7 +1594,7 @@
 				pageOverrides = {};
 				pdfPendingOcr = true;
 				pendingPlaylistId = targetPlaylistId;
-				drawer = 'pdf';
+				panel = 'pdf';
 				view = 'reader';
 				await loadPdf();
 				showToast('PDF loaded — set page options, then press Extract text');
@@ -1684,13 +1678,13 @@
 		if (view === 'overview') await refreshOverview();
 		// Drop the user into the new playlist.
 		activePlaylistId = playlist.id;
-		drawer = 'playlist';
+		panel = 'playlist';
 		view = 'reader';
 	}
 
 	async function handleOpenPlaylist(id: string) {
 		activePlaylistId = id;
-		drawer = 'playlist';
+		panel = 'playlist';
 		view = 'reader';
 		await refreshPlaylistData();
 	}
@@ -1756,7 +1750,7 @@
 		const item = playlistItems.find((i) => i.id === id);
 		if (!item) return;
 		const ok = await loadCachedPdf(item.docId);
-		drawer = 'pdf';
+		panel = 'pdf';
 		if (ok) {
 			await tick();
 			await renderPdfPage();
@@ -2212,10 +2206,11 @@
 		view = 'overview';
 		await refreshOverview();
 	}
-	// Phase 4 drawer tabs: opening the PDF tab (re)renders once the
-	// canvas remounts; tapping the active tab returns to Now Playing.
-	function openDrawer(kind: 'pdf' | 'playlist' | 'library') {
-		drawer = kind;
+	// Phase 4 panel: opening the PDF view (re)renders once the canvas
+	// remounts. The panel header's tab bar switches between Up next,
+	// Library, and PDF without leaving the panel.
+	function openPanel(kind: 'pdf' | 'playlist' | 'library') {
+		panel = kind;
 		if (kind === 'pdf' && pdfDoc) {
 			void (async () => {
 				await tick();
@@ -2223,20 +2218,10 @@
 			})();
 		}
 	}
-	function toggleDrawer(kind: 'pdf' | 'playlist' | 'library') {
-		if (drawer === kind) drawer = null;
-		else openDrawer(kind);
-	}
-	/** Wide-screen PDF comparison (md+ side-by-side instead of docked). */
-	let isPdfSplitView: boolean = $derived(drawer === 'pdf' && pdfSplit);
-	function togglePdfSplit() {
-		pdfSplit = !pdfSplit;
-		if (drawer === 'pdf' && pdfDoc) {
-			void (async () => {
-				await tick();
-				await renderPdfPage();
-			})();
-		}
+	/** Header library button: toggle between the panel and reading. */
+	function toggleLibraryPanel() {
+		if (panel) panel = null;
+		else openPanel(activePlaylistId ? 'playlist' : 'library');
 	}
 	function handleHeaderUpload() {
 		// Header uploads are listen-now: the doc opens standalone.
@@ -2246,7 +2231,7 @@
 	function handleLibraryButton() {
 		if (activeDoc) {
 			view = 'reader';
-			drawer = 'library';
+			toggleLibraryPanel();
 		} else {
 			view = 'overview';
 			void refreshOverview();
@@ -2367,7 +2352,7 @@
 		<div class="fixed top-16 right-4 bg-slate-800 border border-sky-500 text-slate-100 px-4 py-2 rounded-lg shadow z-50">{toast}</div>
 	{/if}
 
-	<main class="flex-1 min-h-0 flex flex-col mx-auto w-full max-w-6xl px-4 py-4 gap-4">
+	<main class="flex-1 min-h-0 flex flex-col mx-auto w-full px-4 py-4 gap-4 {view === 'reader' && activeDoc && panel && !isOcrRunning && !pdfPendingOcr ? 'max-w-none md:px-6' : 'max-w-6xl'}">
 		{#if view === 'overview'}
 			<Overview
 				stats={overviewStats}
@@ -2378,7 +2363,7 @@
 				onOpenDoc={handleOpenUnassignedDoc}
 				onShowLibrary={() => {
 					view = 'reader';
-					drawer = 'library';
+					panel = 'library';
 				}}
 				onCreatePlaylist={handleCreatePlaylist}
 				onUploadFile={() => {
@@ -2471,197 +2456,149 @@
 				{/if}
 			</div>
 		{:else if activeDoc}
-			<!-- Phase 4 reader: Markdown-focused single column. PDF / playlist /
-				library open in a drawer docked above the player (or pinned
-				side-by-side with the PDF on wide screens). -->
-			<div class="mx-auto w-full max-w-3xl flex flex-col min-h-0 md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px]">
-				<nav aria-label="Reader views" class="shrink-0 flex items-center justify-center pb-3">
-					<div class="inline-flex items-center gap-1 bg-slate-800 border border-slate-700 rounded-lg p-1">
-						<button
-							onclick={() => (drawer = null)}
-							aria-pressed={drawer === null}
-							title="Now playing (Markdown)"
-							class="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md transition-colors {drawer === null ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
-						>
-							<BookOpen size={14} /><span class="hidden sm:inline">Now playing</span>
-						</button>
-						<button
-							onclick={() => toggleDrawer('pdf')}
-							aria-pressed={drawer === 'pdf'}
-							title="PDF viewer"
-							class="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md transition-colors {drawer === 'pdf' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
-						>
-							<FileText size={14} /><span class="hidden sm:inline">PDF</span>
-						</button>
-						<button
-							onclick={() => toggleDrawer('playlist')}
-							aria-pressed={drawer === 'playlist'}
-							title="Up next (playlist)"
-							class="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md transition-colors {drawer === 'playlist' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
-						>
-							<ListMusic size={14} /><span class="hidden sm:inline">Up next</span>
-						</button>
-						<button
-							onclick={() => toggleDrawer('library')}
-							aria-pressed={drawer === 'library'}
-							title="Library"
-							class="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-md transition-colors {drawer === 'library' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
-						>
-							<LibraryBig size={14} /><span class="hidden sm:inline">Library</span>
-						</button>
-					</div>
-				</nav>
-				{#if isPdfSplitView}
-					<div class="grid md:grid-cols-2 gap-4 items-stretch min-h-0 flex-1">
-						<PdfPane
-							{pdfUrl}
-							bind:canvasEl
-							{pdfPageNum}
-							{pdfTotalPages}
-							onPrev={prevPdfPage}
-							onNext={nextPdfPage}
-							onUploadClick={triggerPdfUpload}
-							logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
-						/>
-						<MarkdownPane
-							bind:this={markdownPaneRef}
-							bind:editorEl
-							{markdownDraft}
-							{sections}
-							{globalIdx}
-							{isEditing}
-							onDraftChange={onMarkdownDraftChange}
-							onEditToggle={handleEditToggle}
-							onEditSave={handleEditSave}
-							onEditCancel={handleEditCancel}
-							onOpenPostprocess={() => (showPostprocess = true)}
-							onDownloadMd={downloadMd}
-							onSaveAudio={saveAudioFile}
-							hasActiveDoc={!!activeDoc}
-							assetDocId={activeDoc?.id ?? null}
-							onSentenceClick={handleSentenceClick}
-							bare
-						/>
-					</div>
-				{:else}
-					<div class="flex-1 min-h-0 flex flex-col">
-						<MarkdownPane
-							bind:this={markdownPaneRef}
-							bind:editorEl
-							{markdownDraft}
-							{sections}
-							{globalIdx}
-							{isEditing}
-							onDraftChange={onMarkdownDraftChange}
-							onEditToggle={handleEditToggle}
-							onEditSave={handleEditSave}
-							onEditCancel={handleEditCancel}
-							onOpenPostprocess={() => (showPostprocess = true)}
-							onDownloadMd={downloadMd}
-							onSaveAudio={saveAudioFile}
-							hasActiveDoc={!!activeDoc}
-							assetDocId={activeDoc?.id ?? null}
-							onSentenceClick={handleSentenceClick}
-							bare
-						/>
-					</div>
-					{#if drawer}
-						<section
-							aria-label={drawer === 'pdf' ? 'PDF viewer' : drawer === 'playlist' ? 'Playlist' : 'Library'}
-							class="shrink-0 mt-3 bg-slate-800 border border-slate-700 rounded-xl flex flex-col overflow-hidden h-[46vh] md:h-[40vh]"
-						>
-							<div class="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-slate-700">
-								<span class="flex-1 min-w-0 text-sm font-semibold text-slate-100 truncate">
-									{drawer === 'pdf'
+			<!-- Phase 4 reader: Markdown-focused. The panel is a slide-over
+				overlay covering the reader on mobile, and a left sidebar
+				(~1/3 width, independently scrolling) on desktop. -->
+			<div class="relative mx-auto w-full flex flex-col min-h-0 md:flex-row md:gap-5 md:h-[calc(100vh-15rem)] md:min-h-[480px] md:max-h-[860px] {panel ? 'max-w-none' : 'max-w-3xl'}">
+				{#if panel}
+					<aside
+						transition:fly={{ x: 72, duration: 160 }}
+						aria-label={panel === 'pdf' ? 'PDF viewer' : panel === 'playlist' ? 'Playlist' : 'Library'}
+						class="absolute inset-0 z-30 flex flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-900 md:static md:z-auto md:h-full md:w-[34%] md:max-w-md md:shrink-0 md:bg-slate-800"
+					>
+						<div class="shrink-0 border-b border-slate-700 px-3 pb-2 pt-2">
+							<div class="flex items-center gap-2">
+								<span class="flex-1 min-w-0 truncate text-sm font-semibold text-slate-100">
+									{panel === 'pdf'
 										? 'PDF'
-										: drawer === 'playlist'
+										: panel === 'playlist'
 											? (playlists.find((p) => p.id === activePlaylistId)?.name ?? 'Playlist')
 											: 'Library'}
 								</span>
-								{#if drawer === 'pdf'}
-									<button
-										onclick={togglePdfSplit}
-										aria-pressed={pdfSplit}
-										title="Pin side-by-side on wide screens"
-										class="hidden md:inline-flex items-center text-xs px-3 py-1 rounded-md border transition-colors {pdfSplit ? 'border-sky-500 text-sky-300 bg-sky-500/10' : 'border-slate-600 text-slate-300 hover:bg-slate-700'}"
-									>
-										Side-by-side
-									</button>
-								{/if}
 								<button
-									onclick={() => (drawer = null)}
+									onclick={() => (panel = null)}
 									aria-label="Close panel"
-									title="Back to Now playing"
-									class="w-8 h-8 flex items-center justify-center rounded-md hover:bg-slate-700 text-slate-300"
+									title="Back to reading"
+									class="flex h-8 w-8 items-center justify-center rounded-md text-slate-300 hover:bg-slate-700"
 								>
 									<X size={16} />
 								</button>
 							</div>
-							<div class="flex-1 min-h-0 overflow-auto">
-								{#if drawer === 'pdf'}
-									<PdfPane
-										{pdfUrl}
-										bind:canvasEl
-										{pdfPageNum}
-										{pdfTotalPages}
-										onPrev={prevPdfPage}
-										onNext={nextPdfPage}
-										onUploadClick={triggerPdfUpload}
-										logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
-									/>
-								{:else if drawer === 'playlist'}
-									<PlaylistPane
-										playlist={playlists.find((p) => p.id === activePlaylistId) ?? null}
-										items={playlistItems}
-										stats={itemStats}
-										{activeItemId}
-										canAddCurrentDoc={!!activeDoc &&
-											!!activePlaylistId &&
-											!playlistItems.some((i) => i.docId === activeDoc?.id)}
-										onSelectItem={(id) => {
-											if (activePlaylistId) openPlaylistItem(activePlaylistId, id);
-										}}
-										onRenameItem={handleRenamePlaylistItem}
-										onDeleteItem={handleDeletePlaylistItem}
-										onBulkDelete={handleBulkDeletePlaylistItems}
-										onMoveItem={handleMovePlaylistItem}
-										onDropItem={handleDropPlaylistItem}
-										onShowPdf={handleShowItemPdf}
-										onClearItemPdf={handleClearItemPdf}
-										offline={offlineItemState}
-										onGenerateOffline={(id) => void handleGenerateOfflineItem(id)}
-										onDeleteOffline={(id) => void handleDeleteOfflineItem(id)}
-										onReprocessItem={handleReprocessItem}
-										onOpenLibrary={() => (drawer = 'library')}
-										onUploadDoc={handlePlaylistDocUpload}
-										onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
-										onFetchUrl={(url) => handleFetchUrl(activePlaylistId, url)}
-										onAddCurrentDoc={handleAddCurrentDoc}
-									/>
-								{:else}
-									<LibraryPane
-										{playlists}
-										stats={libraryStats}
-										{activePlaylistId}
-										unassigned={unassignedDocs.map((d) => ({
-											id: d.id,
-											title: d.title,
-											hasPdf: pdfSizes[d.id] !== undefined
-										}))}
-										onOpenPlaylist={handleOpenPlaylist}
-										onCreatePlaylist={handleCreatePlaylist}
-										onRenamePlaylist={handleRenamePlaylist}
-										onDeletePlaylist={handleDeletePlaylist}
-										onOpenDoc={handleOpenUnassignedDoc}
-										onRenameDoc={renameDoc}
-										onDeleteDoc={deleteDocHandler}
-										onAddDocToPlaylist={handleAddUnassignedToPlaylist}
-									/>
-								{/if}
+							<div class="mt-2 grid grid-cols-3 gap-1 rounded-lg border border-slate-700 bg-slate-900/60 p-1" role="tablist" aria-label="Panel views">
+								<button
+									role="tab"
+									aria-selected={panel === 'playlist'}
+									onclick={() => openPanel('playlist')}
+									title="Up next (playlist)"
+									class="inline-flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors {panel === 'playlist' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
+								>
+									<ListMusic size={14} /> Up next
+								</button>
+								<button
+									role="tab"
+									aria-selected={panel === 'library'}
+									onclick={() => openPanel('library')}
+									title="Library"
+									class="inline-flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors {panel === 'library' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
+								>
+									<LibraryBig size={14} /> Library
+								</button>
+								<button
+									role="tab"
+									aria-selected={panel === 'pdf'}
+									onclick={() => openPanel('pdf')}
+									title="PDF viewer"
+									class="inline-flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors {panel === 'pdf' ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-700'}"
+								>
+									<FileText size={14} /> PDF
+								</button>
 							</div>
-						</section>
-					{/if}
+						</div>
+						<div class="min-h-0 flex-1 overflow-y-auto">
+							{#if panel === 'pdf'}
+								<PdfPane
+									{pdfUrl}
+									bind:canvasEl
+									{pdfPageNum}
+									{pdfTotalPages}
+									onPrev={prevPdfPage}
+									onNext={nextPdfPage}
+									onUploadClick={triggerPdfUpload}
+									logicalPage={physicalToLogical(pdfPageNum, activeDoc?.pageMap)}
+								/>
+							{:else if panel === 'playlist'}
+								<PlaylistPane
+									playlist={playlists.find((p) => p.id === activePlaylistId) ?? null}
+									items={playlistItems}
+									stats={itemStats}
+									{activeItemId}
+									canAddCurrentDoc={!!activeDoc &&
+										!!activePlaylistId &&
+										!playlistItems.some((i) => i.docId === activeDoc?.id)}
+									onSelectItem={(id) => {
+										if (activePlaylistId) openPlaylistItem(activePlaylistId, id);
+									}}
+									onRenameItem={handleRenamePlaylistItem}
+									onDeleteItem={handleDeletePlaylistItem}
+									onBulkDelete={handleBulkDeletePlaylistItems}
+									onMoveItem={handleMovePlaylistItem}
+									onDropItem={handleDropPlaylistItem}
+									onShowPdf={handleShowItemPdf}
+									onClearItemPdf={handleClearItemPdf}
+									offline={offlineItemState}
+									onGenerateOffline={(id) => void handleGenerateOfflineItem(id)}
+									onDeleteOffline={(id) => void handleDeleteOfflineItem(id)}
+									onReprocessItem={handleReprocessItem}
+									onOpenLibrary={() => openPanel('library')}
+									onUploadDoc={handlePlaylistDocUpload}
+									onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
+									onFetchUrl={(url) => handleFetchUrl(activePlaylistId, url)}
+									onAddCurrentDoc={handleAddCurrentDoc}
+								/>
+							{:else}
+								<LibraryPane
+									{playlists}
+									stats={libraryStats}
+									{activePlaylistId}
+									unassigned={unassignedDocs.map((d) => ({
+										id: d.id,
+										title: d.title,
+										hasPdf: pdfSizes[d.id] !== undefined
+									}))}
+									onOpenPlaylist={handleOpenPlaylist}
+									onCreatePlaylist={handleCreatePlaylist}
+									onRenamePlaylist={handleRenamePlaylist}
+									onDeletePlaylist={handleDeletePlaylist}
+									onOpenDoc={handleOpenUnassignedDoc}
+									onRenameDoc={renameDoc}
+									onDeleteDoc={deleteDocHandler}
+									onAddDocToPlaylist={handleAddUnassignedToPlaylist}
+								/>
+							{/if}
+						</div>
+					</aside>
 				{/if}
+				<div class="min-h-0 flex-1 md:h-full">
+					<MarkdownPane
+						bind:this={markdownPaneRef}
+						bind:editorEl
+						{markdownDraft}
+						{sections}
+						{globalIdx}
+						{isEditing}
+						onDraftChange={onMarkdownDraftChange}
+						onEditToggle={handleEditToggle}
+						onEditSave={handleEditSave}
+						onEditCancel={handleEditCancel}
+						onOpenPostprocess={() => (showPostprocess = true)}
+						onDownloadMd={downloadMd}
+						onSaveAudio={saveAudioFile}
+						hasActiveDoc={!!activeDoc}
+						assetDocId={activeDoc?.id ?? null}
+						onSentenceClick={handleSentenceClick}
+						bare
+					/>
+				</div>
 			</div>
 		{:else}
 			<div class="flex-1 flex flex-col items-center justify-center gap-4 py-12 text-center">

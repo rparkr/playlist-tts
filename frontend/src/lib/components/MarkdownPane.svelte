@@ -351,13 +351,13 @@ import { getDocAsset } from '$lib/stores/library';
 				bind:this={editorEl}
 				value={markdownDraft}
 				oninput={(e) => onDraftChange((e.target as HTMLTextAreaElement).value)}
-				class="w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500"
+				class={bare ? 'mx-auto w-full max-w-3xl min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500' : 'w-full min-h-[360px] h-full bg-slate-900 border-0 rounded-none p-4 font-mono text-sm text-slate-100 resize-y focus:outline-none focus:ring-1 focus:ring-sky-500'}
 				placeholder="Markdown…"
 			></textarea>
 		{:else if useRich}
 			<div
 				role="document"
-				class="md-body p-5 max-w-none"
+				class={bare ? 'md-body p-5 mx-auto w-full max-w-3xl' : 'md-body p-5 max-w-none'}
 				use:richInteractions
 				use:resolveAssetImages={assetDocId}
 			>
@@ -368,7 +368,7 @@ import { getDocAsset } from '$lib/stores/library';
 				{/if}
 			</div>
 		{:else}
-			<div class="p-5 prose prose-invert prose-sm max-w-none prose-p:leading-relaxed">
+			<div class={bare ? 'p-5 prose prose-invert prose-sm mx-auto w-full max-w-3xl prose-p:leading-relaxed' : 'p-5 prose prose-invert prose-sm max-w-none prose-p:leading-relaxed'}>
 				{#if sections.length === 0}
 					<p class="text-slate-400">No content yet.</p>
 				{:else}
