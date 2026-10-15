@@ -24,7 +24,7 @@ from backend.app.services.html_to_markdown import html_to_markdown
 
 FETCH_TIMEOUT_SECONDS = 20
 FETCH_MAX_BYTES = 5 * 1024 * 1024
-FETCH_USER_AGENT = "OCR-TTS-Reader/1.0 (+https://github.com/anomalyco/ocr-tts)"
+FETCH_USER_AGENT = "Playlist-TTS/1.0 (+https://github.com/rparkr/playlist-tts)"
 
 _BLOCKED_HOSTNAMES = {"localhost", "localhost.", "ip6-localhost"}
 
