@@ -1,7 +1,18 @@
-"""TTS service — pocket-tts streaming, file jobs, and transient voice conversion."""
+"""TTS service — engine selection, streaming, file jobs, and voice conversion.
+
+Two server engines are available during the Phonon migration:
+
+- `phonon`: the small Rust `ptts` runtime (preferred for new installs).
+- `pocket`: the legacy PyTorch engine with local voice cloning.
+
+The API sends the engine with each request; `pocket` remains the default for
+older clients that do not send one.
+"""
 
 import asyncio
+import importlib.util
 import io
+import json
 import queue
 import tempfile
 import threading
@@ -12,6 +23,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend.app.models.schemas import JobStatus
+from backend.app.services import phonon_service
+
+# Pocket TTS voice metadata (gender, type) from the model developers.
+# Used by the frontend to group voices as Gender → Type → Alphabetical.
+_POCKET_VOICE_META: dict[str, dict] = {}
+try:
+    _pocket_meta_path = (
+        Path(__file__).resolve().parents[1] / "data" / "pocket-tts-voice-associations.json"
+    )
+    if _pocket_meta_path.exists():
+        with open(_pocket_meta_path) as _f:
+            data = json.load(_f)
+            _POCKET_VOICE_META = {v["name"]: v for v in data.get("voices", [])}
+except Exception:
+    pass
+
+TTS_ENGINES = ("pocket", "phonon")
 
 
 @dataclass
@@ -20,6 +48,8 @@ class TTSJob:
 
     job_id: str
     status: JobStatus = JobStatus.queued
+    engine: str = "pocket"
+    voice: str | None = None
     progress_done: int = 0
     progress_total: int = 0
     error: str | None = None
@@ -42,12 +72,68 @@ def get_tts_model():
     return _tts_model
 
 
-def list_voices() -> list[dict]:
-    """Return catalog of built-in voices."""
+def _check_engine(engine: str) -> str:
+    """Validate and normalize an engine name."""
+    if engine not in TTS_ENGINES:
+        raise ValueError(f"Unknown TTS engine: {engine}")
+    return engine
+
+
+def engine_available(engine: str) -> bool:
+    """Return whether `engine` can run in this process."""
+    if engine == "phonon":
+        return phonon_service.available()
+    if engine == "pocket":
+        # Keep `/engines` cheap: checking for the package must not import
+        # PyTorch, which Pocket's package initializer loads eagerly.
+        return importlib.util.find_spec("pocket_tts") is not None
+    return False
+
+
+def list_engines() -> list[dict]:
+    """Return engine descriptors for the settings UI.
+
+    Pocket's voice catalog is left out here because reading it imports
+    PyTorch. The frontend fetches it from `/voices?engine=pocket` only when
+    the user actually selects Pocket.
+    """
+    phonon_available = engine_available("phonon")
+    return [
+        {
+            "id": "phonon",
+            "label": "Phonon",
+            "available": phonon_available,
+            "voice_cloning": False,
+            "voices": phonon_service.list_voices() if phonon_available else [],
+        },
+        {
+            "id": "pocket",
+            "label": "Pocket TTS (legacy)",
+            "available": engine_available("pocket"),
+            "voice_cloning": True,
+            "voices": [],
+        },
+    ]
+
+
+def list_voices(engine: str = "pocket") -> list[dict]:
+    """Return the voice catalog for `engine`."""
+    engine = _check_engine(engine)
+    if engine == "phonon":
+        return phonon_service.list_voices()
     try:
         from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
 
-        return [{"name": k, "origin": v} for k, v in _ORIGINS_OF_PREDEFINED_VOICES.items()]
+        return [
+            {
+                "name": k,
+                "accent": None,
+                "gender": _POCKET_VOICE_META.get(k, {}).get("gender", None),
+                "origin": v,
+                "type": _POCKET_VOICE_META.get(k, {}).get("type", None),
+            }
+            for k, v in _ORIGINS_OF_PREDEFINED_VOICES.items()
+        ]
     except Exception:
         return [{"name": "alba"}, {"name": "marius"}]
 
@@ -92,38 +178,48 @@ def convert_wav_to_safetensors(wav_bytes: bytes, filename: str) -> bytes:
         tmp_in_path.unlink(missing_ok=True)
 
 
-def generate_stream(
-    text: str,
-    voice_url: str | None = None,
-    voice_safetensors_bytes: bytes | None = None,
-) -> Generator[bytes]:
-    """Yield WAV bytes for streaming response (blocking generator).
-
-    Voice handling: builtin name/url, or safetensors blob from IndexedDB.
-    Mirrors pocket_tts/main.py write_to_queue pattern.
-    """
-    model = get_tts_model()
-
-    # Resolve model_state
+def _pocket_state(model, voice_url: str | None, voice_safetensors_bytes: bytes | None):
+    """Resolve a Pocket voice state from a builtin name or safetensors blob."""
     if voice_safetensors_bytes is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".safetensors") as tmp:
             tmp.write(voice_safetensors_bytes)
             tmp.flush()
             tmp_path = Path(tmp.name)
         try:
-            # _import_model_state expects path; use safetensors load directly
-            # Reuse get_state_for_audio_prompt path for .safetensors
-            state = model.get_state_for_audio_prompt(tmp_path)
+            return model.get_state_for_audio_prompt(tmp_path)
         finally:
             tmp_path.unlink(missing_ok=True)
-    elif voice_url is not None:
-        # Use cached path for builtin
-        state = model._cached_get_state_for_audio_prompt(voice_url)  # type: ignore[attr-defined]
-    else:
-        from pocket_tts.default_parameters import get_default_voice_for_language
+    if voice_url is not None:
+        return model._cached_get_state_for_audio_prompt(voice_url)  # type: ignore[attr-defined]
+    from pocket_tts.default_parameters import get_default_voice_for_language
 
-        default_voice = get_default_voice_for_language(None)
-        state = model._cached_get_state_for_audio_prompt(default_voice)  # type: ignore[attr-defined]
+    default_voice = get_default_voice_for_language(None)
+    return model._cached_get_state_for_audio_prompt(default_voice)  # type: ignore[attr-defined]
+
+
+def generate_stream(
+    text: str,
+    voice_url: str | None = None,
+    voice_safetensors_bytes: bytes | None = None,
+    engine: str = "pocket",
+) -> Generator[bytes]:
+    """Yield WAV bytes for streaming response (blocking generator).
+
+    Voice handling: builtin name/url, or safetensors blob from IndexedDB.
+    Mirrors pocket_tts/main.py write_to_queue pattern for Pocket and uses the
+    native `ptts` stream for Phonon.
+    """
+    engine = _check_engine(engine)
+    if engine == "phonon":
+        yield from phonon_service.generate_stream_wav(
+            text,
+            voice=voice_url,
+            voice_blob=voice_safetensors_bytes,
+        )
+        return
+
+    model = get_tts_model()
+    state = _pocket_state(model, voice_url, voice_safetensors_bytes)
 
     # Stream via pocket-tts internals — queue + thread like main.py
     from pocket_tts.data.audio import stream_audio_chunks
@@ -178,11 +274,17 @@ async def create_tts_file_job(
     voice_safetensors_bytes: bytes | None,
     output_name: str | None = None,
     fmt: str = "wav",
+    engine: str = "pocket",
 ) -> str:
     """Create background job that writes audio file to storage/{jobId}.wav."""
+    engine = _check_engine(engine)
+    if not engine_available(engine):
+        raise RuntimeError(f"TTS engine is not available: {engine}")
     job_id = uuid.uuid4().hex[:12]
     job = TTSJob(
         job_id=job_id,
+        engine=engine,
+        voice=voice_url,
         progress_total=_estimate_total_chunks(text),
         display_name=_display_filename(output_name, fmt),
     )
@@ -203,29 +305,28 @@ async def create_tts_file_job(
 
             # Stream synthesis directly to the storage WAV file.
             def _direct_to_file() -> None:
+                if engine == "phonon":
+                    phonon_service.synthesize_to_wav(
+                        text,
+                        voice=voice_url,
+                        path=wav_path,
+                        voice_blob=voice_safetensors_bytes,
+                        on_progress=_set_job_progress,
+                    )
+                    return
+
                 model = get_tts_model()
-                if voice_safetensors_bytes is not None:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".safetensors") as tmp:
-                        tmp.write(voice_safetensors_bytes)
-                        tmp.flush()
-                        tmp_path = Path(tmp.name)
-                    try:
-                        state = model.get_state_for_audio_prompt(tmp_path)
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-                elif voice_url is not None:
-                    state = model._cached_get_state_for_audio_prompt(voice_url)  # type: ignore[attr-defined]
-                else:
-                    from pocket_tts.default_parameters import get_default_voice_for_language
-
-                    default_voice = get_default_voice_for_language(None)
-                    state = model._cached_get_state_for_audio_prompt(default_voice)  # type: ignore[attr-defined]
-
+                state = _pocket_state(model, voice_url, voice_safetensors_bytes)
                 from pocket_tts.data.audio import stream_audio_chunks
 
                 chunks = model.generate_audio_stream(state, text)
                 # stream_audio_chunks handles file path or file-like
                 stream_audio_chunks(str(wav_path), chunks, model.config.mimi.sample_rate)
+
+            def _set_job_progress(done: int, total: int) -> None:
+                """Update job progress from the synthesis worker thread."""
+                job.progress_done = done
+                job.progress_total = max(1, total)
 
             await loop.run_in_executor(None, _direct_to_file)
 
@@ -255,8 +356,9 @@ async def create_tts_file_job(
                     container_out.close()
                     job.output_path = out_path
                 except Exception:
-                    # Keep wav if transcode fails
-                    pass
+                    # Keep the WAV when transcode fails, and make the download
+                    # name tell the truth about the actual container.
+                    job.display_name = _display_filename(output_name, "wav")
 
             job.progress_done = job.progress_total
             job.status = JobStatus.done

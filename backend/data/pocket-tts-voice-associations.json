@@ -1,0 +1,31 @@
+{
+  "voices": [
+    { "name": "Jane", "gender": "female", "type": "conversation" },
+    { "name": "Alba", "gender": "male", "type": "reading" },
+    { "name": "Bill Boerst", "gender": "male", "type": "reading" },
+    { "name": "Caro Davy", "gender": "female", "type": "reading" },
+    { "name": "Peter Yearsley", "gender": "male", "type": "reading" },
+    { "name": "Stuart Bell", "gender": "male", "type": "reading" },
+    { "name": "Anna", "gender": "female", "type": "conversation" },
+    { "name": "Azelma", "gender": "female", "type": "reading" },
+    { "name": "Charles", "gender": "male", "type": "conversation" },
+    { "name": "Eponine", "gender": "female", "type": "reading" },
+    { "name": "Eve", "gender": "female", "type": "conversation" },
+    { "name": "Fantine", "gender": "female", "type": "reading" },
+    { "name": "George", "gender": "male", "type": "conversation" },
+    { "name": "Mary", "gender": "female", "type": "conversation" },
+    { "name": "Michael", "gender": "male", "type": "conversation" },
+    { "name": "Paul", "gender": "male", "type": "conversation" },
+    { "name": "Vera", "gender": "female", "type": "conversation" },
+    { "name": "Jean", "gender": "male", "type": "conversation" },
+    { "name": "Daan", "gender": "male", "type": "reading" },
+    { "name": "Estelle", "gender": "female", "type": "reading" },
+    { "name": "Giovanni", "gender": "male", "type": "reading" },
+    { "name": "Juergen", "gender": "male", "type": "reading" },
+    { "name": "Lola", "gender": "female", "type": "reading" },
+    { "name": "Rafael", "gender": "male", "type": "reading" },
+    { "name": "cosette", "gender": "female", "type": "conversation" },
+    { "name": "marius", "gender": "male", "type": "reading" },
+    { "name": "javert", "gender": "male", "type": "reading" }
+  ]
+}

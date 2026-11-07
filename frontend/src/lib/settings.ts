@@ -7,7 +7,22 @@
  * used for new OCR jobs and for the pre-doc UI.
  */
 
-export type TtsEngine = 'device' | 'pocket';
+/** Playback engines. `phonon-browser` runs the WASM model locally; the
+ * server engines are `pocket` (legacy) and `phonon` (ptts). */
+export type TtsEngine = 'device' | 'pocket' | 'phonon' | 'phonon-browser';
+export type ServerTtsEngine = 'pocket' | 'phonon';
+
+export const ALL_TTS_ENGINES: readonly TtsEngine[] = [
+	'device',
+	'phonon',
+	'phonon-browser',
+	'pocket'
+];
+
+/** True when the engine is synthesized by the backend. */
+export function isServerEngine(engine: TtsEngine): engine is ServerTtsEngine {
+	return engine === 'pocket' || engine === 'phonon';
+}
 
 export const LS_KEYS = {
 	activeDocId: 'tts_active_doc_id',
@@ -40,6 +55,10 @@ export interface PostprocessFlags {
 export function parseEngine(value: string | null | undefined): TtsEngine | null {
 	if (value === 'pocket' || value === 'backend') return 'pocket';
 	if (value === 'device' || value === 'builtin') return 'device';
+	if (value === 'phonon' || value === 'phonon-server') return 'phonon';
+	if (value === 'phonon-browser' || value === 'phonon-wasm' || value === 'wasm') {
+		return 'phonon-browser';
+	}
 	// Retired: 'browser'/'local' (Kokoro WASM engine, removed) → null → default.
 	return null;
 }
@@ -122,27 +141,24 @@ export function progressKey(docId: string): string {
 	return `progress_${docId}`;
 }
 
-/** Per-engine voice selection: each TTS engine remembers its own voice. */
-export interface VoiceByEngine {
-	device: string | null;
-	pocket: string | null;
-}
+/** Per-engine voice selection: each TTS engine remembers its own voice.
+ * Partial so adding an engine never invalidates older stored payloads. */
+export type VoiceByEngine = Partial<Record<TtsEngine, string | null>>;
 
 /** Parse a stored per-engine voice map; return null when absent/invalid.
- * A retired `browser` slot in older payloads is ignored (no migration). */
+ * Retired/unknown slots in older payloads are ignored (no migration). */
 export function parseVoiceByEngine(value: string | null | undefined): VoiceByEngine | null {
 	if (!value) return null;
 	try {
-		const p = JSON.parse(value) as Partial<VoiceByEngine>;
-		const device = p.device ?? null;
-		const pocket = p.pocket ?? null;
-		if (
-			(device !== null && typeof device !== 'string') ||
-			(pocket !== null && typeof pocket !== 'string')
-		) {
-			return null;
+		const p = JSON.parse(value) as Record<string, unknown>;
+		const out: VoiceByEngine = {};
+		for (const engine of ALL_TTS_ENGINES) {
+			const v = p[engine];
+			if (v === undefined) continue;
+			if (v !== null && typeof v !== 'string') return null;
+			out[engine] = v;
 		}
-		return { device, pocket };
+		return out;
 	} catch {
 		return null;
 	}
@@ -168,12 +184,7 @@ export function withVoiceForEngine(
 	engine: TtsEngine,
 	voiceId: string
 ): VoiceByEngine {
-	const next: VoiceByEngine = {
-		device: map?.device ?? null,
-		pocket: map?.pocket ?? null
-	};
-	next[engine] = voiceId;
-	return next;
+	return { ...(map ?? {}), [engine]: voiceId };
 }
 
 /** Slugify a cloned-voice name for the shareable `?voice=` URL parameter. */
@@ -221,6 +232,12 @@ export interface VoiceLookup {
 	customVoices: readonly { id: string; name: string }[];
 }
 
+/** Voice metadata used for grouping by language → accent → gender. */
+export interface VoiceGroupInfo {
+	gender: 'male' | 'female' | 'unknown' | null;
+	accent: 'us' | 'uk' | 'castilian' | 'mexican' | 'peninsular' | 'parisian' | 'brazilian' | null;
+}
+
 /**
  * Resolve a `?voice=` URL parameter to a voice ID. Accepts (in order) an
  * exact custom-voice ID (back-compat with older links), an exact built-in
@@ -246,7 +263,84 @@ export function resolveVoiceId(
 }
 
 /**
- * Return a copy of `voices` sorted alphabetically by `name`
+ * Group and sort voices by language → accent → gender → alphabetically.
+ *
+ * Returns an array of { group, label, voices } objects for rendering as
+ * nested optgroups in a <select>.  When there is only one group it
+ * returns a flat array (same shape as ``sortVoiceOptions``).
+ *
+ * The ``extra`` callback lets callers annotate voices with additional
+ * data (e.g. IndexedDB size) for display in option labels.
+ */
+export function groupAndSortVoices<
+	T extends { name: string; gender?: string | null; accent?: string | null },
+>(
+	voices: readonly T[],
+	extra?: (v: T) => string
+): { group: string; label: string; voices: T[] }[] | T[] {
+	if (voices.length === 0) return [];
+
+	// Build group keys
+	const groupMap = new Map<string, Map<string, T[]>>();
+	let hasGrouping = false;
+
+	for (const v of voices) {
+		const lang = (v as VoiceGroupInfo).gender !== undefined || (v as VoiceGroupInfo).accent !== undefined
+			? ((v as any).language ?? 'en')
+			: 'pocket';
+
+		const accent = v.accent ?? null;
+		const gender = v.gender ?? 'unknown';
+		const langOrder = lang === 'en' ? 0 : 1;
+		const accentOrder = accent === null ? 0 : accent === 'us' ? 1 : 2;
+		const genderOrder = gender === 'female' ? 0 : gender === 'male' ? 1 : 2;
+
+		const groupKey = `${lang}::${accent ?? 'all'}::${gender}`;
+
+		if (!groupMap.has(groupKey)) groupMap.set(groupKey, new Map());
+		const genderMap = groupMap.get(groupKey)!;
+		if (!genderMap.has(gender)) genderMap.set(gender, []);
+		genderMap.get(gender)!.push(v);
+
+		if (groupMap.size > 1) hasGrouping = true;
+	}
+
+	if (!hasGrouping) {
+		// Single group — return flat array
+		return [
+			...voices
+		].sort((a, b) =>
+			a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+		);
+	}
+
+	// Build nested optgroups
+	const groups: { group: string; label: string; voices: T[] }[] = [];
+	let prevLang = '';
+
+	for (const [key, genderMap] of groupMap) {
+		const [lang, accent, genderName] = key.split('::');
+
+		for (const [genderName, voicesList] of genderMap) {
+			const sorted = voicesList.sort((a, b) =>
+				a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+			);
+
+			// Group header: show language on first occurrence, accent/gender for each
+			const label = [accent, genderName]
+				.filter(Boolean)
+				.map(w => w.charAt(0).toUpperCase() + w.slice(1))
+				.join(', ');
+
+			groups.push({ group: lang, label, voices: sorted });
+		}
+	}
+
+	return groups;
+}
+
+/**
+ * Legacy: return a copy of `voices` sorted alphabetically by `name`
  * (case-insensitive). Used to keep voice pickers stable with cloned voices
  * pinned in their own top optgroup.
  */
