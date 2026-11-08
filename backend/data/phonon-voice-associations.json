@@ -1,41 +1,337 @@
 {
   "voices": [
-    { "name": "Zoey", "language": "American English", "gender": "female" },
-    { "name": "Juniper", "language": "American English", "gender": "female" },
-    { "name": "Everly", "language": "American English", "gender": "female" },
-    { "name": "Harper", "language": "American English", "gender": "female" },
-    { "name": "Hadley", "language": "American English", "gender": "female" },
-    { "name": "Delia", "language": "American English", "gender": "female" },
-    { "name": "Easton", "language": "American English", "gender": "male" },
-    { "name": "Micah", "language": "American English", "gender": "male" },
-    { "name": "Trevor", "language": "American English", "gender": "male" },
-    { "name": "Russell", "language": "American English", "gender": "male" },
-    { "name": "Preston", "language": "American English", "gender": "male" },
-    { "name": "Miles", "language": "American English", "gender": "male" },
-    { "name": "Maeve", "language": "British English", "gender": "female" },
-    { "name": "Freya", "language": "British English", "gender": "female" },
-    { "name": "Pippa", "language": "British English", "gender": "female" },
-    { "name": "Elodie-Rose", "language": "British English", "gender": "female" },
-    { "name": "Imogen", "language": "British English", "gender": "female" },
-    { "name": "Lottie", "language": "British English", "gender": "female" },
-    { "name": "Bryony", "language": "British English", "gender": "female" },
-    { "name": "Alfie", "language": "British English", "gender": "male" },
-    { "name": "Hugh", "language": "British English", "gender": "male" },
-    { "name": "Edwin", "language": "British English", "gender": "male" },
-    { "name": "Spencer", "language": "British English", "gender": "male" },
-    { "name": "Toby", "language": "British English", "gender": "male" },
-    { "name": "Teddy", "language": "British English", "gender": "male" },
-    { "name": "Captain Silas Blackwater", "language": "Characters (English)", "gender": "male" },
-    { "name": "Morwenna of the Deep", "language": "Characters (English)", "gender": "female" },
-    { "name": "Old Mortlake", "language": "Characters (English)", "gender": "male" },
-    { "name": "Azgorath", "language": "Characters (English)", "gender": "male" },
-    { "name": "Fennick the Young Elf", "language": "Characters (English)", "gender": "male" },
-    { "name": "The Thing Under the Stairs", "language": "Characters (English)", "gender": "male" },
-    { "name": "Vyrmathrax the Ancient", "language": "Characters (English)", "gender": "male" },
-    { "name": "Grub the Ogre", "language": "Characters (English)", "gender": "male" },
-    { "name": "Master Aldric", "language": "Characters (English)", "gender": "male" },
-    { "name": "The Snow Queen", "language": "Characters (English)", "gender": "female" },
-    { "name": "Sir Bramwell", "language": "Characters (English)", "gender": "male" },
-    { "name": "Fairy Godmother", "language": "Characters (English)", "gender": "female" }
+    {
+      "name": "Zoey",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Adult",
+      "voice_id": "NbpkqMVS3CJeq2j8",
+      "description": "Playful, upbeat and Gen Z energy voice with a standard American accent. Perfect for engaging conversations!"
+    },
+    {
+      "name": "Juniper",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Young Adult",
+      "voice_id": "NIWIOv5vTi5eRMj8",
+      "description": "Cheerful presence with real resonance under it, personable when the copy turns intimate and decisive on the final line."
+    },
+    {
+      "name": "Everly",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Middle-age",
+      "voice_id": "vjFyp2BcCyTlUmYb",
+      "description": "Rounded, soft-edged tone with gentle lift at the end of phrases and an easy, relaxed delivery."
+    },
+    {
+      "name": "Harper",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Adult",
+      "voice_id": "4SZHfMpw-p46Ywgs",
+      "description": "Modern, confident and friendly voice with a standard American accent."
+    },
+    {
+      "name": "Hadley",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Middle-age",
+      "voice_id": "bXwrkHhURL1VFJdG",
+      "description": "Settled, even-toned and genuinely kind, with crisp consonants that hold up over a handset."
+    },
+    {
+      "name": "Delia",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "female",
+      "age": "Middle-age",
+      "voice_id": "nGzMHMPAWGaJFHOo",
+      "description": "Low, grounded and quick to the point, with a sincerity that keeps an apology honest."
+    },
+    {
+      "name": "Easton",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Young Adult",
+      "voice_id": "LMDIYE0Oa377Qh6Z",
+      "description": "Punchy and close in, with crisp consonant attack that cuts through a music bed and pitch that lifts across each line."
+    },
+    {
+      "name": "Micah",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Young Adult",
+      "voice_id": "40QrMVgAxFiUnP9f",
+      "description": "Buoyant and high in energy, with a playful lift at the ends of phrases and clean attack that survives a loud mix."
+    },
+    {
+      "name": "Trevor",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Middle-age",
+      "voice_id": "0zLApsZfVLLNaEGl",
+      "description": "Buoyant energy over a resonant mid-low core, phrases landing softly and consonants cutting through a handset."
+    },
+    {
+      "name": "Russell",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Adult",
+      "voice_id": "_6Aslh2DxfmnRLmP",
+      "description": "A high-energy American adult voice that pushes and encourages with the intensity of someone who genuinely believes in you."
+    },
+    {
+      "name": "Preston",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Middle-age",
+      "voice_id": "qIxlZ7Ei8KvWlyQH",
+      "description": "Trim, focused delivery with clean edges on every consonant and a steady, low-set core that carries through phone bandwidth."
+    },
+    {
+      "name": "Miles",
+      "language": "English",
+      "dialect": "US English",
+      "gender": "male",
+      "age": "Young Adult",
+      "voice_id": "d9XCyhjo4JhkHF1d",
+      "description": "Resonant and decisive, with genuine dynamic range, dropping right down for one clause then driving back up."
+    },
+    {
+      "name": "Maeve",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Adult",
+      "voice_id": "6PWnV0Nq4wu7RVBT",
+      "description": "A sparky, attentive British English adult voice that gets to the point with a smile. Ideal for fast, efficient customer support and helpful voice assistants."
+    },
+    {
+      "name": "Freya",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Young",
+      "voice_id": "GgfEkEJtxZR7gnpy",
+      "description": "A young British voice, glossy and confident with fast, girly chatter and bubbly sparkle, perfect for a friendly receptionist or assistant."
+    },
+    {
+      "name": "Pippa",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Adult",
+      "voice_id": "uem82D50GRv2Dwma",
+      "description": "A confident, upbeat British English adult voice with infectious energy. Perfect for proactive assistants and motivating customer success calls."
+    },
+    {
+      "name": "Elodie-Rose",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Young",
+      "voice_id": "y9bQqIDnyxwqK01t",
+      "description": "A young British voice with sharp, enthusiastic energy and crisp articulation, sparky and to the point for customer support and care."
+    },
+    {
+      "name": "Imogen",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Adult",
+      "voice_id": "gDT1nz7Ie36ZhL-C",
+      "description": "A bubbly, friendly British English adult voice that puts callers instantly at ease. Great for onboarding assistants and warm concierge interactions."
+    },
+    {
+      "name": "Lottie",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Young Adult",
+      "voice_id": "m9MxpY6IUGXtWp76",
+      "description": "Sparky and to the point, high forward energy with clean edges on the consonants and the range to drop low for one line then climb back."
+    },
+    {
+      "name": "Alfie",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Young Adult",
+      "voice_id": "X6NceqF285Gr04gb",
+      "description": "Punchy and forward, with crisp consonant attack and a pitch that lifts across a line, sitting high over a music bed."
+    },
+    {
+      "name": "Hugh",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Middle-age",
+      "voice_id": "YyKcxPG7iIgS3jsK",
+      "description": "Soft and close, airy in texture, with lively pitch movement and an attentive, sincere delivery."
+    },
+    {
+      "name": "Edwin",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Middle-age",
+      "voice_id": "zUCxzrOrugTSis03",
+      "description": "Efficient and firm, sincere in attention, with tidy articulation that holds up at phone bandwidth."
+    },
+    {
+      "name": "Spencer",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Middle-age",
+      "voice_id": "JOW0vchyswkQUMDS",
+      "description": "Light and airy, sitting a touch higher, with crisp consonants and a slow, patient delivery."
+    },
+    {
+      "name": "Toby",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Adult",
+      "voice_id": "dME3IWyZBvmh1n1q",
+      "description": "A sparky, attentive British English adult voice that gets to the point with a smile. Ideal for fast, efficient customer support and helpful voice assistants."
+    },
+    {
+      "name": "Teddy",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "male",
+      "age": "Young Adult",
+      "voice_id": "Zn7g6NxLqXlJb7Qi",
+      "description": "Sparky and close in, quick off the mark, with firm consonants and the range to drop right down for a clause then come back up."
+    },
+    {
+      "name": "Bryony",
+      "language": "English",
+      "dialect": "British English",
+      "gender": "female",
+      "age": "Middle-age",
+      "voice_id": "gfP44RlHwr2kEwk7",
+      "description": "Full, rich mid-range tones, softly relaxed and spoken close to the mic, moving briskly with light pitch play."
+    },
+    {
+      "name": "Captain Silas Blackwater",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "xPDpsV3F592srkjA",
+      "description": "An old British pirate captain from the West Country, around sixty. Deep, gravelly and booming, rolling his Rs, salt-cracked from decades of shouting over gales. Roguish and hearty, with a wicked chuckle under every boast."
+    },
+    {
+      "name": "Morwenna of the Deep",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "female",
+      "age": null,
+      "voice_id": "nOykTmcH9ydsGGIc",
+      "description": "A sultry, seductive woman in her thirties. Low, husky alto, close to the microphone and almost whispered, slow and languid, purring, with a warm knowing smile in every word. Intimate, flirtatious and teasing, like a late-night torch singer luring someone closer, with a hint of danger underneath."
+    },
+    {
+      "name": "Old Mortlake",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "lX3LavMNdlIbgEHH",
+      "description": "An elderly gravedigger in a Victorian churchyard. Low, raspy and half whispered, melancholic, with heavy pauses that let every word settle like dirt on a coffin lid."
+    },
+    {
+      "name": "Azgorath",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "dGyGDKo2osj7h3s7",
+      "description": "An enormous ancient demon. A cavernous, impossibly deep bass voice that rumbles like stone grinding in a crypt, with a dry rasping edge and a faint hiss on every s. Calm, slow and amused, never shouting, every syllable set down deliberately, menace held under perfect control."
+    },
+    {
+      "name": "Fennick the Young Elf",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "cXoIXJ2llS8S0WOW",
+      "description": "A curious, kind-hearted elf boy of about ten. A natural child's voice in a warm, soft middle range, never squeaky or shrill, earnest and wide-eyed, a little breathless with excitement, speaking quickly when amazed. Clean, close studio recording with no background noise or hiss."
+    },
+    {
+      "name": "The Thing Under the Stairs",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": null,
+      "age": null,
+      "voice_id": "GXaSqMEmOg12OIYb",
+      "description": "A monstrous creature lurking in the dark. Gravelly, breathy and pitched near the floor, a threatening growl that stays quiet to stay frightening, with a slow mocking sneer."
+    },
+    {
+      "name": "Vyrmathrax the Ancient",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "xO8xQo3BrB8FuI6J",
+      "description": "An ancient dragon, thousands of years old. Very low and resonant, deep chest weight with gravel at the bottom of the register, slow and controlled with long pauses, dry and offhand, with the flat calm of something far too old to be impressed."
+    },
+    {
+      "name": "Grub the Ogre",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "cYtsRSxV5q9IMehn",
+      "description": "A big, good-natured ogre who lives under a bridge. Gruff and grainy, rumbling low end, heavy chest resonance, slow lumbering rhythm with loose rounded words, and warm humour sitting just under the grumble."
+    },
+    {
+      "name": "Master Aldric",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "gSgG5Tor0GPEnqzC",
+      "description": "A wise old British wizard, around eighty. Rich and resonant with an aged grain, warm and kindly, deliberate pace with weighted pauses before the words that matter, able to rise into a ringing incantation."
+    },
+    {
+      "name": "The Snow Queen",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "female",
+      "age": null,
+      "voice_id": "NIWoEurJHMJjyUTe",
+      "description": "A regal, cold-hearted queen of ice. A cool, crystalline mezzo voice, poised and elegant, precise articulation, unhurried and quietly commanding, with an enigmatic chill and a faint smile that never warms."
+    },
+    {
+      "name": "Sir Bramwell",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "male",
+      "age": null,
+      "voice_id": "y2eiKxtQo2B67deU",
+      "description": "A brave but pompous English knight, middle-aged. Booming, plummy and theatrical, full of puffed-up self-importance, rolling grand phrases, with a comic wobble of nerves showing through the bravado."
+    },
+    {
+      "name": "Fairy Godmother",
+      "language": "English",
+      "dialect": "Character voices",
+      "gender": "female",
+      "age": null,
+      "voice_id": "QXNr0SvkukLB4wPq",
+      "description": "A kind fairy godmother, an older woman in her sixties. A low, warm, velvety alto voice, cosy and grandmotherly, unhurried and soothing, with a soft rich chuckle and a twinkle in every word. Gentle and reassuring, never high, never thin."
+    }
   ]
 }

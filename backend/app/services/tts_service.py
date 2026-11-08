@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -25,19 +26,30 @@ from pathlib import Path
 from backend.app.models.schemas import JobStatus
 from backend.app.services import phonon_service
 
-# Pocket TTS voice metadata (gender, type) from the model developers.
-# Used by the frontend to group voices as Gender → Type → Alphabetical.
+# Pocket TTS voice metadata (language, gender, type) from the model developers.
+# Used by the frontend to group voices as Language → Dialect → Gender →
+# Alphabetical. Keys are normalized so `bill_boerst` and "Bill Boerst" match.
 _POCKET_VOICE_META: dict[str, dict] = {}
 try:
     _pocket_meta_path = (
-        Path(__file__).resolve().parents[1] / "data" / "pocket-tts-voice-associations.json"
+        Path(__file__).resolve().parents[2] / "data" / "pocket-tts-voice-associations.json"
     )
     if _pocket_meta_path.exists():
         with open(_pocket_meta_path) as _f:
             data = json.load(_f)
-            _POCKET_VOICE_META = {v["name"]: v for v in data.get("voices", [])}
+            _POCKET_VOICE_META = {
+                re.sub(r"[^a-z0-9]+", "_", str(v["name"]).lower()).strip("_"): v
+                for v in data.get("voices", [])
+                if v.get("name")
+            }
 except Exception:
     pass
+
+
+def _pocket_voice_key(name: str) -> str:
+    """Normalize a Pocket voice name for metadata lookup."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
 
 TTS_ENGINES = ("pocket", "phonon")
 
@@ -124,16 +136,20 @@ def list_voices(engine: str = "pocket") -> list[dict]:
     try:
         from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
 
-        return [
-            {
-                "name": k,
-                "accent": None,
-                "gender": _POCKET_VOICE_META.get(k, {}).get("gender", None),
-                "origin": v,
-                "type": _POCKET_VOICE_META.get(k, {}).get("type", None),
-            }
-            for k, v in _ORIGINS_OF_PREDEFINED_VOICES.items()
-        ]
+        voices = []
+        for name, origin in _ORIGINS_OF_PREDEFINED_VOICES.items():
+            meta = _POCKET_VOICE_META.get(_pocket_voice_key(name), {})
+            voices.append(
+                {
+                    "name": name,
+                    "language": meta.get("language"),
+                    "dialect": meta.get("dialect"),
+                    "gender": meta.get("gender"),
+                    "origin": origin,
+                    "type": meta.get("type"),
+                }
+            )
+        return voices
     except Exception:
         return [{"name": "alba"}, {"name": "marius"}]
 

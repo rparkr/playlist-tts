@@ -3,7 +3,8 @@
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-from backend.app.services.tts_service import _display_filename
+from backend.app.models.schemas import JobStatus
+from backend.app.services.tts_service import TTSJob, _display_filename, _tts_jobs
 
 client = TestClient(app)
 
@@ -81,11 +82,94 @@ def test_ocr_jobs_accepts_pdf_magic_bytes():
     assert resp.status_code == 202
 
 
-def test_tts_job_create_shape():
-    """TTS job creation returns a job id payload."""
-    resp = client.post("/api/tts/jobs", data={"text": "Hello world.", "fmt": "wav"})
+def test_tts_engines_shape(monkeypatch):
+    """Engine catalog exposes availability and per-engine voices."""
+    monkeypatch.setattr(
+        "backend.app.api.tts.list_engines",
+        lambda: [
+            {
+                "id": "phonon",
+                "label": "Phonon",
+                "available": True,
+                "voice_cloning": False,
+                "voices": [{"name": "Zoey"}],
+            },
+            {
+                "id": "pocket",
+                "label": "Pocket TTS (legacy)",
+                "available": True,
+                "voice_cloning": True,
+                "voices": [{"name": "alba"}],
+            },
+        ],
+    )
+    resp = client.get("/api/tts/engines")
+    assert resp.status_code == 200
+    engines = {e["id"]: e for e in resp.json()["engines"]}
+    assert set(engines) == {"phonon", "pocket"}
+    assert engines["phonon"]["voices"] == [{"name": "Zoey"}]
+    assert engines["pocket"]["voice_cloning"] is True
+
+
+def test_tts_voice_metadata_is_groupable():
+    """Catalog rows expose the fields the settings picker groups by."""
+    from backend.app.services import phonon_service, tts_service
+
+    zoey = phonon_service._voice_entry("Zoey", "en")
+    assert zoey["language"] == "English"
+    assert zoey["dialect"] == "US English"
+    assert zoey["gender"] == "female"
+
+    pocket = {voice["name"]: voice for voice in tts_service.list_voices("pocket")}
+    assert pocket["alba"]["language"] == "English"
+    assert pocket["alba"]["gender"] == "female"
+    assert pocket["giovanni"]["language"] == "Italian"
+
+
+def test_tts_unknown_engine_rejected():
+    """Unknown engine names fail fast instead of falling through to Pocket."""
+    assert client.get("/api/tts/voices", params={"engine": "turbo"}).status_code == 400
+    assert (
+        client.post("/api/tts/stream", data={"text": "Hello.", "engine": "turbo"}).status_code
+        == 400
+    )
+    assert (
+        client.post("/api/tts/jobs", data={"text": "Hello.", "engine": "turbo"}).status_code == 400
+    )
+
+
+def test_tts_job_status_reports_engine():
+    """Job status carries the engine and voice used for the file."""
+    job = TTSJob(job_id="engine-test", engine="phonon", voice="Zoey")
+    job.status = JobStatus.done
+    _tts_jobs[job.job_id] = job
+    try:
+        resp = client.get(f"/api/tts/jobs/{job.job_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["engine"] == "phonon"
+        assert data["voice"] == "Zoey"
+    finally:
+        _tts_jobs.pop("engine-test", None)
+
+
+def test_tts_job_create_shape(monkeypatch):
+    """TTS job creation forwards the engine and returns a job id."""
+    seen: dict[str, object] = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return "fake-job"
+
+    monkeypatch.setattr("backend.app.api.tts.create_tts_file_job", fake_create)
+    resp = client.post(
+        "/api/tts/jobs",
+        data={"text": "Hello world.", "fmt": "wav", "engine": "phonon", "voice": "Zoey"},
+    )
     assert resp.status_code == 202
-    assert "job_id" in resp.json()
+    assert resp.json()["job_id"] == "fake-job"
+    assert seen["engine"] == "phonon"
+    assert seen["voice_url"] == "Zoey"
 
 
 def test_display_filename():

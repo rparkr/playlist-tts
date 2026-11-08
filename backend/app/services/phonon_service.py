@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 import tempfile
 import threading
@@ -30,17 +31,60 @@ _catalog: list[dict[str, Any]] | None = None
 _catalog_lock = threading.Lock()
 _voice_lock = threading.Lock()
 
-# Voice metadata (language, gender) obtained from the model developers.
-# Used by the frontend to group voices as Language → Gender → Alphabetical.
-_VOICE_META: list[dict] = []
+# Voice metadata (language, dialect, gender) from the model developers.
+# `ptts.catalog_voices()` only returns name/language/description/voice_id, so
+# the extra grouping fields live in a small local catalog keyed by voice name.
+_VOICE_META: dict[str, dict[str, Any]] = {}
 try:
     _meta_path = Path(__file__).resolve().parents[2] / "data" / "phonon-voice-associations.json"
     if _meta_path.exists():
         with open(_meta_path) as _f:
             data = json.load(_f)
-            _VOICE_META = data.get("voices", [])
+            _VOICE_META = {
+                re.sub(r"[^a-z0-9]+", "_", str(v.get("name", "")).lower()).strip("_"): v
+                for v in data.get("voices", [])
+                if v.get("name")
+            }
 except Exception:
     pass
+
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+}
+
+
+def _voice_key(name: str) -> str:
+    """Normalize a voice name for metadata lookup (case/punctuation-insensitive)."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def _voice_entry(
+    name: str,
+    language_code: str | None,
+    description: str | None = None,
+    voice_id: str | None = None,
+) -> dict[str, Any]:
+    """Merge a catalog row with the local grouping metadata.
+
+    The returned shape is what the settings picker consumes: language and
+    dialect are display labels, while gender is a lower-case value or None.
+    """
+    meta = _VOICE_META.get(_voice_key(name), {})
+    code = language_code or DEFAULT_LANGUAGE
+    return {
+        "name": name,
+        "voice_id": voice_id or meta.get("voice_id"),
+        "language": meta.get("language") or _LANGUAGE_NAMES.get(code, code),
+        "dialect": meta.get("dialect"),
+        "gender": meta.get("gender"),
+        "age": meta.get("age"),
+        "origin": description or meta.get("description"),
+    }
 
 
 def available() -> bool:
@@ -72,28 +116,16 @@ def reset_model() -> None:
         _model = None
 
 
-def _extract_gender(description: str) -> str | None:
-    """Infer gender from a voice description.
-
-    Common cues: young/girly/girl → female; adult/low/mature → male;
-    neutral terms (confident, friendly, warm, etc.) → None.
-    """
-    low = description.lower()
-    if any(w in low for w in ("girly", "young", "girl")):
-        return "female"
-    if any(w in low for w in ("adult", "low", "mature")):
-        return "male"
-    return None
-
-
 def list_voices() -> list[dict[str, Any]]:
     """Return the English voices from the Phonon catalog.
 
     Loading the model is avoided here: the catalog alone is enough for the
-    settings picker, and voices are downloaded only when first used.
+    settings picker, and voices are downloaded only when first used. Each row
+    includes ``language``, ``dialect``, and ``gender`` so the frontend can
+    group the picker as Language → Dialect → Gender → Alphabetical.
 
-    Each voice includes ``gender`` (inferred from descriptive cues) to
-    enable client-side grouping by gender (Female/Male), then alphabetically.
+    If the remote catalog is unavailable (for example, offline on first run),
+    fall back to the local metadata so the picker still lists known voices.
     """
     global _catalog
     if _catalog is None:
@@ -102,18 +134,30 @@ def list_voices() -> list[dict[str, Any]]:
                 try:
                     import ptts
 
-                    voices = ptts.catalog_voices()
+                    rows = ptts.catalog_voices()
                 except Exception:
-                    voices = []
-                _catalog = [
-                    {
-                        "name": str(v.get("name", "")),
-                        "gender": _extract_gender(str(v.get("description", ""))),
-                        "origin": v.get("description"),
-                    }
-                    for v in voices
-                    if v.get("name") and v.get("language") in (None, DEFAULT_LANGUAGE)
-                ]
+                    rows = []
+                if rows:
+                    _catalog = [
+                        _voice_entry(
+                            str(v.get("name", "")),
+                            v.get("language"),
+                            v.get("description"),
+                            v.get("voice_id"),
+                        )
+                        for v in rows
+                        if v.get("name") and v.get("language") in (None, DEFAULT_LANGUAGE)
+                    ]
+                else:
+                    _catalog = [
+                        _voice_entry(
+                            str(meta.get("name", "")),
+                            DEFAULT_LANGUAGE,
+                            meta.get("description"),
+                            meta.get("voice_id"),
+                        )
+                        for meta in _VOICE_META.values()
+                    ]
     return list(_catalog)
 
 

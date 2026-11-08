@@ -8,26 +8,36 @@ from fastapi.responses import StreamingResponse
 
 from backend.app.models.schemas import (
     JobStatus,
+    TTSEnginesResponse,
     TTSJobCreateResponse,
     TTSJobStatusResponse,
     TTSVoicesResponse,
 )
 from backend.app.services.tts_service import (
+    TTS_ENGINES,
     convert_wav_to_safetensors,
     create_tts_file_job,
     generate_stream,
     get_tts_job,
+    list_engines,
     list_voices,
 )
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
 
 
+@router.get("/engines", response_model=TTSEnginesResponse)
+async def get_engines() -> TTSEnginesResponse:
+    """Return server TTS engines, availability, and capabilities."""
+    return TTSEnginesResponse(engines=list_engines())
+
+
 @router.get("/voices", response_model=TTSVoicesResponse)
-async def get_voices() -> TTSVoicesResponse:
-    """Return catalog of built-in voices."""
-    voices = list_voices()
-    return TTSVoicesResponse(voices=voices)
+async def get_voices(engine: str = "pocket") -> TTSVoicesResponse:
+    """Return the voice catalog for a server TTS engine."""
+    if engine not in TTS_ENGINES:
+        raise HTTPException(status_code=400, detail=f"Unknown TTS engine: {engine}")
+    return TTSVoicesResponse(voices=list_voices(engine))
 
 
 @router.post("/voices/convert")
@@ -64,6 +74,8 @@ async def convert_voice(
 async def tts_stream(
     request: Request,
     text: Annotated[str, Form()] = "",
+    engine: Annotated[str, Form()] = "pocket",
+    voice: Annotated[str | None, Form()] = None,
     voice_url: Annotated[str | None, Form()] = None,
     voice_safetensors: Annotated[UploadFile | None, File()] = None,
 ) -> StreamingResponse:
@@ -76,10 +88,11 @@ async def tts_stream(
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
-    if voice_url and voice_safetensors:
-        raise HTTPException(
-            status_code=400, detail="Provide voice_url or voice_safetensors, not both."
-        )
+    if engine not in TTS_ENGINES:
+        raise HTTPException(status_code=400, detail=f"Unknown TTS engine: {engine}")
+    resolved_voice = voice or voice_url
+    if resolved_voice and voice_safetensors:
+        raise HTTPException(status_code=400, detail="Provide voice or voice_safetensors, not both.")
 
     safetensors_bytes: bytes | None = None
     if voice_safetensors is not None:
@@ -89,18 +102,38 @@ async def tts_stream(
 
     async def wav_gen():
         import asyncio
+        import queue
+        import threading
 
         loop = asyncio.get_running_loop()
-        # Run the blocking pocket-tts generator in a worker thread and pump
-        # its chunks back to the event loop, so disconnect checks still run.
-        gen = generate_stream(text, voice_url, safetensors_bytes)
+        chunks: queue.Queue[object] = queue.Queue()
+
+        def _pump() -> None:
+            """Run the blocking generator on one thread for its whole life.
+
+            Phonon's Rust stream keeps worker state that should stay on one
+            thread, so advance the generator here rather than one executor
+            task at a time.
+            """
+            try:
+                for chunk in generate_stream(text, resolved_voice, safetensors_bytes, engine):
+                    chunks.put(chunk)
+            except Exception as exc:  # noqa: BLE001 — surfaced to the response
+                chunks.put(exc)
+            finally:
+                chunks.put(None)
+
+        threading.Thread(target=_pump, daemon=True).start()
         while True:
-            chunk = await loop.run_in_executor(None, lambda: next(gen, None))
-            if chunk is None:
+            item = await loop.run_in_executor(None, chunks.get)
+            if item is None:
                 break
+            if isinstance(item, Exception):
+                raise item
             if await request.is_disconnected():
                 break
-            yield chunk
+            assert isinstance(item, bytes)
+            yield item
 
     return StreamingResponse(
         wav_gen(),
@@ -115,6 +148,8 @@ async def tts_stream(
 @router.post("/jobs", response_model=TTSJobCreateResponse, status_code=202)
 async def create_job(
     text: Annotated[str, Form()] = "",
+    engine: Annotated[str, Form()] = "pocket",
+    voice: Annotated[str | None, Form()] = None,
     voice_url: Annotated[str | None, Form()] = None,
     voice_safetensors: Annotated[UploadFile | None, File()] = None,
     fmt: Annotated[str, Form()] = "wav",
@@ -123,24 +158,29 @@ async def create_job(
     """Create background file generation job (save for later)."""
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
+    if engine not in TTS_ENGINES:
+        raise HTTPException(status_code=400, detail=f"Unknown TTS engine: {engine}")
     if fmt not in ("wav", "mp3", "webm"):
         raise HTTPException(status_code=400, detail="fmt must be wav, mp3, or webm.")
-    if voice_url and voice_safetensors:
-        raise HTTPException(
-            status_code=400, detail="Provide voice_url or voice_safetensors, not both."
-        )
+    resolved_voice = voice or voice_url
+    if resolved_voice and voice_safetensors:
+        raise HTTPException(status_code=400, detail="Provide voice or voice_safetensors, not both.")
 
     safetensors_bytes: bytes | None = None
     if voice_safetensors is not None:
         safetensors_bytes = await voice_safetensors.read()
 
-    job_id = await create_tts_file_job(
-        text=text,
-        voice_url=voice_url,
-        voice_safetensors_bytes=safetensors_bytes,
-        output_name=output_name,
-        fmt=fmt,
-    )
+    try:
+        job_id = await create_tts_file_job(
+            text=text,
+            voice_url=resolved_voice,
+            voice_safetensors_bytes=safetensors_bytes,
+            output_name=output_name,
+            fmt=fmt,
+            engine=engine,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     return TTSJobCreateResponse(job_id=job_id)
 
 
@@ -153,6 +193,8 @@ async def job_status(job_id: str) -> TTSJobStatusResponse:
     return TTSJobStatusResponse(
         status=job.status,
         progress={"done": job.progress_done, "total": job.progress_total},
+        engine=job.engine,
+        voice=job.voice,
         error=job.error,
         output=job.display_name if job.status == JobStatus.done else None,
     )

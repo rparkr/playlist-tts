@@ -117,6 +117,22 @@ class TTSVoicesResponse(BaseModel):
     voices: list[dict]
 
 
+class TTSEngineInfo(BaseModel):
+    """One server TTS engine and its capabilities."""
+
+    id: str
+    label: str
+    available: bool
+    voice_cloning: bool = False
+    voices: list[dict] = Field(default_factory=list)
+
+
+class TTSEnginesResponse(BaseModel):
+    """Response for GET /api/tts/engines."""
+
+    engines: list[TTSEngineInfo]
+
+
 class TTSJobCreateResponse(BaseModel):
     """Response for POST /api/tts/jobs."""
 
@@ -128,6 +144,8 @@ class TTSJobStatusResponse(BaseModel):
 
     status: JobStatus
     progress: dict[str, int] = Field(default_factory=lambda: {"done": 0, "total": 0})
+    engine: str | None = None
+    voice: str | None = None
     error: str | None = None
     output: str | None = Field(default=None, description="Download filename once the job is done")
 
