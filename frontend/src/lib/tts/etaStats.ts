@@ -13,7 +13,9 @@
  * real evidence accumulates.
  */
 
-export type TtsEngineKey = 'device' | 'pocket';
+import type { TtsEngine } from '../settings';
+
+export type TtsEngineKey = TtsEngine;
 
 /** Cold-start pace (~150wpm at ~6 chars/word including spaces). */
 export const COLD_START_CPS = 15;

@@ -9,7 +9,7 @@
  * sentence without re-processing anything before it.
  */
 
-import { fetchTTSWavStream } from './backendStream';
+import { fetchTTSWavStream, type AudioFetchEngine } from './backendStream';
 
 export interface SentencePlayerCallbacks {
 	/** Fired when a sentence starts sounding — use to sync the highlight. */
@@ -28,12 +28,17 @@ export interface SentencePlayerCallbacks {
 
 const MAX_CACHE_ENTRIES = 100;
 
-/** Synthesize one sentence to a playable object URL (backend or browser). */
+/** Synthesize one sentence to a playable object URL (backend or browser).
+ *
+ * `engine` is a server engine for backend fetches or `phonon-browser` for
+ * the local WASM adapter. Browser-served audio uses the same signature.
+ */
 export type FetchAudioFn = (
 	text: string,
 	voiceId: string | null,
 	voiceBlob: Blob | null,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	engine?: AudioFetchEngine
 ) => Promise<{ url: string }>;
 
 /** Short hash so cache keys stay small but text edits invalidate entries. */
@@ -54,6 +59,7 @@ export class BackendSentencePlayer {
 	private voiceKey = '';
 	private voiceId: string | null = null;
 	private voiceBlob: Blob | null = null;
+	private engine: AudioFetchEngine = 'pocket';
 	private rate = 1.0;
 	private running = false;
 	private paused = false;
@@ -96,7 +102,7 @@ export class BackendSentencePlayer {
 	}
 
 	private cacheKey(idx: number): string {
-		return `${this.voiceKey}::${idx}::${hashText(this.sentences[idx] ?? '')}`;
+		return `${this.engine}::${this.voiceKey}::${idx}::${hashText(this.sentences[idx] ?? '')}`;
 	}
 
 	private setLoading(loading: boolean): void {
@@ -115,7 +121,8 @@ export class BackendSentencePlayer {
 		const text = this.sentences[idx] ?? '';
 		const voiceId = this.voiceId;
 		const voiceBlob = this.voiceBlob;
-		const promise = this.fetchAudio(text, voiceId, voiceBlob, signal)
+		const engine = this.engine;
+		const promise = this.fetchAudio(text, voiceId, voiceBlob, signal, engine)
 			.then(({ url }) => {
 				// Cache the newest entry; evict oldest past the cap.
 				this.cache.delete(key);
@@ -152,7 +159,8 @@ export class BackendSentencePlayer {
 		voiceKey: string,
 		voiceId: string | null,
 		voiceBlob: Blob | null,
-		rate: number
+		rate: number,
+		engine: AudioFetchEngine = 'pocket'
 	): Promise<void> {
 		this.stopChain();
 		this.sentences = sentences;
@@ -160,6 +168,7 @@ export class BackendSentencePlayer {
 		this.voiceKey = voiceKey;
 		this.voiceId = voiceId;
 		this.voiceBlob = voiceBlob;
+		this.engine = engine;
 		this.rate = rate;
 		this.running = true;
 		this.paused = false;

@@ -5,6 +5,9 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { SvelteKitPWA } from '@vite-pwa/sveltekit';
 
 export default defineConfig({
+	// phonon-tts resolves its worker and WASM files with `new URL(...,
+	// import.meta.url)`; pre-bundling would rewrite those paths wrongly.
+	optimizeDeps: { exclude: ['phonon-tts'] },
 	plugins: [
 		tailwindcss(),
 		sveltekit({
@@ -29,10 +32,10 @@ export default defineConfig({
 				]
 			},
 			workbox: {
+				// WASM stays out of the precache: phonon-tts keeps model and
+				// runtime files in the Cache API after the first use, and
+				// shipping them in the service-worker install would be costly.
 				globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-				// The lazy kokoro-js/transformers chunk (~2.2MB, only fetched
-				// when the browser TTS engine is used) exceeds the default
-				// 2MB precache cap.
 				maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
 			}
 		})

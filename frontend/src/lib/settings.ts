@@ -24,6 +24,19 @@ export function isServerEngine(engine: TtsEngine): engine is ServerTtsEngine {
 	return engine === 'pocket' || engine === 'phonon';
 }
 
+/** Voice-file format a stored clone can be used with. */
+export type VoiceFileFormat = 'pocket' | 'phonon';
+
+/** Return the runtime a stored voice file belongs to; untagged is Pocket. */
+export function voiceFileFormat(record: { engine?: string | null }): VoiceFileFormat {
+	return record.engine === 'phonon' ? 'phonon' : 'pocket';
+}
+
+/** Voice-file format accepted by a playback engine. */
+export function engineVoiceFileFormat(engine: TtsEngine): VoiceFileFormat {
+	return engine === 'phonon' || engine === 'phonon-browser' ? 'phonon' : 'pocket';
+}
+
 export const LS_KEYS = {
 	activeDocId: 'tts_active_doc_id',
 	rate: 'tts_rate',
@@ -232,10 +245,155 @@ export interface VoiceLookup {
 	customVoices: readonly { id: string; name: string }[];
 }
 
-/** Voice metadata used for grouping by language → accent → gender. */
+/** Voice metadata used for grouping by language → dialect → gender. */
 export interface VoiceGroupInfo {
-	gender: 'male' | 'female' | 'unknown' | null;
-	accent: 'us' | 'uk' | 'castilian' | 'mexican' | 'peninsular' | 'parisian' | 'brazilian' | null;
+	/** Display language, e.g. `English`. */
+	language?: string | null;
+	/** Display dialect, e.g. `US English` or `British English`. */
+	dialect?: string | null;
+	/** `female`, `male`, or absent/unknown. */
+	gender?: string | null;
+}
+
+/** One rendered `<optgroup>`. */
+export interface VoiceGroup<T> {
+	/** Stable group identifier, also used as the option key. */
+	group: string;
+	/** Human-readable label, e.g. `English · US English · Female`. */
+	label: string;
+	voices: T[];
+}
+
+/** Primary languages first, then any others alphabetically. */
+const LANGUAGE_ORDER = ['English', 'French', 'German', 'Spanish', 'Italian', 'Portuguese'];
+
+/** Dialects in the order users expect; unknown dialects follow alphabetically. */
+const DIALECT_ORDER = [
+	'US English',
+	'British English',
+	'Australian English',
+	'Canadian English',
+	'Irish English',
+	'New Zealand English',
+	'South African English',
+	'Indian English',
+	'Character voices',
+	'Other'
+];
+
+const LANGUAGE_NAMES: Record<string, string> = {
+	en: 'English',
+	fr: 'French',
+	de: 'German',
+	es: 'Spanish',
+	it: 'Italian',
+	pt: 'Portuguese',
+	nl: 'Dutch',
+	ja: 'Japanese',
+	ko: 'Korean',
+	zh: 'Chinese',
+	ar: 'Arabic',
+	hi: 'Hindi',
+	pl: 'Polish',
+	sv: 'Swedish',
+	fi: 'Finnish',
+	no: 'Norwegian',
+	da: 'Danish',
+	tr: 'Turkish'
+};
+
+/** Common BCP-47 locales → the dialect labels used by the voice catalogs. */
+const LOCALE_DIALECTS: Record<string, string> = {
+	'en-us': 'US English',
+	'en-gb': 'British English',
+	'en-au': 'Australian English',
+	'en-ca': 'Canadian English',
+	'en-ie': 'Irish English',
+	'en-nz': 'New Zealand English',
+	'en-za': 'South African English',
+	'en-in': 'Indian English',
+	'es-es': 'Castilian Spanish',
+	'es-mx': 'Mexican Spanish',
+	'es-us': 'US Spanish',
+	'fr-fr': 'French (France)',
+	'fr-ca': 'Canadian French',
+	'de-de': 'German (Germany)',
+	'de-at': 'Austrian German',
+	'pt-br': 'Brazilian Portuguese',
+	'pt-pt': 'European Portuguese',
+	'it-it': 'Italian (Italy)',
+	'nl-nl': 'Dutch (Netherlands)',
+	characters: 'Character voices'
+};
+
+/**
+ * Split a device voice locale (`en-US`, `fr_FR`, ...) into the same grouping
+ * fields used by the server and browser voice catalogs.
+ */
+export function localeToVoiceGroup(locale: string | null | undefined): {
+	language: string | null;
+	dialect: string | null;
+} {
+	if (!locale) return { language: null, dialect: null };
+	const normalized = locale.replace('_', '-').toLowerCase();
+	if (normalized === 'characters') {
+		return { language: 'English', dialect: 'Character voices' };
+	}
+	const [lang, region] = normalized.split('-');
+	return {
+		language: LANGUAGE_NAMES[lang] ?? (lang ? lang.toUpperCase() : null),
+		dialect: LOCALE_DIALECTS[normalized] ?? (region ? region.toUpperCase() : null)
+	};
+}
+
+function compareVoiceText(a: string | null | undefined, b: string | null | undefined): number {
+	return (a ?? '').localeCompare(b ?? '', undefined, { sensitivity: 'base', numeric: true });
+}
+
+function orderRank(value: string | null | undefined, order: readonly string[]): number {
+	if (!value) return order.length;
+	const index = order.indexOf(value);
+	return index === -1 ? order.length : index;
+}
+
+function normalizedGender(value: string | null | undefined): 'female' | 'male' | 'unknown' {
+	const gender = (value ?? '').toLowerCase();
+	if (gender === 'female' || gender === 'f') return 'female';
+	if (gender === 'male' || gender === 'm') return 'male';
+	return 'unknown';
+}
+
+function genderRank(value: string | null | undefined): number {
+	const gender = normalizedGender(value);
+	if (gender === 'female') return 0;
+	if (gender === 'male') return 1;
+	return 2;
+}
+
+function compareGroupParts(
+	a: VoiceGroupInfo,
+	b: VoiceGroupInfo
+): number {
+	const byLanguageRank =
+		orderRank(a.language, LANGUAGE_ORDER) - orderRank(b.language, LANGUAGE_ORDER);
+	if (byLanguageRank !== 0) return byLanguageRank;
+	const byLanguage = compareVoiceText(a.language, b.language);
+	if (byLanguage !== 0) return byLanguage;
+	const byDialectRank = orderRank(a.dialect, DIALECT_ORDER) - orderRank(b.dialect, DIALECT_ORDER);
+	if (byDialectRank !== 0) return byDialectRank;
+	const byDialect = compareVoiceText(a.dialect, b.dialect);
+	if (byDialect !== 0) return byDialect;
+	return genderRank(a.gender) - genderRank(b.gender);
+}
+
+function groupLabel(info: VoiceGroupInfo): string {
+	const gender = normalizedGender(info.gender);
+	const parts = [
+		info.language,
+		info.dialect,
+		gender === 'unknown' ? null : gender.charAt(0).toUpperCase() + gender.slice(1)
+	].filter((part): part is string => Boolean(part));
+	return parts.length > 0 ? parts.join(' · ') : 'Voices';
 }
 
 /**
@@ -263,80 +421,55 @@ export function resolveVoiceId(
 }
 
 /**
- * Group and sort voices by language → accent → gender → alphabetically.
+ * Group and sort voices by language → dialect → gender → alphabetically.
  *
- * Returns an array of { group, label, voices } objects for rendering as
- * nested optgroups in a <select>.  When there is only one group it
- * returns a flat array (same shape as ``sortVoiceOptions``).
- *
- * The ``extra`` callback lets callers annotate voices with additional
- * data (e.g. IndexedDB size) for display in option labels.
+ * Returns `{ group, label, voices }` objects for rendering as `<optgroup>`s.
+ * When the voices carry no grouping metadata, or they all land in a single
+ * group, a flat alphabetically-sorted array is returned instead.
  */
 export function groupAndSortVoices<
-	T extends { name: string; gender?: string | null; accent?: string | null },
->(
-	voices: readonly T[],
-	extra?: (v: T) => string
-): { group: string; label: string; voices: T[] }[] | T[] {
+	T extends { name: string } & VoiceGroupInfo,
+>(voices: readonly T[]): VoiceGroup<T>[] | T[] {
 	if (voices.length === 0) return [];
 
-	// Build group keys
-	const groupMap = new Map<string, Map<string, T[]>>();
-	let hasGrouping = false;
+	const sorted = [...voices].sort((a, b) => {
+		const byGroup = compareGroupParts(a, b);
+		if (byGroup !== 0) return byGroup;
+		return compareVoiceText(a.name, b.name);
+	});
 
-	for (const v of voices) {
-		const lang = (v as VoiceGroupInfo).gender !== undefined || (v as VoiceGroupInfo).accent !== undefined
-			? ((v as any).language ?? 'en')
-			: 'pocket';
+	const hasMetadata = voices.some((v) => Boolean(v.language || v.dialect || v.gender));
+	if (!hasMetadata) return sorted;
 
-		const accent = v.accent ?? null;
-		const gender = v.gender ?? 'unknown';
-		const langOrder = lang === 'en' ? 0 : 1;
-		const accentOrder = accent === null ? 0 : accent === 'us' ? 1 : 2;
-		const genderOrder = gender === 'female' ? 0 : gender === 'male' ? 1 : 2;
-
-		const groupKey = `${lang}::${accent ?? 'all'}::${gender}`;
-
-		if (!groupMap.has(groupKey)) groupMap.set(groupKey, new Map());
-		const genderMap = groupMap.get(groupKey)!;
-		if (!genderMap.has(gender)) genderMap.set(gender, []);
-		genderMap.get(gender)!.push(v);
-
-		if (groupMap.size > 1) hasGrouping = true;
-	}
-
-	if (!hasGrouping) {
-		// Single group — return flat array
-		return [
-			...voices
-		].sort((a, b) =>
-			a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-		);
-	}
-
-	// Build nested optgroups
-	const groups: { group: string; label: string; voices: T[] }[] = [];
-	let prevLang = '';
-
-	for (const [key, genderMap] of groupMap) {
-		const [lang, accent, genderName] = key.split('::');
-
-		for (const [genderName, voicesList] of genderMap) {
-			const sorted = voicesList.sort((a, b) =>
-				a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-			);
-
-			// Group header: show language on first occurrence, accent/gender for each
-			const label = [accent, genderName]
-				.filter(Boolean)
-				.map(w => w.charAt(0).toUpperCase() + w.slice(1))
-				.join(', ');
-
-			groups.push({ group: lang, label, voices: sorted });
+	const groups = new Map<string, { info: VoiceGroupInfo; voices: T[] }>();
+	for (const voice of sorted) {
+		const info: VoiceGroupInfo = {
+			language: voice.language ?? null,
+			dialect: voice.dialect ?? null,
+			gender: voice.gender ?? null
+		};
+		const key = [
+			info.language ?? '',
+			info.dialect ?? '',
+			normalizedGender(info.gender)
+		].join('::');
+		let group = groups.get(key);
+		if (!group) {
+			group = { info, voices: [] };
+			groups.set(key, group);
 		}
+		group.voices.push(voice);
 	}
 
-	return groups;
+	if (groups.size <= 1) return sorted;
+
+	return [...groups.entries()]
+		.sort(([, a], [, b]) => compareGroupParts(a.info, b.info))
+		.map(([group, entry]) => ({
+			group,
+			label: groupLabel(entry.info),
+			voices: entry.voices
+		}));
 }
 
 /**

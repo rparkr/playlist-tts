@@ -1,15 +1,34 @@
 <script lang="ts">
 	import { Check, Pencil, Trash2, X } from 'lucide-svelte';
 	import type { VoiceRecord } from '$lib/stores/library';
-	import { sortVoiceOptions, type TtsEngine } from '$lib/settings';
+	import {
+		engineVoiceFileFormat,
+		groupAndSortVoices,
+		localeToVoiceGroup,
+		sortVoiceOptions,
+		voiceFileFormat,
+		type TtsEngine
+	} from '$lib/settings';
 	import { OFFLINE_FMTS, type OfflineAudioFmt } from '$lib/tts/offlineAudio';
+	import type { PhononStatus } from '$lib/tts/phononBrowser';
+
+	interface GroupableVoice {
+		name: string;
+		language?: string | null;
+		dialect?: string | null;
+		gender?: string | null;
+	}
 
 	interface Props {
 		open: boolean;
 		onClose: () => void;
 		ttsEngine: TtsEngine;
 		onEngineChange: (engine: TtsEngine) => void;
-		builtinVoices: { name: string }[];
+		builtinVoices: GroupableVoice[];
+		/** Phonon's server catalog. */
+		phononVoices: GroupableVoice[];
+		/** Phonon's WASM catalog, available after the browser catalog loads. */
+		phononBrowserVoices: GroupableVoice[];
 		customVoices: VoiceRecord[];
 		synthVoices: SpeechSynthesisVoice[];
 		selectedVoiceId: string;
@@ -24,6 +43,10 @@
 		onOfflineFmtChange: (fmt: OfflineAudioFmt) => void;
 		offlineUse: boolean;
 		onOfflineUseChange: (use: boolean) => void;
+		phononAvailable: boolean;
+		pocketAvailable: boolean;
+		phononStatus: PhononStatus;
+		onPhononPreload: () => void;
 	}
 
 	let {
@@ -32,6 +55,8 @@
 		ttsEngine,
 		onEngineChange,
 		builtinVoices,
+		phononVoices,
+		phononBrowserVoices,
 		customVoices,
 		synthVoices,
 		selectedVoiceId,
@@ -45,7 +70,11 @@
 		offlineFmt,
 		onOfflineFmtChange,
 		offlineUse,
-		onOfflineUseChange
+		onOfflineUseChange,
+		phononAvailable,
+		pocketAvailable,
+		phononStatus,
+		onPhononPreload
 	}: Props = $props();
 
 	let rateInput: string = $state('1.00');
@@ -76,9 +105,35 @@
 		cancelRename();
 	}
 
-	// Alphabetical pickers with cloned voices pinned in the top optgroup.
-	let sortedBuiltinVoices = $derived(sortVoiceOptions(builtinVoices));
-	let sortedCustomVoices = $derived(sortVoiceOptions(customVoices));
+	let isPocket = $derived(ttsEngine === 'pocket');
+	let isBrowserPhonon = $derived(ttsEngine === 'phonon-browser');
+	let isServerPhonon = $derived(ttsEngine === 'phonon');
+	let isPhonon = $derived(isBrowserPhonon || isServerPhonon);
+
+	// Cloned voices are stored per runtime: Pocket and Phonon voice files are
+	// not interchangeable, so only show the ones this engine can load.
+	let voiceFormat = $derived(engineVoiceFileFormat(ttsEngine));
+	let sortedCustomVoices = $derived(
+		sortVoiceOptions(customVoices.filter((v) => voiceFileFormat(v) === voiceFormat))
+	);
+
+	// Voice pickers grouped by language → dialect → gender, then alphabetically.
+	let sortedBuiltinVoices = $derived(groupAndSortVoices(builtinVoices));
+	let sortedPhononVoices = $derived(groupAndSortVoices(phononVoices));
+	let sortedPhononBrowserVoices = $derived(groupAndSortVoices(phononBrowserVoices));
+	let deviceVoices = $derived(
+		synthVoices.map((voice) => ({
+			name: voice.name,
+			lang: voice.lang,
+			...localeToVoiceGroup(voice.lang)
+		}))
+	);
+	let sortedDeviceVoices = $derived(groupAndSortVoices(deviceVoices));
+
+	/** Check if a voice list is grouped (array of { group, label, voices }) or flat. */
+	function isGrouped(list: any[]): list is { group: string; label: string; voices: any[] }[] {
+		return list.length > 0 && 'group' in list[0];
+	}
 
 	$effect(() => {
 		// sync when prop changes
@@ -134,9 +189,9 @@
 
 			<div class="flex-1 overflow-auto p-5 flex flex-col gap-5">
 				<!-- Engine -->
-				<div class="flex items-center justify-between gap-4">
+				<div class="flex flex-col gap-2">
 					<span class="text-sm font-medium text-slate-200">TTS engine</span>
-					<div class="flex rounded-md overflow-hidden border border-slate-600">
+					<div class="grid grid-cols-2 gap-1 rounded-md overflow-hidden border border-slate-600">
 						<button
 							onclick={() => onEngineChange('device')}
 							aria-label="Device voices"
@@ -149,12 +204,45 @@
 						<button
 							onclick={() => onEngineChange('pocket')}
 							aria-label="Server Pocket TTS"
-							class="px-3 py-1.5 text-sm font-medium transition-colors {ttsEngine === 'pocket'
+							disabled={!pocketAvailable}
+							title={pocketAvailable ? undefined : 'Pocket TTS is not installed on the server'}
+							class="px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed {ttsEngine === 'pocket'
 								? 'bg-sky-600 text-white'
 								: 'bg-slate-700 text-slate-300 hover:bg-slate-600'}"
 						>
 							Pocket TTS
 						</button>
+						<button
+							onclick={() => onEngineChange('phonon')}
+							aria-label="Server Phonon"
+							disabled={!phononAvailable}
+							title={phononAvailable ? undefined : 'Phonon is not installed on the server'}
+							class="px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed {ttsEngine === 'phonon'
+								? 'bg-sky-600 text-white'
+								: 'bg-slate-700 text-slate-300 hover:bg-slate-600'}"
+						>
+							Phonon
+						</button>
+						<button
+							onclick={() => onEngineChange('phonon-browser')}
+							aria-label="Phonon in the browser"
+							class="px-3 py-1.5 text-sm font-medium transition-colors {isBrowserPhonon
+								? 'bg-sky-600 text-white'
+								: 'bg-slate-700 text-slate-300 hover:bg-slate-600'}"
+						>
+							Phonon browser
+						</button>
+					</div>
+					<div class="text-xs text-slate-500">
+						{#if ttsEngine === 'device'}
+							Uses the voices built into your device or browser.
+						{:else if ttsEngine === 'pocket'}
+							Legacy server engine with local voice cloning.
+						{:else if ttsEngine === 'phonon'}
+							Fast server engine; voices download on first use.
+						{:else}
+							Runs entirely in this browser after a one-time model download.
+						{/if}
 					</div>
 				</div>
 				{#if ttsEngine !== 'device' && isBackendGenerating}
@@ -171,22 +259,25 @@
 						class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-sky-500"
 					>
 					{#if ttsEngine === 'device'}
-						{#if sortedCustomVoices.length}
-							<optgroup label="My voices (requires Pocket TTS)">
-								{#each sortedCustomVoices as cv}
-									<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
+						{#if isGrouped(sortedDeviceVoices)}
+							{#each sortedDeviceVoices as g}
+								<optgroup label={g.label}>
+									{#each g.voices as voice}
+										<option value={voice.name}>{voice.name} ({voice.lang})</option>
+									{/each}
+								</optgroup>
+							{/each}
+						{:else}
+							<optgroup label="Device voices">
+								{#each sortedDeviceVoices as voice}
+									<option value={voice.name}>{voice.name} ({voice.lang})</option>
 								{/each}
+								{#if sortedDeviceVoices.length === 0}
+									<option value="">Default</option>
+								{/if}
 							</optgroup>
 						{/if}
-						<optgroup label="Device voices">
-							{#each synthVoices as voice, i}
-								<option value={voice.name}>{voice.name} ({voice.lang})</option>
-							{/each}
-							{#if synthVoices.length === 0}
-								<option value="">Default</option>
-							{/if}
-						</optgroup>
-					{:else}
+					{:else if ttsEngine === 'pocket'}
 						{#if sortedCustomVoices.length}
 							<optgroup label="My voices (IndexedDB)">
 								{#each sortedCustomVoices as cv}
@@ -194,34 +285,150 @@
 								{/each}
 							</optgroup>
 						{/if}
-						<optgroup label="Built-in (server)">
-							{#each sortedBuiltinVoices as v}
-								<option value={v.name}>{v.name}</option>
+						{#if isGrouped(sortedBuiltinVoices)}
+							{#each sortedBuiltinVoices as g}
+								<optgroup label={g.label}>
+									{#each g.voices as v}
+										<option value={v.name}>{v.name}</option>
+									{/each}
+								</optgroup>
+							{/each}
+						{:else}
+							<optgroup label="Built-in (server)">
+								{#each sortedBuiltinVoices as v}
+									<option value={v.name}>{v.name}</option>
+								{/each}
+							</optgroup>
+						{/if}
+						<optgroup label="Device voices (fallback)">
+							{#each synthVoices as voice}
+								<option value={voice.name}>{voice.name} ({voice.lang})</option>
 							{/each}
 						</optgroup>
-						{#if ttsEngine === 'pocket'}
-							<optgroup label="Device voices (fallback)">
-								{#each synthVoices as voice}
-									<option value={voice.name}>{voice.name} ({voice.lang})</option>
+					{:else if ttsEngine === 'phonon'}
+						{#if sortedCustomVoices.length}
+							<optgroup label="My voices (Phonon files)">
+								{#each sortedCustomVoices as cv}
+									<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
+								{/each}
+							</optgroup>
+						{/if}
+						{#if isGrouped(sortedPhononVoices)}
+							{#each sortedPhononVoices as g}
+								<optgroup label={g.label}>
+									{#each g.voices as v}
+										<option value={v.name}>{v.name}</option>
+									{/each}
+								</optgroup>
+							{/each}
+						{:else}
+							<optgroup label="Phonon voices (server)">
+								{#each sortedPhononVoices as v}
+									<option value={v.name}>{v.name}</option>
+								{/each}
+							</optgroup>
+						{/if}
+					{:else}
+						{#if sortedCustomVoices.length}
+							<optgroup label="My voices (Phonon files)">
+								{#each sortedCustomVoices as cv}
+									<option value={cv.id}>{cv.name} · {(cv.bytes / 1024 / 1024).toFixed(1)} MB</option>
+								{/each}
+							</optgroup>
+						{/if}
+						{#if isGrouped(sortedPhononBrowserVoices)}
+							{#each sortedPhononBrowserVoices as g}
+								<optgroup label={g.label}>
+									{#each g.voices as v}
+										<option value={v.name}>{v.name}</option>
+									{/each}
+								</optgroup>
+							{/each}
+						{:else}
+							<optgroup label="Phonon voices (browser)">
+								{#each sortedPhononBrowserVoices as v}
+									<option value={v.name}>{v.name}</option>
 								{/each}
 							</optgroup>
 						{/if}
 					{/if}
 					</select>
 
-					<div class="text-xs text-slate-400">
-						Voice cloning — upload .wav/.mp3 (auto-converts) or .safetensors directly.
-					</div>
-					<input
-						type="file"
-						accept=".wav,.mp3,.flac,.m4a,.safetensors"
-						onchange={onVoiceFile}
-						class="w-full text-xs text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-700 file:text-slate-200 hover:file:bg-slate-600"
-					/>
-					{#if customVoices.find((v) => v.id === selectedVoiceId)}
-						<div class="text-xs text-sky-400">✓ Cloned voice: {customVoices.find((v) => v.id === selectedVoiceId)?.name}</div>
+					{#if isPocket}
+						<div class="text-xs text-slate-400">
+							Voice cloning — upload .wav/.mp3 (auto-converts) or a Pocket .safetensors file.
+						</div>
+						<input
+							type="file"
+							accept=".wav,.mp3,.flac,.m4a,.safetensors"
+							onchange={onVoiceFile}
+							class="w-full text-xs text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-700 file:text-slate-200 hover:file:bg-slate-600"
+						/>
+						{#if customVoices.find((v) => v.id === selectedVoiceId)}
+							<div class="text-xs text-sky-400">✓ Cloned voice: {customVoices.find((v) => v.id === selectedVoiceId)?.name}</div>
+						{/if}
+					{:else if isPhonon}
+						<div class="text-xs text-slate-400">
+							Voice files — upload a precomputed .safetensors file from Gradium Studio.
+							Pocket-format clones are not compatible.
+						</div>
+						<input
+							type="file"
+							accept=".safetensors"
+							onchange={onVoiceFile}
+							class="w-full text-xs text-slate-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-700 file:text-slate-200 hover:file:bg-slate-600"
+						/>
+						{#if customVoices.find((v) => v.id === selectedVoiceId)}
+							<div class="text-xs text-sky-400">✓ Cloned voice: {customVoices.find((v) => v.id === selectedVoiceId)?.name}</div>
+						{/if}
 					{/if}
-					{#if sortedCustomVoices.length}
+					{#if isBrowserPhonon}
+						<div class="flex flex-col gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 p-2.5">
+							<div class="flex items-center justify-between gap-2">
+								<span class="text-xs font-medium text-slate-300">Browser model</span>
+								{#if phononStatus.kind === 'ready'}
+									<span class="text-xs text-emerald-400">
+										{phononStatus.device === 'webgpu'
+											? 'WebGPU'
+											: `CPU · ${phononStatus.threads} thread${phononStatus.threads === 1 ? '' : 's'}`}
+									</span>
+								{:else if phononStatus.kind === 'loading'}
+									<span class="text-xs text-sky-400">Loading…</span>
+								{:else if phononStatus.kind === 'error' || phononStatus.kind === 'unsupported'}
+									<span class="text-xs text-red-400">Unavailable</span>
+								{:else}
+									<span class="text-xs text-slate-500">Not loaded</span>
+								{/if}
+							</div>
+							{#if phononStatus.kind === 'loading'}
+								<div class="h-1.5 rounded bg-slate-700 overflow-hidden">
+									<div
+										class="h-full bg-sky-500 transition-all"
+										style="width: {phononStatus.progress === null ? 100 : Math.round(phononStatus.progress * 100)}%"
+									></div>
+								</div>
+								<div class="text-xs text-slate-400">{phononStatus.message}</div>
+							{:else if phononStatus.kind === 'error' || phononStatus.kind === 'unsupported'}
+								<div class="text-xs text-red-400">{phononStatus.message}</div>
+							{:else if phononStatus.kind === 'ready'}
+								<div class="text-xs text-slate-400">{phononStatus.message}</div>
+								{#if phononStatus.threadsReason}
+									<div class="text-xs text-slate-500">{phononStatus.threadsReason}</div>
+								{/if}
+							{:else}
+								<div class="text-xs text-slate-400">
+									Downloads about 65 MB once, then stays cached in this browser.
+								</div>
+								<button
+									onclick={onPhononPreload}
+									class="self-start rounded bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500"
+								>
+									Load model now
+								</button>
+							{/if}
+						</div>
+					{/if}
+					{#if ttsEngine !== 'device' && sortedCustomVoices.length}
 						<div class="flex flex-col gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 p-2.5">
 							<span class="text-xs font-medium text-slate-300">Manage cloned voices</span>
 							{#each sortedCustomVoices as cv (cv.id)}

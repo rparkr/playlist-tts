@@ -59,8 +59,22 @@
 		selectSections,
 		type Section
 	} from '$lib/markdown/parse';
-	import { createTTSFileJob, getTTSDownloadUrl, fetchTTSWavStream } from '$lib/tts/backendStream';
+	import {
+		createTTSFileJob,
+		getTTSDownloadUrl,
+		fetchTTSWavStream,
+		type ServerTtsEngine
+	} from '$lib/tts/backendStream';
 	import { BackendSentencePlayer } from '$lib/tts/backendSentencePlayer';
+	import {
+		ensurePhononModel,
+		fetchPhononWav,
+		getPhononStatus,
+		listPhononVoices,
+		subscribePhononStatus,
+		type PhononStatus,
+		type PhononVoice
+	} from '$lib/tts/phononBrowser';
 	import {
 		clearMediaMetadata,
 		setMediaActionHandlers,
@@ -117,14 +131,38 @@
 		withVoiceForEngine,
 		resolveWithUrlPrecedence,
 		progressKey,
+		isServerEngine,
+		engineVoiceFileFormat,
+		voiceFileFormat,
+		ALL_TTS_ENGINES,
 		type TtsEngine,
 		type VoiceByEngine
 	} from '$lib/settings';
+	import { inspectVoiceFile } from '$lib/tts/voiceFile';
 
 	// --- State ---
 	let docs: Doc[] = $state([]);
 	let customVoices: VoiceRecord[] = $state([]);
-	let builtinVoices: { name: string }[] = $state([]);
+	/** Pocket's server voices. */
+	let builtinVoices: {
+		name: string;
+		language?: string | null;
+		dialect?: string | null;
+		gender?: string | null;
+	}[] = $state([]);
+	/** Phonon's server voice catalog. */
+	let phononVoices: {
+		name: string;
+		language?: string | null;
+		dialect?: string | null;
+		gender?: string | null;
+	}[] = $state([]);
+	/** Phonon WASM catalog, loaded when the browser engine is selected. */
+	let phononBrowserVoices: PhononVoice[] = $state([]);
+	let phononStatus: PhononStatus = $state(getPhononStatus());
+	/** Server engine availability from `/api/tts/engines`. */
+	let phononAvailable: boolean = $state(true);
+	let pocketAvailable: boolean = $state(true);
 	let activeDoc: Doc | null = $state(null);
 	let pdfSizes: Record<string, number> = $state({});
 	let markdownDraft: string = $state('');
@@ -274,17 +312,161 @@
 		}
 	}
 	async function loadBuiltinVoices() {
+		// `/engines` carries Phonon's catalog and Pocket availability. Pocket
+		// voices are loaded later; older backends only have `/voices`, so
+		// fall back to that for them.
+		try {
+			const r = await fetch(`${API_BASE}/api/tts/engines`);
+			if (r.ok) {
+				const data = await r.json();
+				const engines = (data.engines ?? []) as {
+					id: string;
+					available?: boolean;
+					voices?: { name: string; origin?: string }[];
+				}[];
+				const pocket = engines.find((e) => e.id === 'pocket');
+				const phonon = engines.find((e) => e.id === 'phonon');
+				pocketAvailable = pocket?.available ?? true;
+				phononAvailable = phonon?.available ?? false;
+				// Pocket's catalog is fetched lazily: reading it imports
+				// PyTorch, which must not happen on a Phonon-only page load.
+				builtinVoices = (pocket?.voices ?? []).map((v: any) => ({
+					name: v.name,
+					language: v.language ?? null,
+					dialect: v.dialect ?? null,
+					gender: v.gender ?? null
+				}));
+				phononVoices = (phonon?.voices ?? []).map((v: any) => ({
+					name: v.name,
+					language: v.language ?? null,
+					dialect: v.dialect ?? null,
+					gender: v.gender ?? null
+				}));
+				// The model always has its bundled default voice, even when the
+				// remote catalog could not be fetched.
+				if (phononAvailable && phononVoices.length === 0) phononVoices = [{ name: 'default' }];
+				return;
+			}
+		} catch {
+			// fall through to the legacy endpoint
+		}
 		try {
 			const r = await fetch(`${API_BASE}/api/tts/voices`);
 			if (r.ok) {
 				const data = await r.json();
-				builtinVoices = (data.voices ?? [{ name: 'alba' }]).map(
-					(v: { name: string }) => ({ name: v.name })
-				);
+				builtinVoices = (data.voices ?? [{ name: 'alba' }]).map((v: any) => ({
+					name: v.name,
+					language: v.language ?? null,
+					dialect: v.dialect ?? null,
+					gender: v.gender ?? null
+				}));
 			} else builtinVoices = [{ name: 'alba' }];
 		} catch {
 			builtinVoices = [{ name: 'alba' }];
 		}
+		// Old backends have only Pocket.
+		phononAvailable = false;
+	}
+
+	/** Fetch Pocket's catalog on first use (it imports PyTorch server-side). */
+	let pocketVoicesPromise: Promise<void> | null = null;
+	async function ensurePocketVoices(): Promise<void> {
+		if (builtinVoices.length > 0) return;
+		if (pocketVoicesPromise) return pocketVoicesPromise;
+		pocketVoicesPromise = (async () => {
+			try {
+				const r = await fetch(`${API_BASE}/api/tts/voices?engine=pocket`);
+				if (r.ok) {
+					const data = await r.json();
+					builtinVoices = (data.voices ?? []).map((v: any) => ({
+						name: v.name,
+						language: v.language ?? null,
+						dialect: v.dialect ?? null,
+						gender: v.gender ?? null
+					}));
+				}
+			} catch {
+				// Fall through to a usable fallback below.
+			}
+			if (builtinVoices.length === 0) {
+				builtinVoices = [{ name: 'alba' }, { name: 'marius' }];
+			}
+			if (ttsEngine === 'pocket' && !voiceExistsFor('pocket', selectedVoiceId)) {
+				selectedVoiceId = defaultVoiceFor('pocket');
+				voiceByEngine = withVoiceForEngine(voiceByEngine, 'pocket', selectedVoiceId);
+			}
+		})().finally(() => {
+			pocketVoicesPromise = null;
+		});
+		return pocketVoicesPromise;
+	}
+
+	/** Voices available to an engine, without device voices (resolved below). */
+	function serverVoicesFor(engine: TtsEngine): { name: string }[] {
+		if (engine === 'phonon') return phononVoices;
+		if (engine === 'phonon-browser') return phononBrowserVoices;
+		return builtinVoices;
+	}
+
+	/** Custom voice files this engine can load (Pocket and Phonon differ). */
+	function customVoicesFor(engine: TtsEngine): VoiceRecord[] {
+		const format = engineVoiceFileFormat(engine);
+		return customVoices.filter((voice) => voiceFileFormat(voice) === format);
+	}
+
+	/** Find a custom voice only when it matches the engine's file format. */
+	function findCustomVoiceFor(engine: TtsEngine, id: string): VoiceRecord | undefined {
+		return customVoicesFor(engine).find((voice) => voice.id === id);
+	}
+
+	/** Built-in names for the current engine, used for clone-name collisions. */
+	function builtinNamesFor(engine: TtsEngine): { name: string }[] {
+		return serverVoicesFor(engine);
+	}
+
+	/** Fallback voice when the stored selection is not valid for `engine`. */
+	function defaultVoiceFor(engine: TtsEngine): string {
+		if (engine === 'device') return synthVoices[0]?.name ?? '';
+		if (engine === 'phonon') return phononVoices[0]?.name ?? 'default';
+		if (engine === 'phonon-browser') return phononBrowserVoices[0]?.name ?? 'default';
+		return builtinVoices[0]?.name ?? 'alba';
+	}
+
+	/** True when `id` exists in the engine's current catalog. */
+	function voiceExistsFor(engine: TtsEngine, id: string): boolean {
+		if (!id) return false;
+		if (engine === 'device') {
+			// Device voices can populate after mount (`voiceschanged`), so
+			// trust a stored name until the browser gives us the list.
+			return synthVoices.length === 0 || synthVoices.some((v) => v.name === id);
+		}
+		if (findCustomVoiceFor(engine, id)) return true;
+		if (engine === 'pocket') {
+			// The built-in catalog is lazy; trust the stored name until it
+			// arrives, then `ensurePocketVoices` repairs an invalid choice.
+			return builtinVoices.length === 0 || builtinVoices.some((v) => v.name === id);
+		}
+		return serverVoicesFor(engine).some((v) => v.name === id);
+	}
+
+	/** Load the browser catalog and model status when that engine is chosen. */
+	async function preparePhononBrowser(): Promise<void> {
+		try {
+			phononBrowserVoices = await listPhononVoices();
+		} catch (e) {
+			showToast(`Phonon voice catalog unavailable: ${(e as Error).message}`);
+		}
+		if (!voiceExistsFor('phonon-browser', selectedVoiceId)) {
+			selectedVoiceId = defaultVoiceFor('phonon-browser');
+			voiceByEngine = withVoiceForEngine(voiceByEngine, 'phonon-browser', selectedVoiceId);
+		}
+	}
+
+	/** Start the one-time model download from the settings panel. */
+	function preloadPhononBrowser(): void {
+		ensurePhononModel().catch((e: unknown) =>
+			showToast(`Phonon unavailable: ${(e as Error)?.message ?? e}`)
+		);
 	}
 
 	onMount(async () => {
@@ -307,22 +489,34 @@
 		const storedVoice = localStorage.getItem(LS_KEYS.voice);
 		const storedEngine = localStorage.getItem(LS_KEYS.engine);
 		synthRate = resolveWithUrlPrecedence(rateParam, storedRate, 1.0, parseRate);
-		const engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
+		let engine = resolveWithUrlPrecedence(engineParam, storedEngine, 'device' as const, parseEngine);
+		// A stale deep link or an install without the server engine should not
+		// leave the reader on a broken picker.
+		if ((engine === 'phonon' && !phononAvailable) || (engine === 'pocket' && !pocketAvailable)) {
+			engine = 'device';
+		}
 		ttsEngine = engine;
+		if (engine === 'pocket') await ensurePocketVoices();
 		// Per-engine voice: stored map first, legacy single key migrates into
 		// the current engine's slot, URL `voice` wins for the current engine.
 		// The URL carries clone *names* (slugified); stored state keeps IDs.
-		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {
-			device: null,
-			pocket: null
-		};
+		const storedMap = parseVoiceByEngine(localStorage.getItem(LS_KEYS.voiceByEngine)) ?? {};
 		if (storedVoice && !storedMap[engine]) storedMap[engine] = storedVoice;
 		if (voiceParam) {
-			const fallbackVoice = storedMap[engine] ?? storedVoice ?? 'alba';
-			storedMap[engine] = resolveVoiceId(voiceParam, { builtinVoices, customVoices }, fallbackVoice);
+			const fallbackVoice = storedMap[engine] ?? storedVoice ?? defaultVoiceFor(engine);
+			storedMap[engine] = resolveVoiceId(
+				voiceParam,
+				{
+					builtinVoices: serverVoicesFor(engine),
+					customVoices: engine === 'device' ? [] : customVoicesFor(engine)
+				},
+				fallbackVoice
+			);
 		}
 		voiceByEngine = storedMap;
-		selectedVoiceId = voiceForEngine(voiceByEngine, engine, 'alba');
+		selectedVoiceId = voiceForEngine(voiceByEngine, engine, defaultVoiceFor(engine));
+		if (!voiceExistsFor(engine, selectedVoiceId)) selectedVoiceId = defaultVoiceFor(engine);
+		if (engine === 'phonon-browser') void preparePhononBrowser();
 		// Postprocessing defaults: last-set global prefs until a doc overrides.
 		const storedPostprocess = parsePostprocessFlags(localStorage.getItem(LS_KEYS.postprocess));
 		if (storedPostprocess) {
@@ -1319,16 +1513,25 @@
 		overviewSearch = idx;
 	}
 
-	// Pocket-tts voice selection for offline files (independent of the
-	// current engine, so cards can pre-generate while listening on device).
-	function pocketVoiceId(): string {
-		if (ttsEngine === 'pocket') return selectedVoiceId;
-		return voiceByEngine.pocket ?? 'alba';
+	// Offline files are generated by a server engine. Pocket is used only
+	// while the user is on Pocket; every other engine pre-generates Phonon.
+	function offlineEngine(): ServerTtsEngine {
+		return ttsEngine === 'pocket' ? 'pocket' : 'phonon';
 	}
-	function resolvePocketVoice(): { voiceKey: string; voiceId: string | null; blob: Blob | null } {
-		const id = pocketVoiceId();
-		const custom = customVoices.find((v) => v.id === id);
-		if (custom) return { voiceKey: custom.id, voiceId: null, blob: custom.blob };
+	function offlineVoiceId(): string {
+		const engine = offlineEngine();
+		if (ttsEngine === engine) return selectedVoiceId;
+		return voiceByEngine[engine] ?? defaultVoiceFor(engine);
+	}
+	function resolveOfflineVoice(): {
+		voiceKey: string;
+		voiceId: string | null;
+		blob: Blob | null;
+	} {
+		const engine = offlineEngine();
+		const id = offlineVoiceId();
+		const custom = findCustomVoiceFor(engine, id);
+		if (custom) return { voiceKey: custom.id, voiceId: custom.id, blob: custom.blob };
 		return { voiceKey: id, voiceId: id, blob: null };
 	}
 	function getOfflinePlayer(): OfflinePlayer {
@@ -1371,7 +1574,8 @@
 		} catch {
 			offlineMeta = {};
 		}
-		const pocketKey = pocketVoiceId();
+		const engine = offlineEngine();
+		const voiceKey = offlineVoiceId();
 		const next: Record<string, PlaylistOfflineState> = {};
 		for (const item of playlistItems) {
 			const doc = await getDoc(item.docId);
@@ -1380,10 +1584,13 @@
 				continue;
 			}
 			if (offlineGenerating[doc.id]) {
-				next[item.id] = { state: 'generating', bytes: offlineMeta[offlineAudioKey(doc.id, pocketKey, offlineFmt)]?.bytes ?? 0 };
+				next[item.id] = {
+					state: 'generating',
+					bytes: offlineMeta[offlineAudioKey(doc.id, engine, voiceKey, offlineFmt)]?.bytes ?? 0
+				};
 				continue;
 			}
-			const meta = offlineMeta[offlineAudioKey(doc.id, pocketKey, offlineFmt)];
+			const meta = offlineMeta[offlineAudioKey(doc.id, engine, voiceKey, offlineFmt)];
 			if (!meta) {
 				next[item.id] = { state: 'none', bytes: 0 };
 				continue;
@@ -1405,7 +1612,8 @@
 			return;
 		}
 		if (offlineGenerating[doc.id]) return;
-		const { voiceKey, voiceId, blob } = resolvePocketVoice();
+		const engine = offlineEngine();
+		const { voiceKey, voiceId, blob } = resolveOfflineVoice();
 		const text = joinSpeakableTexts(deriveTts(doc.sections).texts);
 		if (!text.trim()) {
 			showToast('Nothing speakable to generate');
@@ -1415,9 +1623,16 @@
 		await refreshOfflineStates();
 		try {
 			showToast('Generating offline audio — keep the app open');
-			const audioBlob = await generateOfflineAudioBlob({ text, voiceId, voiceBlob: blob, fmt: offlineFmt });
+			const audioBlob = await generateOfflineAudioBlob({
+				text,
+				voiceId,
+				voiceBlob: blob,
+				fmt: offlineFmt,
+				engine
+			});
 			await saveOfflineAudio({
 				docId: doc.id,
+				engine,
 				voiceKey,
 				fmt: offlineFmt,
 				blob: audioBlob,
@@ -1437,9 +1652,10 @@
 	async function handleDeleteOfflineItem(itemId: string): Promise<void> {
 		const item = playlistItems.find((i) => i.id === itemId);
 		if (!item) return;
-		const { voiceKey } = resolvePocketVoice();
+		const engine = offlineEngine();
+		const { voiceKey } = resolveOfflineVoice();
 		if (!confirm('Delete the pre-generated offline audio? The text stays.')) return;
-		await deleteOfflineAudio(item.docId, voiceKey, offlineFmt);
+		await deleteOfflineAudio(item.docId, engine, voiceKey, offlineFmt);
 		if (activeDoc?.id === item.docId && offlineActive) {
 			stopOffline();
 			isPlaying = false;
@@ -1452,10 +1668,11 @@
 		if (!activeDoc || ttsEngine === 'device' || !offlineUse) return false;
 		const texts = tts.texts;
 		if (texts.length === 0) return false;
-		const { voiceKey } = resolvePocketVoice();
+		const engine = offlineEngine();
+		const { voiceKey } = resolveOfflineVoice();
 		let rec;
 		try {
-			rec = await getOfflineAudio(activeDoc.id, voiceKey, offlineFmt);
+			rec = await getOfflineAudio(activeDoc.id, engine, voiceKey, offlineFmt);
 		} catch {
 			return false;
 		}
@@ -1890,9 +2107,12 @@
 		ttsEngine = engine;
 		// Restore the other engine's last voice; the first toggle carries the
 		// current selection over so nothing unexpectedly resets to a default.
-		const next = voiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
-		voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, next);
+		let next = voiceForEngine(voiceByEngine, engine, selectedVoiceId);
+		if (!voiceExistsFor(engine, next)) next = defaultVoiceFor(engine);
+		voiceByEngine = withVoiceForEngine(voiceByEngine, engine, next);
 		selectedVoiceId = next;
+		if (engine === 'pocket') void ensurePocketVoices();
+		if (engine === 'phonon-browser') void preparePhononBrowser();
 	}
 
 	// Voice handling
@@ -1908,6 +2128,7 @@
 			window.speechSynthesis.onvoiceschanged = refreshSynthVoices;
 		}
 	});
+	onMount(() => subscribePhononStatus((status) => (phononStatus = status)));
 	/**
 	 * Prompt for a clone name, blocking names that collide with built-in
 	 * voices (warn-and-require-rename: no auto-suffix). Returns null when the
@@ -1918,7 +2139,7 @@
 		const first = prompt(label, cleanBase);
 		if (first === null) return null;
 		let name = first.trim() || cleanBase;
-		while (isBuiltinVoiceName(name, builtinVoices)) {
+		while (isBuiltinVoiceName(name, builtinNamesFor(ttsEngine))) {
 			const retry = prompt(
 				`"${name}" is already a built-in voice name. Enter a different name:`,
 				name
@@ -1936,7 +2157,9 @@
 	async function handleRenameVoice(id: string, newName: string): Promise<string | null> {
 		const clean = newName.trim();
 		if (!clean) return 'Enter a name.';
-		if (isBuiltinVoiceName(clean, builtinVoices)) {
+		const record = customVoices.find((voice) => voice.id === id);
+		const engine: TtsEngine = record && voiceFileFormat(record) === 'phonon' ? 'phonon' : 'pocket';
+		if (isBuiltinVoiceName(clean, builtinNamesFor(engine))) {
 			return `"${clean}" is already a built-in voice name. Choose another name.`;
 		}
 		const updated = await renameVoice(id, clean);
@@ -1950,14 +2173,17 @@
 		if (doomed && !confirm(`Delete cloned voice "${doomed.name}"?`)) return;
 		await deleteVoice(id);
 		customVoices = await getCustomVoices();
-		// Park any slot that pointed at the deleted voice onto a built-in.
-		const fallback = builtinVoices[0]?.name ?? 'alba';
-		voiceByEngine = {
-			device: voiceByEngine.device === id ? fallback : voiceByEngine.device,
-			pocket: voiceByEngine.pocket === id ? fallback : voiceByEngine.pocket
-		};
+		// Park any slot that pointed at the deleted voice onto that engine's
+		// current default (Pocket and Phonon have different catalogs).
+		const nextMap: VoiceByEngine = {};
+		for (const engine of ALL_TTS_ENGINES) {
+			const value = voiceByEngine[engine];
+			nextMap[engine] = value === id ? defaultVoiceFor(engine) : value;
+		}
+		voiceByEngine = nextMap;
 		if (selectedVoiceId === id) {
-			selectedVoiceId = fallback;
+			selectedVoiceId = defaultVoiceFor(ttsEngine);
+			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, selectedVoiceId);
 			if (isPlaying && ttsEngine !== 'device') playSentencePlayer();
 		}
 	}
@@ -1966,33 +2192,64 @@
 		const input = e.target as HTMLInputElement;
 		if (!input.files?.[0]) return;
 		const file = input.files[0];
-		if (file.name.toLowerCase().endsWith('.safetensors')) {
-			const base = file.name.replace(/\.safetensors$/i, '') || 'voice';
-			const name = promptForVoiceName(base, 'Name this voice (from .safetensors):');
-			if (name === null) {
-				(input as HTMLInputElement).value = '';
+		const format = engineVoiceFileFormat(ttsEngine);
+		try {
+			if (file.name.toLowerCase().endsWith('.safetensors')) {
+				const blob = new Blob([await file.arrayBuffer()], {
+					type: 'application/octet-stream'
+				});
+				const info = await inspectVoiceFile(blob);
+				if (info.format !== 'unknown' && info.format !== format) {
+					showToast(
+						info.format === 'pocket'
+							? 'That is a Pocket TTS clone. Pocket and Phonon voice files are not interchangeable.'
+							: 'That is a Phonon voice file. Switch to a Phonon engine to use it.'
+					);
+					return;
+				}
+				const base = file.name.replace(/\.safetensors$/i, '') || 'voice';
+				const name = promptForVoiceName(
+					base,
+					format === 'phonon' ? 'Name this Phonon voice:' : 'Name this Pocket voice:'
+				);
+				if (name === null) return;
+				const record: VoiceRecord = {
+					id: 'voice_' + Date.now().toString(36),
+					name,
+					blob,
+					bytes: blob.size,
+					sourceWavName: file.name,
+					engine: format,
+					createdAt: Date.now()
+				};
+				await saveVoice(record);
+				customVoices = await getCustomVoices();
+				selectedVoiceId = record.id;
+				voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
+				showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
 				return;
 			}
-			const blob = new Blob([await file.arrayBuffer()], { type: 'application/octet-stream' });
-			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
-			await saveVoice(record);
-			customVoices = await getCustomVoices();
-			selectedVoiceId = record.id;
-			voiceByEngine = withVoiceForEngine(voiceByEngine, ttsEngine, record.id);
-			showToast(`Voice "${name}" saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
-			(input as HTMLInputElement).value = '';
-			return;
-		}
-		const fd = new FormData();
-		fd.append('voice_wav', file, file.name || 'voice.wav');
-		try {
+			if (format === 'phonon') {
+				showToast('Phonon accepts precomputed .safetensors voice files, not audio recordings.');
+				return;
+			}
+			const fd = new FormData();
+			fd.append('voice_wav', file, file.name || 'voice.wav');
 			const resp = await fetch(`${API_BASE}/api/tts/voices/convert`, { method: 'POST', body: fd });
 			if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 			const blob = await resp.blob();
 			const base = file.name.replace(/\.[^.]+$/, '') || 'voice';
 			const name = promptForVoiceName(base, 'Name this voice:');
 			if (name === null) return;
-			const record: VoiceRecord = { id: 'voice_' + Date.now().toString(36), name, blob, bytes: blob.size, sourceWavName: file.name, createdAt: Date.now() };
+			const record: VoiceRecord = {
+				id: 'voice_' + Date.now().toString(36),
+				name,
+				blob,
+				bytes: blob.size,
+				sourceWavName: file.name,
+				engine: 'pocket',
+				createdAt: Date.now()
+			};
 			await saveVoice(record);
 			customVoices = await getCustomVoices();
 			selectedVoiceId = record.id;
@@ -2060,13 +2317,16 @@
 		return sentencePlayer;
 	}
 
-	function resolveBackendVoice(): { voiceKey: string; voiceId: string | null; blob: Blob | null } {
-		const custom = customVoices.find((v) => v.id === selectedVoiceId);
-		if (custom) return { voiceKey: custom.id, voiceId: null, blob: custom.blob };
+	function resolveEngineVoice(
+		engine: TtsEngine
+	): { voiceKey: string; voiceId: string | null; blob: Blob | null } {
+		// Cloned voices live in IndexedDB and are sent as safetensors blobs.
+		const custom = findCustomVoiceFor(engine, selectedVoiceId);
+		if (custom) return { voiceKey: custom.id, voiceId: custom.id, blob: custom.blob };
 		return { voiceKey: selectedVoiceId, voiceId: selectedVoiceId, blob: null };
 	}
 
-	/** Start sentence-player playback (server pocket or device speech chain). */
+	/** Start sentence-player playback (server or browser Phonon, or Pocket). */
 	function playSentencePlayer() {
 		if (!activeDoc) return;
 		const texts = tts.texts;
@@ -2074,10 +2334,23 @@
 			isPlaying = false;
 			return;
 		}
-		const { voiceKey, voiceId, blob } = resolveBackendVoice();
-		getSentencePlayer().setFetchAudio(fetchTTSWavStream);
+		const { voiceKey, voiceId, blob } = resolveEngineVoice(ttsEngine);
+		getSentencePlayer().setFetchAudio(
+			ttsEngine === 'phonon-browser' ? fetchPhononWav : fetchTTSWavStream
+		);
 		isBackendGenerating = true;
-		void getSentencePlayer().play(texts, chunkForSentence(tts, globalIdx), voiceKey, voiceId, blob, synthRate);
+		const engine: ServerTtsEngine | 'phonon-browser' = isServerEngine(ttsEngine)
+			? ttsEngine
+			: 'phonon-browser';
+		void getSentencePlayer().play(
+			texts,
+			chunkForSentence(tts, globalIdx),
+			voiceKey,
+			voiceId,
+			blob,
+			synthRate,
+			engine
+		);
 	}
 
 	function playWebSpeechCorrect() {
@@ -2195,7 +2468,14 @@
 		updateMediaMetadata({
 			title,
 			artist: total > 0 ? `Sentence ${pos} of ${total}` : 'OCR-TTS Reader',
-			album: ttsEngine === 'device' ? 'Device voice' : 'Pocket TTS'
+			album:
+				ttsEngine === 'device'
+					? 'Device voice'
+					: ttsEngine === 'pocket'
+						? 'Pocket TTS'
+						: ttsEngine === 'phonon'
+							? 'Phonon (server)'
+							: 'Phonon (browser)'
 		});
 		setMediaPlaybackState(isPlaying);
 	});
@@ -2317,10 +2597,10 @@
 	async function saveAudioFile() {
 		if (!activeDoc) return;
 		const text = tts.texts.join(' ');
-		const custom = customVoices.find((v) => v.id === selectedVoiceId);
-		const blob = custom?.blob ?? null;
-		const voiceUrl = custom ? null : selectedVoiceId;
-		const id = await createTTSFileJob(text, voiceUrl, blob, 'wav');
+		const engine = offlineEngine();
+		const { voiceId: resolvedVoiceId, blob } = resolveOfflineVoice();
+		const voiceUrl = blob ? null : resolvedVoiceId;
+		const id = await createTTSFileJob(text, voiceUrl, blob, 'wav', engine);
 		showToast(`File job ${id} created — polling…`);
 		for (let i = 0; i < 30; i++) {
 			await new Promise((r) => setTimeout(r, 2000));
@@ -2756,6 +3036,8 @@
 		{ttsEngine}
 		onEngineChange={handleEngineChange}
 		{builtinVoices}
+		{phononVoices}
+		{phononBrowserVoices}
 		{customVoices}
 		{synthVoices}
 		{selectedVoiceId}
@@ -2770,6 +3052,10 @@
 		onOfflineFmtChange={handleOfflineFmtChange}
 		offlineUse
 		onOfflineUseChange={handleOfflineUseChange}
+		{phononAvailable}
+		{pocketAvailable}
+		{phononStatus}
+		onPhononPreload={preloadPhononBrowser}
 	/>
 
 	<PostprocessingModal

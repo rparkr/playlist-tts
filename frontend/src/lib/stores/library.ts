@@ -37,12 +37,17 @@ interface OCRTTSDB extends DBSchema {
 	items: { key: string; value: PlaylistItem; indexes: { 'by-playlist': string } };
 }
 
+/** Which TTS runtime a stored voice file can be used with. */
+export type VoiceFileEngine = 'pocket' | 'phonon';
+
 export interface VoiceRecord {
 	id: string;
 	name: string;
 	blob: Blob;
 	bytes: number;
 	sourceWavName?: string;
+	/** Voice-file format/provider. Older records are Pocket-format. */
+	engine?: VoiceFileEngine;
 	createdAt: number;
 }
 
@@ -71,14 +76,17 @@ export interface DocAsset {
 
 /** Pre-generated single-file chapter audio for offline / lock-screen listening.
  *
- * Key `${docId}::${voiceKey}::${fmt}` — one file per voice+format combo.
- * `textHash` marks the exact speakable text it was built from so edits can
- * flag the file as stale instead of silently playing outdated audio.
+ * Key `${docId}::${engine}::${voiceKey}::${fmt}` — one file per
+ * engine+voice+format combo. `textHash` marks the exact speakable text it was
+ * built from so edits can flag the file as stale instead of silently playing
+ * outdated audio.
  */
 export interface OfflineAudioRecord {
-	/** Composite key: owning `Doc.id` + voice + container format. */
+	/** Composite key: owning `Doc.id` + server engine + voice + format. */
 	key: string;
 	docId: string;
+	/** Server engine that generated the file (`pocket` or `phonon`). */
+	engine: string;
 	voiceKey: string;
 	fmt: string;
 	blob: Blob;
@@ -89,11 +97,11 @@ export interface OfflineAudioRecord {
 }
 
 const DB_NAME = 'ocr-tts';
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 
 function getDB() {
 	return openDB<OCRTTSDB>(DB_NAME, DB_VERSION, {
-		upgrade(db, oldVersion) {
+		upgrade(db, oldVersion, _newVersion, transaction) {
 			if (oldVersion < 1) {
 				db.createObjectStore('docs', { keyPath: 'id' });
 				db.createObjectStore('voices', { keyPath: 'id' });
@@ -120,6 +128,30 @@ function getDB() {
 			if (!db.objectStoreNames.contains('items')) {
 				const store = db.createObjectStore('items', { keyPath: 'id' });
 				store.createIndex('by-playlist', 'playlistId', { unique: false });
+			}
+			// v9 adds the engine to offline-audio keys. Files generated before
+			// this version came from Pocket, so rewrite their keys in place
+			// instead of stranding the cached audio.
+			if (oldVersion < 9 && db.objectStoreNames.contains('audio')) {
+				const store = transaction.objectStore('audio');
+				void store.openCursor().then(function migrate(cursor) {
+					if (!cursor) return;
+					const record = cursor.value as OfflineAudioRecord & { engine?: string };
+					if (record.engine) {
+						void cursor.continue();
+						return;
+					}
+					const engine = 'pocket';
+					const migrated = {
+						...record,
+						engine,
+						key: offlineAudioKey(record.docId, engine, record.voiceKey, record.fmt)
+					};
+					void store
+						.put(migrated)
+						.then(() => cursor.delete())
+						.then(() => cursor.continue());
+				});
 			}
 		}
 	});
@@ -173,8 +205,13 @@ export async function saveDoc(doc: Doc): Promise<void> {
 
 /** Pre-generated offline chapter audio (one file per doc+voice+format). */
 
-export function offlineAudioKey(docId: string, voiceKey: string, fmt: string): string {
-	return `${docId}::${voiceKey}::${fmt}`;
+export function offlineAudioKey(
+	docId: string,
+	engine: string,
+	voiceKey: string,
+	fmt: string
+): string {
+	return `${docId}::${engine}::${voiceKey}::${fmt}`;
 }
 
 /** Persist a generated chapter file for offline / lock-screen playback. */
@@ -182,7 +219,7 @@ export async function saveOfflineAudio(record: Omit<OfflineAudioRecord, 'key' | 
 	const db = await getDB();
 	const stored: OfflineAudioRecord = {
 		...record,
-		key: offlineAudioKey(record.docId, record.voiceKey, record.fmt),
+		key: offlineAudioKey(record.docId, record.engine, record.voiceKey, record.fmt),
 		bytes: record.blob.size,
 		createdAt: Date.now()
 	};
@@ -190,21 +227,21 @@ export async function saveOfflineAudio(record: Omit<OfflineAudioRecord, 'key' | 
 	return stored;
 }
 
-/** Load a cached chapter file for an exact doc+voice+format combo. */
-export async function getOfflineAudio(docId: string, voiceKey: string, fmt: string): Promise<OfflineAudioRecord | undefined> {
+/** Load a cached chapter file for an exact doc+engine+voice+format combo. */
+export async function getOfflineAudio(docId: string, engine: string, voiceKey: string, fmt: string): Promise<OfflineAudioRecord | undefined> {
 	const db = await getDB();
 	try {
-		return await db.get('audio', offlineAudioKey(docId, voiceKey, fmt));
+		return await db.get('audio', offlineAudioKey(docId, engine, voiceKey, fmt));
 	} catch {
 		return undefined;
 	}
 }
 
 /** Remove one cached chapter file to free storage; keeps the doc itself. */
-export async function deleteOfflineAudio(docId: string, voiceKey: string, fmt: string): Promise<void> {
+export async function deleteOfflineAudio(docId: string, engine: string, voiceKey: string, fmt: string): Promise<void> {
 	const db = await getDB();
 	try {
-		await db.delete('audio', offlineAudioKey(docId, voiceKey, fmt));
+		await db.delete('audio', offlineAudioKey(docId, engine, voiceKey, fmt));
 	} catch {
 		// ignore — store may not exist yet
 	}
@@ -228,6 +265,7 @@ export interface OfflineAudioMeta {
 	bytes: number;
 	textHash: string;
 	docId: string;
+	engine: string;
 	voiceKey: string;
 	fmt: string;
 }
@@ -242,6 +280,7 @@ export async function getOfflineAudioMeta(): Promise<Record<string, OfflineAudio
 				bytes: r.bytes,
 				textHash: r.textHash,
 				docId: r.docId,
+				engine: r.engine,
 				voiceKey: r.voiceKey,
 				fmt: r.fmt
 			};

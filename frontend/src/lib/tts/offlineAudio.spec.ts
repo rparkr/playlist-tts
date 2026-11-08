@@ -53,9 +53,27 @@ describe('generateOfflineAudioBlob', () => {
 			deps
 		});
 		expect(await blob.text()).toBe('audio');
-		expect(deps.createJob).toHaveBeenCalledWith('Alpha. Bravo.', 'alba', null, 'webm');
+		expect(deps.createJob).toHaveBeenCalledWith('Alpha. Bravo.', 'alba', null, 'webm', 'pocket');
 		expect(deps.pollJob).toHaveBeenCalledTimes(2);
 		expect(progress).toHaveBeenCalledTimes(1);
+	});
+
+	it('forwards the selected server engine', async () => {
+		const deps = {
+			createJob: vi.fn(async () => 'job1'),
+			pollJob: vi.fn(async () => ({ status: 'done' })),
+			download: vi.fn(async () => new Blob(['audio']))
+		};
+		await generateOfflineAudioBlob({
+			text: 'Alpha.',
+			voiceId: 'Zoey',
+			voiceBlob: null,
+			fmt: 'wav',
+			engine: 'phonon',
+			pollIntervalMs: 1,
+			deps
+		});
+		expect(deps.createJob).toHaveBeenCalledWith('Alpha.', 'Zoey', null, 'wav', 'phonon');
 	});
 
 	it('throws on job error', async () => {

@@ -6,6 +6,8 @@
  * (`webm`/Opus smallest, `mp3` most compatible, `wav` backend fallback).
  */
 
+import type { ServerTtsEngine } from './backendStream';
+
 export type OfflineAudioFmt = 'webm' | 'mp3' | 'wav';
 
 export const OFFLINE_FMTS: readonly OfflineAudioFmt[] = ['webm', 'mp3', 'wav'];
@@ -42,7 +44,8 @@ export interface OfflineJobDeps {
 		text: string,
 		voiceId: string | null,
 		voiceBlob: Blob | null,
-		fmt: string
+		fmt: string,
+		engine: ServerTtsEngine
 	) => Promise<string>;
 	pollJob: (jobId: string) => Promise<{ status: string; error?: string }>;
 	download: (jobId: string) => Promise<Blob>;
@@ -53,6 +56,8 @@ export interface OfflineJobOptions {
 	voiceId: string | null;
 	voiceBlob: Blob | null;
 	fmt: string;
+	/** Backend engine used to synthesize the chapter (default `pocket`). */
+	engine?: ServerTtsEngine;
 	onProgress?: () => void;
 	pollIntervalMs?: number;
 	maxPolls?: number;
@@ -61,9 +66,9 @@ export interface OfflineJobOptions {
 
 function defaultDeps(): OfflineJobDeps {
 	return {
-		createJob: async (text, voiceId, voiceBlob, fmt) => {
+		createJob: async (text, voiceId, voiceBlob, fmt, engine) => {
 			const { createTTSFileJob } = await import('./backendStream');
-			return createTTSFileJob(text, voiceId, voiceBlob, fmt);
+			return createTTSFileJob(text, voiceId, voiceBlob, fmt, engine);
 		},
 		pollJob: async (jobId) => {
 			const { pollTTSJob } = await import('./backendStream');
@@ -80,16 +85,23 @@ function defaultDeps(): OfflineJobDeps {
 
 /** Generate a whole-chapter file via `POST /api/tts/jobs` and return its blob.
  *
- * Polls until done (server synthesizes ~4–6× real-time on CPU, so long docs
- * take minutes — callers show progress meanwhile). `deps` injection keeps
- * this testable without a network.
+ * Polls until done (server synthesis takes minutes for long docs, so callers
+ * show progress meanwhile). `deps` injection keeps this testable without a
+ * network.
  */
 export async function generateOfflineAudioBlob(opts: OfflineJobOptions): Promise<Blob> {
 	const deps = opts.deps ?? defaultDeps();
 	const onProgress = opts.onProgress ?? (() => {});
 	const interval = opts.pollIntervalMs ?? 2000;
 	const maxPolls = opts.maxPolls ?? 300;
-	const jobId = await deps.createJob(opts.text, opts.voiceId, opts.voiceBlob, opts.fmt);
+	const engine = opts.engine ?? 'pocket';
+	const jobId = await deps.createJob(
+		opts.text,
+		opts.voiceId,
+		opts.voiceBlob,
+		opts.fmt,
+		engine
+	);
 	for (let i = 0; i < maxPolls; i++) {
 		const status = await deps.pollJob(jobId);
 		if (status.status === 'done') return deps.download(jobId);

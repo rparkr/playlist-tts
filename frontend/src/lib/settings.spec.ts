@@ -16,7 +16,13 @@ import {
 	voiceUrlParam,
 	withVoiceForEngine,
 	resolveWithUrlPrecedence,
-	progressKey
+	progressKey,
+	groupAndSortVoices,
+	localeToVoiceGroup,
+	engineVoiceFileFormat,
+	voiceFileFormat,
+	type VoiceByEngine,
+	type VoiceGroup
 } from './settings';
 
 describe('parseEngine', () => {
@@ -25,6 +31,10 @@ describe('parseEngine', () => {
 		expect(parseEngine('device')).toBe('device');
 		expect(parseEngine('backend')).toBe('pocket');
 		expect(parseEngine('builtin')).toBe('device');
+		expect(parseEngine('phonon')).toBe('phonon');
+		expect(parseEngine('phonon-server')).toBe('phonon');
+		expect(parseEngine('phonon-browser')).toBe('phonon-browser');
+		expect(parseEngine('wasm')).toBe('phonon-browser');
 	});
 
 	it('rejects absent/invalid values', () => {
@@ -122,7 +132,12 @@ describe('parseSentenceIndex', () => {
 
 describe('voice by engine', () => {
 	it('round-trips through JSON', () => {
-		const map = { device: 'Google US English', pocket: 'alba' };
+		const map = {
+			device: 'Google US English',
+			pocket: 'alba',
+			phonon: 'Zoey',
+			'phonon-browser': 'Juniper'
+		};
 		expect(parseVoiceByEngine(serializeVoiceByEngine(map))).toEqual(map);
 	});
 
@@ -145,6 +160,7 @@ describe('voice by engine', () => {
 		expect(voiceForEngine(map, 'device', 'fb')).toBe('a');
 		expect(voiceForEngine(map, 'pocket', 'fb')).toBe('b');
 		expect(voiceForEngine({ device: null, pocket: null }, 'pocket', 'fb')).toBe('fb');
+		expect(voiceForEngine({ phonon: 'Zoey' }, 'phonon', 'fb')).toBe('Zoey');
 		expect(voiceForEngine(null, 'device', 'fb')).toBe('fb');
 	});
 
@@ -156,7 +172,7 @@ describe('voice by engine', () => {
 	it('keeps separate selections across engine toggles', () => {
 		// Simulate: pick device voice, toggle to pocket (carries over), pick a
 		// pocket voice, toggle back — the device voice is restored.
-		let map = { device: null as string | null, pocket: null as string | null };
+		let map: VoiceByEngine = { device: null, pocket: null };
 		map = withVoiceForEngine(map, 'device', 'Google US English');
 		let current = voiceForEngine(map, 'device', 'alba');
 		// toggle to pocket (no stored pocket voice yet → carries current over)
@@ -222,5 +238,72 @@ describe('voice URL names', () => {
 		expect(isBuiltinVoiceName('  MARA  ', lookup.builtinVoices)).toBe(true);
 		expect(isBuiltinVoiceName('My Clone Voice', lookup.builtinVoices)).toBe(false);
 		expect(isBuiltinVoiceName('', lookup.builtinVoices)).toBe(false);
+	});
+});
+
+describe('voice grouping', () => {
+	it('maps device locales to language and dialect labels', () => {
+		expect(localeToVoiceGroup('en-US')).toEqual({
+			language: 'English',
+			dialect: 'US English'
+		});
+		expect(localeToVoiceGroup('en_GB')).toEqual({
+			language: 'English',
+			dialect: 'British English'
+		});
+		expect(localeToVoiceGroup('fr-FR')).toEqual({
+			language: 'French',
+			dialect: 'French (France)'
+		});
+		expect(localeToVoiceGroup('characters')).toEqual({
+			language: 'English',
+			dialect: 'Character voices'
+		});
+		expect(localeToVoiceGroup(null)).toEqual({ language: null, dialect: null });
+	});
+
+	it('groups and sorts language → dialect → gender → name', () => {
+		const voices = [
+			{ name: 'Zed', language: 'English', dialect: 'British English', gender: 'male' },
+			{ name: 'Amy', language: 'English', dialect: 'US English', gender: 'female' },
+			{ name: 'Bob', language: 'English', dialect: 'US English', gender: 'male' },
+			{ name: 'Cat', language: 'English', dialect: 'British English', gender: 'female' },
+			{ name: 'Ada', language: 'French', dialect: 'French (France)', gender: 'female' }
+		];
+		const groups = groupAndSortVoices(voices) as VoiceGroup<(typeof voices)[number]>[];
+		expect(groups.map((group) => group.label)).toEqual([
+			'English · US English · Female',
+			'English · US English · Male',
+			'English · British English · Female',
+			'English · British English · Male',
+			'French · French (France) · Female'
+		]);
+		expect(groups[0].voices.map((voice) => voice.name)).toEqual(['Amy']);
+		expect(groups[2].voices.map((voice) => voice.name)).toEqual(['Cat']);
+	});
+
+	it('returns a flat alphabetical list when no metadata is present', () => {
+		const voices = [{ name: 'zeta' }, { name: 'Alpha' }, { name: 'beta' }];
+		const flat = groupAndSortVoices(voices) as typeof voices;
+		expect(flat.map((voice) => voice.name)).toEqual(['Alpha', 'beta', 'zeta']);
+	});
+
+	it('does not group a single metadata bucket', () => {
+		const voices = [
+			{ name: 'Zed', language: 'English', dialect: 'US English', gender: 'female' },
+			{ name: 'Amy', language: 'English', dialect: 'US English', gender: 'female' }
+		];
+		const flat = groupAndSortVoices(voices) as typeof voices;
+		expect(flat.map((voice) => voice.name)).toEqual(['Amy', 'Zed']);
+	});
+
+	it('tags legacy voice records as Pocket files', () => {
+		expect(voiceFileFormat({})).toBe('pocket');
+		expect(voiceFileFormat({ engine: 'pocket' })).toBe('pocket');
+		expect(voiceFileFormat({ engine: 'phonon' })).toBe('phonon');
+		expect(engineVoiceFileFormat('phonon')).toBe('phonon');
+		expect(engineVoiceFileFormat('phonon-browser')).toBe('phonon');
+		expect(engineVoiceFileFormat('pocket')).toBe('pocket');
+		expect(engineVoiceFileFormat('device')).toBe('pocket');
 	});
 });
