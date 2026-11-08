@@ -21,7 +21,7 @@ from pathlib import Path
 
 LLM_LOGGER_NAME: str = "ocr_tts.llm_ocr"
 LLM_LOG_FILE_ENV: str = "LLM_OCR_LOG_FILE"
-DEFAULT_LOG_FILE: str = "llm-ocr.jsonl"
+DEFAULT_LOG_FILE: str = "logs/llm-ocr.jsonl"
 
 
 class JSONLFormatter(logging.Formatter):
