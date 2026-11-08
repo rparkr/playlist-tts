@@ -47,14 +47,20 @@ POST /api/parse-markdown   form: markdown: str → {markdown, sections}  (mirror
 ## TTS
 
 ```
-GET  /api/tts/voices       → {voices:[{name, lang}]}  # builtin catalog
-POST /api/tts/voices/convert  → safetensors bytes
-POST /api/tts/stream       → StreamingResponse
-POST /api/tts/jobs         → {jobId}
-GET  /api/tts/jobs/{id} /download /cancel
+GET  /api/tts/engines      → {engines:[{id,label,available,voice_cloning,voices[]}]}
+GET  /api/tts/voices?engine=pocket|phonon → {voices:[{name, language?, dialect?, gender?, origin?}]}
+POST /api/tts/voices/convert  → safetensors bytes (Pocket voice encoder)
+POST /api/tts/stream       multipart: text, engine?, voice?, voice_safetensors?
+                           → StreamingResponse(audio/wav, chunked)
+POST /api/tts/jobs         multipart: text, engine?, voice?, fmt, output_name
+                           → 202 {job_id}
+GET  /api/tts/jobs/{id}    → {status, progress, engine, voice, output?, error?}
+GET  /api/tts/jobs/{id}/download /cancel
 ```
 
-All POST text fields strip Markdown via `clean_markdown_for_tts` `src/tts/__init__.py:27` and `chunk_text_into_sentences` `src/app.py:22` replaced by tokenizer chunker.
+`engine` defaults to `pocket` for clients that predate the field. Unknown values are `400`; an
+uninstalled engine is `503` on job creation. The frontend sends one sentence per stream request
+from `backendSentencePlayer.ts`, and the backend serializes Phonon generation.
 
 ## Versioning
 
