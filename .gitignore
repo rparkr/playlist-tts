@@ -9,8 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-# App storage (generated audio)
+# App storage (generated audio) and runtime logs
 storage/
+logs/
 frontend/build/
 frontend/.svelte-kit/
 frontend/node_modules/
