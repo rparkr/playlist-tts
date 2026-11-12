@@ -3,7 +3,84 @@
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
+
+
+class _BaseUrlModel(BaseModel):
+    """Shared base-URL normalization for LLM connection payloads."""
+
+    base_url: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str | None) -> str | None:
+        """Trim trailing slashes and require an http(s) scheme."""
+        if value is None:
+            return None
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return None
+        if not cleaned.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return cleaned
+
+
+class LLMOcrConfig(_BaseUrlModel):
+    """Optional overrides for one LLM OCR job.
+
+    Every field is optional: omitted/empty values fall back to the server's
+    environment defaults (`LLM_OCR_*`) and then to the built-in defaults.
+    """
+
+    api_key: SecretStr | None = None
+    model: str | None = None
+    system_message: str | None = Field(default=None, max_length=20_000)
+    user_message: str | None = Field(default=None, max_length=20_000)
+    enable_thinking: bool | None = None
+    concurrency: int | None = Field(default=None, ge=0)
+
+
+class LLMModelsRequest(_BaseUrlModel):
+    """Credentials for querying an OpenAI-compatible server's model list."""
+
+    api_key: SecretStr | None = None
+
+
+class LLMModelInfo(BaseModel):
+    """One model advertised by an OpenAI-compatible server."""
+
+    id: str
+    name: str | None = None
+    vision: bool | None = Field(
+        default=None,
+        description="True/False when the server reports vision support; None when unknown",
+    )
+
+
+class LLMModelsResponse(BaseModel):
+    """Model list plus the base URL that was actually queried."""
+
+    base_url: str
+    models: list[LLMModelInfo]
+
+
+class LLMOcrDefaults(BaseModel):
+    """Server-side defaults shown in the LLM OCR settings UI."""
+
+    base_url: str
+    model: str
+    system_message: str
+    user_message: str
+    concurrency: int
+    enable_thinking: bool
+
+
+class LLMTestResponse(BaseModel):
+    """Result of a one-shot LLM connection/vision probe."""
+
+    ok: bool
+    model: str
+    latency_ms: int
 
 
 class PostprocessOptions(BaseModel):

@@ -7,6 +7,7 @@ separate router so the Docling path is untouched.
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -14,6 +15,12 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from backend.app.api.ocr import _parse_postprocess, _validate_pdf_upload
 from backend.app.models.schemas import (
     JobStatus,
+    LLMModelInfo,
+    LLMModelsRequest,
+    LLMModelsResponse,
+    LLMOcrConfig,
+    LLMOcrDefaults,
+    LLMTestResponse,
     OCRDirectResponse,
     OCRJobCreateResponse,
     OCRJobStatusResponse,
@@ -21,12 +28,28 @@ from backend.app.models.schemas import (
 from backend.app.services.llm_ocr_service import (
     LLM_SYNC_TIMEOUT_S,
     LLMConfig,
+    create_llm_client,
     create_llm_ocr_job,
     get_llm_job,
     llm_sse_events,
+    model_supports_vision,
+    probe_llm,
 )
 
 router = APIRouter(prefix="/api/ocr/llm", tags=["ocr-llm"])
+
+
+def _config_from_payload(payload: LLMOcrConfig) -> LLMConfig:
+    """Map a validated settings payload to the service config."""
+    return LLMConfig.from_env(
+        base_url=payload.base_url,
+        model=payload.model,
+        api_key=payload.api_key.get_secret_value() if payload.api_key else None,
+        system_message=payload.system_message,
+        user_message=payload.user_message,
+        enable_thinking=payload.enable_thinking,
+        concurrency=payload.concurrency,
+    )
 
 
 def _config_from_form(raw: str | None) -> LLMConfig:
@@ -34,23 +57,90 @@ def _config_from_form(raw: str | None) -> LLMConfig:
     if not raw:
         return LLMConfig.from_env()
     try:
-        data = json.loads(raw)
-    except ValueError:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    raw_concurrency = data.get("concurrency")
-    concurrency: int | None = None
-    if raw_concurrency is not None:
-        try:
-            concurrency = int(raw_concurrency)
-        except (TypeError, ValueError):
-            concurrency = None
-    return LLMConfig.from_env(
-        base_url=data.get("base_url"),
-        model=data.get("model"),
-        concurrency=concurrency,
+        payload = LLMOcrConfig.model_validate_json(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid LLM settings: {e}") from e
+    return _config_from_payload(payload)
+
+
+def _llm_error_detail(exc: Exception, config: LLMConfig) -> str:
+    """Return a user-facing LLM error without leaking the API key."""
+    status = getattr(exc, "status_code", None)
+    message = str(exc).strip() or exc.__class__.__name__
+    if status == 401:
+        detail = "Authentication failed (401). Check the API key."
+    elif status == 404:
+        detail = "The LLM server returned 404. Check the base URL (include /v1) and the model name."
+    elif status == 429:
+        detail = "The LLM server is rate-limiting requests (429). Try again shortly."
+    elif status is not None:
+        detail = f"LLM server error {status}: {message}"
+    elif isinstance(exc, TimeoutError) or "timeout" in exc.__class__.__name__.lower():
+        detail = f"The LLM server at {config.base_url} timed out."
+    else:
+        detail = f"Could not reach the LLM server at {config.base_url}: {message}"
+    if config.api_key and len(config.api_key) >= 4:
+        detail = detail.replace(config.api_key, "***")
+    return detail[:1000]
+
+
+@router.get("/options", response_model=LLMOcrDefaults)
+async def llm_options() -> LLMOcrDefaults:
+    """Return server-side LLM OCR defaults for the settings UI."""
+    config = LLMConfig.from_env()
+    return LLMOcrDefaults(
+        base_url=config.base_url,
+        model=config.model,
+        system_message=config.system_message,
+        user_message=config.user_message,
+        concurrency=config.concurrency,
+        enable_thinking=config.enable_thinking,
     )
+
+
+@router.post("/models", response_model=LLMModelsResponse)
+async def list_llm_models(payload: LLMModelsRequest) -> LLMModelsResponse:
+    """List models from an OpenAI-compatible server, with vision hints.
+
+    Vision capability is reported only when the server exposes it; models
+    without metadata get `vision: null` so the UI can show "unverified"
+    instead of hiding them.
+    """
+    config = LLMConfig.from_env(
+        base_url=payload.base_url,
+        api_key=payload.api_key.get_secret_value() if payload.api_key else None,
+    )
+    client = create_llm_client(config.base_url, config.api_key)
+    try:
+        page = await client.models.list(timeout=10.0)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=_llm_error_detail(e, config)) from e
+
+    models: list[LLMModelInfo] = []
+    for model in page.data:
+        data = model.model_dump() if hasattr(model, "model_dump") else {}
+        models.append(
+            LLMModelInfo(
+                id=model.id,
+                name=data.get("name") or None,
+                vision=model_supports_vision(data),
+            )
+        )
+    models.sort(key=lambda m: m.id.lower())
+    return LLMModelsResponse(base_url=config.base_url, models=models)
+
+
+@router.post("/test", response_model=LLMTestResponse)
+async def test_llm_connection(payload: LLMOcrConfig) -> LLMTestResponse:
+    """Probe the configured server/model with a tiny image."""
+    config = _config_from_payload(payload)
+    started = time.monotonic()
+    try:
+        await probe_llm(config)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=_llm_error_detail(e, config)) from e
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    return LLMTestResponse(ok=True, model=config.model, latency_ms=elapsed_ms)
 
 
 @router.post("/jobs", response_model=OCRJobCreateResponse, status_code=202)

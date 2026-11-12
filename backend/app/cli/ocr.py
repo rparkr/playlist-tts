@@ -22,6 +22,10 @@ def _convert_with_llm(
     opts: PostprocessOptions,
     base_url: str | None,
     model: str | None,
+    api_key: str | None,
+    system_message: str | None,
+    user_message: str | None,
+    enable_thinking: bool | None,
     concurrency: int | None,
     log_file: Path | None,
 ) -> None:
@@ -33,6 +37,10 @@ def _convert_with_llm(
         opts: post-processing flags.
         base_url: OpenAI-compatible base URL (None resolves from the environment).
         model: model name (None resolves from the environment).
+        api_key: API key (None resolves from the environment).
+        system_message: custom system prompt (None resolves from the environment).
+        user_message: custom user prompt (None resolves from the environment).
+        enable_thinking: allow ` thinking` blocks (None resolves from the environment).
         concurrency: max in-flight pages (None resolves from the environment).
         log_file: JSONL run-log destination (None resolves from the environment).
     """
@@ -49,7 +57,15 @@ def _convert_with_llm(
     from backend.app.services.llm_ocr_service import LLMConfig, convert_pdf_with_llm
     from backend.app.services.ocr_service import get_page_count
 
-    config = LLMConfig.from_env(base_url=base_url, model=model, concurrency=concurrency)
+    config = LLMConfig.from_env(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        system_message=system_message,
+        user_message=user_message,
+        enable_thinking=enable_thinking,
+        concurrency=concurrency,
+    )
     log_path = configure_llm_logging(log_file)
     total = get_page_count(input_pdf)
 
@@ -112,6 +128,20 @@ def convert(
         help="LLM server base URL.",
     ),
     llm_model: str | None = typer.Option(None, "--llm-model", help="LLM model name."),
+    llm_api_key: str | None = typer.Option(
+        None, "--llm-api-key", help="API key for the OpenAI-compatible LLM server."
+    ),
+    llm_system_prompt: str | None = typer.Option(
+        None, "--llm-system-prompt", help="Custom system prompt for each page."
+    ),
+    llm_user_prompt: str | None = typer.Option(
+        None, "--llm-user-prompt", help="Custom user prompt for each page."
+    ),
+    llm_enable_thinking: bool | None = typer.Option(
+        None,
+        "--llm-enable-thinking/--llm-no-enable-thinking",
+        help="Allow llama.cpp/Qwen thinking blocks (default: off).",
+    ),
     llm_concurrency: int | None = typer.Option(
         None,
         "--llm-concurrency",
@@ -135,7 +165,17 @@ def convert(
         raise typer.BadParameter("--engine must be 'docling' or 'llm'.")
     if engine == "llm":
         _convert_with_llm(
-            input_pdf, output_path, opts, llm_base_url, llm_model, llm_concurrency, log_file
+            input_pdf,
+            output_path,
+            opts,
+            llm_base_url,
+            llm_model,
+            llm_api_key,
+            llm_system_prompt,
+            llm_user_prompt,
+            llm_enable_thinking,
+            llm_concurrency,
+            log_file,
         )
         return
 

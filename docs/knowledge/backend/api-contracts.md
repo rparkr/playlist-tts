@@ -38,6 +38,33 @@ GET  /api/ocr/jobs/{id}/markdown
 POST /api/ocr  (alias, sync) → 200 {markdown, sections, pageMap} or 202 poll
 ```
 
+## OCR (LLM)
+
+```
+POST /api/ocr/llm/jobs     multipart: file, postprocess?, llm? → 202 {job_id}
+GET  /api/ocr/llm/jobs/{id}
+GET  /api/ocr/llm/jobs/{id}/events
+GET  /api/ocr/llm/jobs/{id}/markdown
+POST /api/ocr/llm          (sync alias)
+
+GET  /api/ocr/llm/options  → {base_url, model, system_message, user_message,
+                              concurrency, enable_thinking}  (never api_key)
+POST /api/ocr/llm/models   {base_url?, api_key?} → {base_url, models:[{id,name?,vision?}]}
+POST /api/ocr/llm/test     LLMOcrConfig → {ok, model, latency_ms}
+```
+
+`llm` is a JSON-encoded `LLMOcrConfig`:
+
+```json
+{"base_url":"http://host/v1","api_key":"…","model":"…",
+ "system_message":"…","user_message":"…",
+ "enable_thinking":false,"concurrency":2}
+```
+
+All fields are optional; omitted values fall back to `LLM_OCR_*` environment
+variables and then built-in defaults. `vision` is `true`/`false` only when the
+server reports capability metadata; `null` means unknown.
+
 ## Parse
 
 ```

@@ -46,6 +46,10 @@ Main endpoints:
 | `GET /api/ocr/jobs/{id}/events` | SSE progress stream |
 | `GET /api/ocr/jobs/{id}/markdown` | Download result as Markdown |
 | `POST /api/ocr` | Synchronous OCR alias (creates a job and polls) |
+| `POST /api/ocr/llm/jobs` | Vision-LLM OCR job against an OpenAI-compatible server |
+| `GET /api/ocr/llm/options` | LLM OCR defaults (base URL, model, prompts) |
+| `POST /api/ocr/llm/models` | List models from the configured LLM server |
+| `POST /api/ocr/llm/test` | Probe the LLM server/model with a tiny image |
 | `POST /api/parse-markdown` | Parse pasted/uploaded Markdown into sections |
 | `POST /api/convert/epub` | Convert an ePub book to Markdown plus image binaries |
 | `GET /api/tts/voices` | Built-in voice catalog |
@@ -54,6 +58,20 @@ Main endpoints:
 | `POST /api/tts/voices/convert` | Convert uploaded WAV to safetensors (transient) |
 
 Generated audio files land in `storage/` (gitignored).
+
+### LLM OCR
+
+The `OCR: LLM` engine talks to any OpenAI-compatible vision server. Configure
+the base URL (include `/v1`), optional API key, model, and per-page prompts in
+the pre-OCR staging bar under **LLM settings**. The API key stays in session
+storage unless you opt in to remembering it on the device.
+
+Server defaults come from `LLM_OCR_BASE_URL`, `LLM_OCR_API_KEY`,
+`LLM_OCR_MODEL`, `LLM_OCR_SYSTEM_MESSAGE`, `LLM_OCR_USER_MESSAGE`,
+`LLM_OCR_CONCURRENCY`, and `LLM_OCR_ENABLE_THINKING`. Model listing reports
+vision support when the server exposes it; models without metadata are shown
+as "vision unverified". Use **Test connection** to probe the model with a tiny
+image before starting a long OCR run.
 
 ## CLI
 

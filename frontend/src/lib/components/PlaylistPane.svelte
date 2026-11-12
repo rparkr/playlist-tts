@@ -14,7 +14,8 @@ import {
 	Download,
 	LibraryBig,
 	FileStack,
-	RefreshCw
+	RefreshCw,
+	Settings2
 } from 'lucide-svelte';
 import { clickOutside } from '$lib/actions/clickOutside';
 import type { Playlist, PlaylistItem } from '$lib/playlists/model';
@@ -59,6 +60,8 @@ interface Props {
 	onShowPdf: (id: string) => void;
 	onClearItemPdf: (id: string) => void;
 	onReprocessItem: (id: string, engine: ReprocessEngine) => void;
+	/** Open the shared LLM OCR settings modal without starting a job. */
+	onConfigureLlm: () => void;
 	onOpenLibrary: () => void;
 	offline: Record<string, PlaylistOfflineState>;
 	onGenerateOffline: (id: string) => void;
@@ -84,6 +87,7 @@ let {
 	onShowPdf,
 	onClearItemPdf,
 	onReprocessItem,
+	onConfigureLlm,
 	onOpenLibrary,
 	offline,
 	onGenerateOffline,
@@ -359,6 +363,12 @@ function itemPercent(id: string): number {
 										{eng.label}
 									</button>
 								{/each}
+								<button onclick={(e) => { e.stopPropagation(); onConfigureLlm(); }}
+									aria-label="Configure LLM OCR"
+									title="Configure LLM OCR connection, model, and prompts"
+									class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700">
+									<Settings2 size={11} /> Settings
+								</button>
 							</div>
 						{/if}
 						{#if editMode && s?.hasPdf && editingId !== item.id && reprocessId !== item.id}

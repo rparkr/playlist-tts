@@ -49,6 +49,9 @@ def test_ocr_help_lists_engine_option():
     assert result.exit_code == 0
     assert "--engine" in result.output
     assert "--llm-model" in result.output
+    assert "--llm-api-key" in result.output
+    assert "--llm-system-prompt" in result.output
+    assert "--llm-user-prompt" in result.output
     assert "--log-file" in result.output
     assert "--first-page-marker" in result.output
 

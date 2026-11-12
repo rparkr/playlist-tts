@@ -95,7 +95,7 @@
 	import Header from '$lib/components/Header.svelte';
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
 	import { fly } from 'svelte/transition';
-	import { FileText, ListMusic, LibraryBig, X } from 'lucide-svelte';
+	import { FileText, ListMusic, LibraryBig, Settings2, X } from 'lucide-svelte';
 	import Overview, {
 		type OverviewPlaylistStat,
 		type OverviewSearchHit
@@ -107,6 +107,7 @@
 	import LibraryPane, { type LibraryPlaylistStat } from '$lib/components/LibraryPane.svelte';
 	import TtsSettingsModal from '$lib/components/TtsSettingsModal.svelte';
 	import PostprocessingModal from '$lib/components/PostprocessingModal.svelte';
+	import LlmOcrSettingsModal from '$lib/components/LlmOcrSettingsModal.svelte';
 	import MarkdownPane from '$lib/components/MarkdownPane.svelte';
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
@@ -122,10 +123,14 @@
 		parseSentenceIndex,
 		parsePostprocessFlags,
 		parseVoiceByEngine,
+		parseLlmOcrSettings,
 		isBuiltinVoiceName,
 		resolveVoiceId,
 		serializePostprocessFlags,
+		serializeLlmOcrSettings,
 		serializeVoiceByEngine,
+		buildLlmPayload,
+		defaultLlmOcrSettings,
 		voiceForEngine,
 		voiceUrlParam,
 		withVoiceForEngine,
@@ -136,9 +141,11 @@
 		voiceFileFormat,
 		ALL_TTS_ENGINES,
 		type TtsEngine,
-		type VoiceByEngine
+		type VoiceByEngine,
+		type LlmOcrSettings
 	} from '$lib/settings';
 	import { inspectVoiceFile } from '$lib/tts/voiceFile';
+	import { fetchLlmDefaults, type LlmOcrDefaults } from '$lib/ocr/llm';
 
 	// --- State ---
 	let docs: Doc[] = $state([]);
@@ -209,6 +216,15 @@
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
 	let settingsHydrated: boolean = $state(false);
+
+	// LLM OCR settings (connection, model, prompts). The API key is kept
+	// separately: sessionStorage by default, localStorage only when the user
+	// opts in via "Remember this key on this device".
+	let llmSettings: LlmOcrSettings = $state(defaultLlmOcrSettings());
+	let llmApiKey: string = $state('');
+	let rememberLlmApiKey: boolean = $state(false);
+	let llmDefaults: LlmOcrDefaults | null = $state(null);
+	let showLlmSettings = $state(false);
 
 	// Pre-OCR staging (#6): a newly selected PDF previews before any POST.
 	// `pageOverrides` maps physical PDF pages → logical `Page N.` numbers.
@@ -526,6 +542,15 @@
 			if (typeof storedPostprocess.firstPageMarker === 'boolean') optFirstPageMarker = storedPostprocess.firstPageMarker;
 			if (typeof storedPostprocess.firstPageNumber === 'number') optFirstPageNumber = storedPostprocess.firstPageNumber;
 		}
+		const storedLlm = parseLlmOcrSettings(localStorage.getItem(LS_KEYS.llmOcr));
+		if (storedLlm) llmSettings = storedLlm;
+		const rememberedKey = localStorage.getItem(LS_KEYS.llmOcrKey);
+		if (rememberedKey) {
+			llmApiKey = rememberedKey;
+			rememberLlmApiKey = true;
+		} else {
+			llmApiKey = sessionStorage.getItem(LS_KEYS.llmOcrKey) ?? '';
+		}
 		const urlSentence = parseSentenceIndex(sParam);
 		if (docParam) {
 			const d = await getDocBySlugOrId(docParam);
@@ -597,6 +622,17 @@
 				firstPageNumber: optFirstPageNumber
 			})
 		);
+		localStorage.setItem(LS_KEYS.llmOcr, serializeLlmOcrSettings(llmSettings));
+		if (rememberLlmApiKey && llmApiKey) {
+			localStorage.setItem(LS_KEYS.llmOcrKey, llmApiKey);
+		} else {
+			localStorage.removeItem(LS_KEYS.llmOcrKey);
+		}
+		if (llmApiKey) {
+			sessionStorage.setItem(LS_KEYS.llmOcrKey, llmApiKey);
+		} else {
+			sessionStorage.removeItem(LS_KEYS.llmOcrKey);
+		}
 		if (typeof window !== 'undefined' && activeDoc) {
 			const url = new URL(window.location.href);
 			url.searchParams.set(URL_PARAMS.doc, activeDoc.slug ?? activeDoc.id);
@@ -1093,6 +1129,34 @@
 		ocrEtaAnchoredAt = null;
 	}
 
+	/** Load server-side LLM defaults for the settings modal. */
+	async function loadLlmDefaults() {
+		try {
+			llmDefaults = await fetchLlmDefaults(API_BASE);
+		} catch (e: any) {
+			showToast(`Could not load LLM defaults: ${e?.message ?? e}`);
+		}
+	}
+
+	async function openLlmSettings() {
+		if (!llmDefaults) await loadLlmDefaults();
+		showLlmSettings = true;
+	}
+
+	function handleSaveLlmSettings(next: LlmOcrSettings, key: string, remember: boolean) {
+		llmSettings = next;
+		llmApiKey = key;
+		rememberLlmApiKey = remember;
+		showLlmSettings = false;
+		showToast('LLM OCR settings saved');
+	}
+
+	/** JSON for the `llm` form field, or null when another engine is active. */
+	function llmPayloadJson(): string | null {
+		if (optEngine !== 'llm') return null;
+		return JSON.stringify(buildLlmPayload(llmSettings, llmApiKey));
+	}
+
 	/** Submit a PDF OCR job and wait for its result (SSE with polling fallback).
 	 *
 	 * Updates the shared progress state so the progress pane animates.
@@ -1102,13 +1166,15 @@
 		file: Blob,
 		filename: string,
 		postprocessJson: string,
-		base: string
+		base: string,
+		llmJson: string | null = null
 	): Promise<any> {
 		const fd = new FormData();
 		// Pass filename explicitly so the backend always sees it,
 		// even if the File object was wrapped/proxied by state.
 		fd.append('file', file, filename);
 		fd.append('postprocess', postprocessJson);
+		if (llmJson) fd.append('llm', llmJson);
 		const resp = await fetch(base, { method: 'POST', body: fd });
 		if (!resp.ok) throw new Error(await parseErrorResponse(resp));
 		const { job_id } = await resp.json();
@@ -1170,7 +1236,8 @@
 				fileToUpload,
 				fileToUpload.name || 'upload.pdf',
 				JSON.stringify(currentPostprocessOpts()),
-				ocrJobBase(optEngine)
+				ocrJobBase(optEngine),
+				llmPayloadJson()
 			);
 			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
 			// Prefer raw backend output so re-render stays client-side/offline.
@@ -1271,7 +1338,8 @@
 				pdf.blob,
 				pdf.name || 'document.pdf',
 				JSON.stringify(opts),
-				ocrJobBase(engine)
+				ocrJobBase(engine),
+				engine === 'llm' ? JSON.stringify(buildLlmPayload(llmSettings, llmApiKey)) : null
 			);
 			const rawMarkdown = result.raw_markdown ?? result.markdown;
 			const rawPageMap = result.raw_page_map ?? result.page_map;
@@ -2689,6 +2757,23 @@
 						<option value="llm">OCR: LLM</option>
 					</select>
 				</label>
+				{#if optEngine === 'llm'}
+					<div class="flex items-center gap-2">
+						<button
+							onclick={openLlmSettings}
+							class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700"
+							title="Configure LLM OCR connection, model, and prompts"
+						>
+							<Settings2 size={14} /> LLM settings
+						</button>
+						<span
+							class="max-w-[14rem] truncate text-[11px] text-slate-500"
+							title={llmSettings.model ?? 'Using server default model'}
+						>
+							{llmSettings.model ?? 'Using server default model'}
+						</span>
+					</div>
+				{/if}
 				<div class="flex items-center gap-2">
 					<button onclick={openDocPicker} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700">Attach Markdown</button>
 					<button onclick={cancelPendingPdf} class="text-xs px-3 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
@@ -2829,6 +2914,7 @@
 									onGenerateOffline={(id) => void handleGenerateOfflineItem(id)}
 									onDeleteOffline={(id) => void handleDeleteOfflineItem(id)}
 									onReprocessItem={handleReprocessItem}
+									onConfigureLlm={openLlmSettings}
 									onOpenLibrary={() => openPanel('library')}
 									onUploadDoc={handlePlaylistDocUpload}
 									onPasteText={(title, text) => handlePasteText(activePlaylistId, text, title)}
@@ -3073,6 +3159,17 @@
 		onFirstPageNumberChange={(v) => (optFirstPageNumber = v)}
 		{hasDirtyEdits}
 		onApply={applyPostprocess}
+	/>
+
+	<LlmOcrSettingsModal
+		open={showLlmSettings}
+		onClose={() => (showLlmSettings = false)}
+		settings={llmSettings}
+		apiKey={llmApiKey}
+		rememberApiKey={rememberLlmApiKey}
+		defaults={llmDefaults}
+		apiBase={API_BASE}
+		onSave={handleSaveLlmSettings}
 	/>
 </div>
 

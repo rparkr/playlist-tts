@@ -63,6 +63,23 @@ DEFAULT_USER_MESSAGE: str = (
 #: than the Docling alias.
 LLM_SYNC_TIMEOUT_S: int = 1800
 
+#: Placeholder key for OpenAI-compatible servers that do not require auth.
+NO_API_KEY: str = "local-no-key-required"
+
+#: Tiny 1x1 transparent PNG used by the "test connection" probe. It is enough
+#: for a vision-capable model to accept the multimodal request without paying
+#: for a meaningful image.
+TEST_IMAGE_PNG: bytes = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
+)
+
+
+def _bool(raw: str | None, default: bool) -> bool:
+    """Parse a boolean environment value (`1/true/yes/on`)."""
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 
 @dataclass
 class LLMConfig:
@@ -70,6 +87,10 @@ class LLMConfig:
 
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
+    #: API key for OpenAI-compatible servers. Empty means "no auth required"
+    #: (llama.cpp and other local servers). Kept out of `repr()` so it cannot
+    #: leak through logs or tracebacks.
+    api_key: str = field(default="", repr=False)
     system_message: str = DEFAULT_SYSTEM_MESSAGE
     user_message: str = DEFAULT_USER_MESSAGE
     enable_thinking: bool = False
@@ -85,9 +106,17 @@ class LLMConfig:
         cls,
         base_url: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
+        system_message: str | None = None,
+        user_message: str | None = None,
+        enable_thinking: bool | None = None,
         concurrency: int | None = None,
     ) -> LLMConfig:
-        """Build config from explicit values with environment fallback."""
+        """Build config from explicit values with environment fallback.
+
+        Empty strings are treated as "not provided" so the UI can send `null`
+        or `""` to mean "use the server default".
+        """
 
         def _int(raw: str | None, default: int) -> int:
             try:
@@ -96,8 +125,20 @@ class LLMConfig:
                 return default
 
         return cls(
-            base_url=base_url or os.getenv("LLM_OCR_BASE_URL", DEFAULT_BASE_URL),
+            base_url=(base_url or os.getenv("LLM_OCR_BASE_URL", DEFAULT_BASE_URL)).rstrip("/"),
             model=model or os.getenv("LLM_OCR_MODEL", DEFAULT_MODEL),
+            api_key=api_key or os.getenv("LLM_OCR_API_KEY", ""),
+            system_message=(
+                system_message or os.getenv("LLM_OCR_SYSTEM_MESSAGE") or DEFAULT_SYSTEM_MESSAGE
+            ),
+            user_message=(
+                user_message or os.getenv("LLM_OCR_USER_MESSAGE") or DEFAULT_USER_MESSAGE
+            ),
+            enable_thinking=(
+                enable_thinking
+                if enable_thinking is not None
+                else _bool(os.getenv("LLM_OCR_ENABLE_THINKING"), False)
+            ),
             concurrency=_int(
                 str(concurrency) if concurrency is not None else os.getenv("LLM_OCR_CONCURRENCY"),
                 2,
@@ -188,11 +229,13 @@ def extract_pdf_pages(pdf_path: Path) -> list[PDFPageContent]:
     return pages
 
 
-def create_llm_client(base_url: str) -> AsyncOpenAI:
+def create_llm_client(base_url: str, api_key: str | None = None) -> AsyncOpenAI:
     """Build the async OpenAI-compatible client (import is lazy).
 
     Args:
         base_url: base URL of the OpenAI-compatible server (e.g. llama.cpp).
+        api_key: optional API key. Empty/None uses a placeholder, which local
+            servers accept.
 
     Raises:
         RuntimeError: when the `openai` package is not installed.
@@ -201,9 +244,10 @@ def create_llm_client(base_url: str) -> AsyncOpenAI:
         from openai import AsyncOpenAI
     except ImportError as e:
         raise RuntimeError(
-            "LLM OCR needs the 'openai' package. Install it with `uv sync --extra llm-ocr`."
+            "LLM OCR needs the 'openai' package, which is part of the default dependencies. "
+            "Run `uv sync`."
         ) from e
-    return AsyncOpenAI(base_url=base_url, api_key="local-no-key-required")
+    return AsyncOpenAI(base_url=base_url.rstrip("/"), api_key=api_key or NO_API_KEY)
 
 
 async def complete_with_images(
@@ -213,6 +257,7 @@ async def complete_with_images(
     system_message: str,
     user_message: str,
     enable_thinking: bool = False,
+    max_tokens: int | None = None,
 ) -> str:
     """Send one chat turn with image(s) and return the stripped text response.
 
@@ -223,6 +268,8 @@ async def complete_with_images(
         system_message: the system message for the chat conversation.
         user_message: the user's prompt for the chat conversation.
         enable_thinking: whether to allow `<think>` blocks prior to responding.
+        max_tokens: optional cap on generated tokens (used by the connection
+            probe to keep the test cheap).
 
     Returns:
         Stripped LLM response text.
@@ -241,13 +288,84 @@ async def complete_with_images(
         {"role": "system", "content": system_message},
         {"role": "user", "content": content},
     ]
-    response = await client.chat.completions.create(
-        model=model,
-        extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
-        temperature=0,
-        messages=messages,
-    )
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": enable_thinking}},
+        "temperature": 0,
+        "messages": messages,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+
+    try:
+        response = await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        # `chat_template_kwargs` is a llama.cpp/Qwen extension. Generic
+        # OpenAI-compatible servers reject unknown body fields with a 400;
+        # retry once without the extension so the engine still works there.
+        if getattr(e, "status_code", None) == 400 and "extra_body" in kwargs:
+            kwargs.pop("extra_body")
+            response = await client.chat.completions.create(**kwargs)
+        else:
+            raise
     return (response.choices[0].message.content or "").strip()
+
+
+def model_supports_vision(data: dict[str, Any]) -> bool | None:
+    """Best-effort vision capability detection from an OpenAI `/models` entry.
+
+    OpenAI-compatible servers report capability metadata inconsistently:
+    OpenRouter exposes `architecture.input_modalities`, some expose
+    `capabilities.vision`, and llama.cpp/vLLM expose nothing. Return `None`
+    when the server does not say, so the UI can show "vision unverified"
+    instead of hiding a potentially usable model.
+
+    Args:
+        data: one model object from `GET /models` as a dict.
+
+    Returns:
+        True/False when the server reports the capability, otherwise None.
+    """
+    architecture = data.get("architecture")
+    if isinstance(architecture, dict):
+        modalities = architecture.get("input_modalities")
+        if isinstance(modalities, list):
+            return "image" in modalities
+
+    capabilities = data.get("capabilities")
+    if isinstance(capabilities, dict) and isinstance(capabilities.get("vision"), bool):
+        return capabilities["vision"]
+    if isinstance(capabilities, list) and "multimodal" in capabilities:
+        return True
+
+    for key in ("input_modalities", "modalities"):
+        modalities = data.get(key)
+        if isinstance(modalities, list):
+            return "image" in modalities
+
+    return None
+
+
+async def probe_llm(config: LLMConfig) -> None:
+    """Validate the connection, model, and vision support with one tiny image.
+
+    Args:
+        config: connection/model/prompt settings to test.
+
+    Raises:
+        Exception: whatever the OpenAI client raises, so the caller can map it
+            to an HTTP error.
+    """
+    client = create_llm_client(config.base_url, config.api_key)
+    await complete_with_images(
+        client,
+        [(TEST_IMAGE_PNG, "image/png")],
+        model=config.model,
+        system_message=config.system_message,
+        user_message="Reply with the single word OK.",
+        enable_thinking=config.enable_thinking,
+        max_tokens=16,
+    )
 
 
 async def ocr_pdf_pages(
@@ -309,7 +427,7 @@ async def ocr_pdf_pages(
         nonlocal active_client
         created = active_client
         if created is None:
-            created = active_client = create_llm_client(config.base_url)
+            created = active_client = create_llm_client(config.base_url, config.api_key)
         return created
 
     async def _one(page_number: int, content: PDFPageContent) -> tuple[int, str, float]:
@@ -504,6 +622,7 @@ async def _run_llm_ocr_job(
         model=config.model,
         base_url=config.base_url,
         concurrency=config.concurrency,
+        api_key_set=bool(config.api_key),
     )
 
     for q in job.event_queues:

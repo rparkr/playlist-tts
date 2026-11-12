@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -12,15 +13,18 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.api import ocr_llm as ocr_llm_api
 from backend.app.main import app
 from backend.app.models.schemas import PostprocessOptions
 from backend.app.services import llm_ocr_service as svc
 from backend.app.services.llm_ocr_service import (
     LLMConfig,
     PDFPageContent,
+    complete_with_images,
     convert_pdf_with_llm,
     create_llm_ocr_job,
     get_llm_job,
+    model_supports_vision,
     ocr_pdf_pages,
 )
 
@@ -391,7 +395,7 @@ def test_llm_job_orders_pages_and_marks(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         svc,
         "create_llm_client",
-        lambda _base_url: cast(
+        lambda _base_url, _api_key=None: cast(
             "AsyncOpenAI", FakeClient([(0.0, "Alpha."), (0.0, "Beta."), (0.0, "Gamma.")])
         ),
     )
@@ -420,10 +424,269 @@ def test_llm_sync_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         svc,
         "create_llm_client",
-        lambda _base_url: cast("AsyncOpenAI", FakeClient([(0.0, "Solo.")])),
+        lambda _base_url, _api_key=None: cast("AsyncOpenAI", FakeClient([(0.0, "Solo.")])),
     )
     resp = llm_api_client.post(
         "/api/ocr/llm", files={"file": ("scan.pdf", _blank_pdf_bytes(1), "application/pdf")}
     )
     assert resp.status_code == 200
     assert "Solo." in resp.json()["markdown"]
+
+
+# ---------------------------------------------------------------------------
+# LLM settings: config parsing, model listing, connection probe
+# ---------------------------------------------------------------------------
+
+
+def test_config_from_form_parses_all_options() -> None:
+    """The multipart `llm` field carries credentials, prompts, and advanced knobs."""
+    raw = json.dumps(
+        {
+            "base_url": "http://host/v1/",
+            "api_key": "secret",
+            "model": "vision-model",
+            "system_message": "custom system",
+            "user_message": "custom user",
+            "enable_thinking": True,
+            "concurrency": 4,
+        }
+    )
+    config = ocr_llm_api._config_from_form(raw)
+    assert config.base_url == "http://host/v1"
+    assert config.api_key == "secret"
+    assert config.model == "vision-model"
+    assert config.system_message == "custom system"
+    assert config.user_message == "custom user"
+    assert config.enable_thinking is True
+    assert config.concurrency == 4
+    assert "secret" not in repr(config)
+
+
+def test_config_from_form_rejects_invalid_json() -> None:
+    """Malformed settings fail loudly instead of silently using defaults."""
+    with pytest.raises(Exception) as exc_info:
+        ocr_llm_api._config_from_form("not-json")
+    assert getattr(exc_info.value, "status_code", None) == 400
+
+
+def test_from_env_resolves_key_and_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment fallbacks cover credentials and both prompts."""
+    monkeypatch.setenv("LLM_OCR_API_KEY", "env-key")
+    monkeypatch.setenv("LLM_OCR_SYSTEM_MESSAGE", "env-system")
+    monkeypatch.setenv("LLM_OCR_USER_MESSAGE", "env-user")
+    monkeypatch.setenv("LLM_OCR_ENABLE_THINKING", "true")
+    config = LLMConfig.from_env()
+    assert config.api_key == "env-key"
+    assert config.system_message == "env-system"
+    assert config.user_message == "env-user"
+    assert config.enable_thinking is True
+
+
+def test_model_supports_vision_reads_common_metadata() -> None:
+    """Vision flags come from the varied shapes OpenAI-compatible servers use."""
+    assert model_supports_vision({"architecture": {"input_modalities": ["text", "image"]}}) is True
+    assert model_supports_vision({"architecture": {"input_modalities": ["text"]}}) is False
+    assert model_supports_vision({"capabilities": {"vision": True}}) is True
+    assert model_supports_vision({"capabilities": {"vision": False}}) is False
+    assert model_supports_vision({"capabilities": ["completion", "multimodal"]}) is True
+    assert model_supports_vision({"input_modalities": ["image"]}) is True
+    assert model_supports_vision({"id": "llama"}) is None
+
+
+class FakeModel:
+    """Minimal `/models` entry with a Pydantic-style dump."""
+
+    def __init__(self, model_id: str, data: dict[str, Any]):
+        self.id = model_id
+        self._data = data
+
+    def model_dump(self) -> dict[str, Any]:
+        """Return the model as a dict, like the OpenAI SDK model."""
+        return {"id": self.id, **self._data}
+
+
+class FakeModelsResource:
+    """Async `/models` resource returning a canned list."""
+
+    def __init__(self, models: list[FakeModel]):
+        self._models = models
+
+    async def list(self, timeout: float | None = None) -> Any:
+        """Return the canned models regardless of the timeout."""
+        return SimpleNamespace(data=self._models)
+
+
+def test_models_endpoint_lists_and_flags_vision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The endpoint returns sorted models with True/False/None vision hints."""
+    client = SimpleNamespace(
+        models=FakeModelsResource(
+            [
+                FakeModel("qwen-vl", {"architecture": {"input_modalities": ["text", "image"]}}),
+                FakeModel("text-only", {"architecture": {"input_modalities": ["text"]}}),
+                FakeModel("mystery", {}),
+            ]
+        )
+    )
+    monkeypatch.setattr(ocr_llm_api, "create_llm_client", lambda *_a, **_k: client)
+
+    resp = llm_api_client.post("/api/ocr/llm/models", json={"base_url": "http://fake/v1"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["base_url"] == "http://fake/v1"
+    assert [(m["id"], m["vision"]) for m in data["models"]] == [
+        ("mystery", None),
+        ("qwen-vl", True),
+        ("text-only", False),
+    ]
+
+
+def test_models_endpoint_maps_auth_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """401s become a friendly message, not a raw SDK traceback."""
+
+    class AuthError(Exception):
+        status_code = 401
+
+    class FailingModels:
+        async def list(self, timeout: float | None = None) -> Any:
+            raise AuthError("bad key")
+
+    monkeypatch.setattr(
+        ocr_llm_api,
+        "create_llm_client",
+        lambda *_a, **_k: SimpleNamespace(models=FailingModels()),
+    )
+    resp = llm_api_client.post(
+        "/api/ocr/llm/models",
+        json={"base_url": "http://fake/v1", "api_key": "secret"},
+    )
+    assert resp.status_code == 502
+    assert "Authentication failed" in resp.json()["detail"]
+
+
+def test_models_endpoint_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generic error text never echoes the API key back to the client."""
+
+    class FailingModels:
+        async def list(self, timeout: float | None = None) -> Any:
+            raise RuntimeError("upstream rejected secret")
+
+    monkeypatch.setattr(
+        ocr_llm_api,
+        "create_llm_client",
+        lambda *_a, **_k: SimpleNamespace(models=FailingModels()),
+    )
+    resp = llm_api_client.post(
+        "/api/ocr/llm/models",
+        json={"base_url": "http://fake/v1", "api_key": "secret"},
+    )
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "secret" not in detail
+    assert "***" in detail
+
+
+def test_options_endpoint_returns_defaults() -> None:
+    """The UI can prefill/reset prompts without ever receiving the API key."""
+    resp = llm_api_client.get("/api/ocr/llm/options")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {
+        "base_url",
+        "model",
+        "system_message",
+        "user_message",
+        "concurrency",
+        "enable_thinking",
+    }
+    assert "api_key" not in data
+
+
+def test_test_endpoint_probes_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful probe returns ok plus the model and latency."""
+
+    async def _ok(_config: LLMConfig) -> None:
+        return None
+
+    monkeypatch.setattr(ocr_llm_api, "probe_llm", _ok)
+    resp = llm_api_client.post(
+        "/api/ocr/llm/test",
+        json={"base_url": "http://fake/v1", "model": "vision-model", "api_key": "secret"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["model"] == "vision-model"
+    assert isinstance(data["latency_ms"], int)
+
+
+def test_test_endpoint_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe failures surface as a 502 with a readable detail."""
+
+    async def _boom(_config: LLMConfig) -> None:
+        raise RuntimeError("no such model")
+
+    monkeypatch.setattr(ocr_llm_api, "probe_llm", _boom)
+    resp = llm_api_client.post("/api/ocr/llm/test", json={"model": "missing"})
+    assert resp.status_code == 502
+    assert "no such model" in resp.json()["detail"]
+
+
+class CapturingClient:
+    """Chat client that records kwargs and can fail once with a 400."""
+
+    def __init__(self, fail_first: bool = False):
+        self.calls: list[dict[str, Any]] = []
+        self._fail_first = fail_first
+        self.chat = SimpleNamespace(completions=self)
+
+    async def create(self, **kwargs: Any) -> Any:
+        """Record the request; optionally raise a 400 on the first call."""
+        self.calls.append(kwargs)
+        if self._fail_first and len(self.calls) == 1:
+            error = RuntimeError("unknown field")
+            error.status_code = 400
+            raise error
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=" ok "))])
+
+
+def test_complete_with_images_forwards_prompts() -> None:
+    """System/user prompts reach the LLM exactly as configured."""
+    client = CapturingClient()
+    result = asyncio.run(
+        complete_with_images(
+            client,  # type: ignore[arg-type]
+            [(b"img", "image/png")],
+            model="vision-model",
+            system_message="SYS",
+            user_message="USR",
+        )
+    )
+    assert result == "ok"
+    call = client.calls[0]
+    assert call["messages"][0]["content"] == "SYS"
+    assert call["messages"][1]["content"][-1]["text"] == "USR"
+    assert "extra_body" in call
+
+
+def test_complete_with_images_retries_without_llama_extras() -> None:
+    """Generic OpenAI servers that reject `chat_template_kwargs` still work."""
+    client = CapturingClient(fail_first=True)
+    result = asyncio.run(
+        complete_with_images(
+            client,  # type: ignore[arg-type]
+            [(b"img", "image/png")],
+            model="vision-model",
+            system_message="SYS",
+            user_message="USR",
+        )
+    )
+    assert result == "ok"
+    assert "extra_body" in client.calls[0]
+    assert "extra_body" not in client.calls[1]
+
+
+def test_create_llm_client_uses_api_key() -> None:
+    """The client receives the configured key and a normalized base URL."""
+    client = svc.create_llm_client("http://example/v1/", "secret")
+    assert client.api_key == "secret"
+    assert str(client.base_url).rstrip("/") == "http://example/v1"

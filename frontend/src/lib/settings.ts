@@ -44,6 +44,8 @@ export const LS_KEYS = {
 	voiceByEngine: 'tts_voice_by_engine',
 	engine: 'tts_engine',
 	postprocess: 'tts_postprocess',
+	llmOcr: 'tts_ocr_llm',
+	llmOcrKey: 'tts_ocr_llm_key',
 	offlineFmt: 'tts_offline_fmt',
 	offlineUse: 'tts_offline_use'
 } as const;
@@ -148,6 +150,98 @@ export function parsePostprocessFlags(value: string | null | undefined): Postpro
 /** Serialize postprocess flags for localStorage. */
 export function serializePostprocessFlags(flags: PostprocessFlags): string {
 	return JSON.stringify(flags);
+}
+
+/** LLM OCR connection/prompt overrides. `null` means "use the server default". */
+export interface LlmOcrSettings {
+	baseUrl: string | null;
+	model: string | null;
+	systemMessage: string | null;
+	userMessage: string | null;
+	concurrency: number | null;
+	enableThinking: boolean | null;
+}
+
+/** Fresh settings that defer every value to the backend defaults. */
+export function defaultLlmOcrSettings(): LlmOcrSettings {
+	return {
+		baseUrl: null,
+		model: null,
+		systemMessage: null,
+		userMessage: null,
+		concurrency: null,
+		enableThinking: null
+	};
+}
+
+/** Parse stored LLM OCR settings; return null when absent/invalid. */
+export function parseLlmOcrSettings(value: string | null | undefined): LlmOcrSettings | null {
+	if (!value) return null;
+	try {
+		const p = JSON.parse(value) as Record<string, unknown>;
+		if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+		const out = defaultLlmOcrSettings();
+		for (const key of ['baseUrl', 'model', 'systemMessage', 'userMessage'] as const) {
+			const v = p[key];
+			if (v === undefined) continue;
+			if (v !== null && typeof v !== 'string') return null;
+			out[key] = v;
+		}
+		const concurrency = p.concurrency;
+		if (concurrency !== undefined) {
+			if (
+				concurrency !== null &&
+				(typeof concurrency !== 'number' || !Number.isFinite(concurrency) || concurrency < 0)
+			) {
+				return null;
+			}
+			out.concurrency = concurrency === null ? null : Math.floor(concurrency);
+		}
+		const thinking = p.enableThinking;
+		if (thinking !== undefined) {
+			if (thinking !== null && typeof thinking !== 'boolean') return null;
+			out.enableThinking = thinking;
+		}
+		return out;
+	} catch {
+		return null;
+	}
+}
+
+/** Serialize LLM OCR settings for localStorage. */
+export function serializeLlmOcrSettings(settings: LlmOcrSettings): string {
+	return JSON.stringify(settings);
+}
+
+/** Snake-case payload accepted by the backend's `llm` form field. */
+export interface LlmOcrPayload {
+	base_url?: string;
+	api_key?: string;
+	model?: string;
+	system_message?: string;
+	user_message?: string;
+	concurrency?: number;
+	enable_thinking?: boolean;
+}
+
+/**
+ * Build the backend payload from settings, omitting values that should fall
+ * back to server defaults. The API key is passed separately so it can live in
+ * session storage rather than the settings object.
+ */
+export function buildLlmPayload(
+	settings: LlmOcrSettings,
+	apiKey: string | null | undefined
+): LlmOcrPayload {
+	const payload: LlmOcrPayload = {};
+	if (settings.baseUrl?.trim()) payload.base_url = settings.baseUrl.trim();
+	if (apiKey?.trim()) payload.api_key = apiKey.trim();
+	if (settings.model?.trim()) payload.model = settings.model.trim();
+	if (settings.systemMessage?.trim()) payload.system_message = settings.systemMessage;
+	if (settings.userMessage?.trim()) payload.user_message = settings.userMessage;
+	if (settings.concurrency !== null) payload.concurrency = settings.concurrency;
+	if (settings.enableThinking !== null) payload.enable_thinking = settings.enableThinking;
+	return payload;
 }
 
 export function progressKey(docId: string): string {

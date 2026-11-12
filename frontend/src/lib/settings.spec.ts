@@ -21,6 +21,10 @@ import {
 	localeToVoiceGroup,
 	engineVoiceFileFormat,
 	voiceFileFormat,
+	buildLlmPayload,
+	defaultLlmOcrSettings,
+	parseLlmOcrSettings,
+	serializeLlmOcrSettings,
 	type VoiceByEngine,
 	type VoiceGroup
 } from './settings';
@@ -305,5 +309,91 @@ describe('voice grouping', () => {
 		expect(engineVoiceFileFormat('phonon-browser')).toBe('phonon');
 		expect(engineVoiceFileFormat('pocket')).toBe('pocket');
 		expect(engineVoiceFileFormat('device')).toBe('pocket');
+	});
+});
+
+describe('LLM OCR settings', () => {
+	it('starts with every value deferred to server defaults', () => {
+		expect(defaultLlmOcrSettings()).toEqual({
+			baseUrl: null,
+			model: null,
+			systemMessage: null,
+			userMessage: null,
+			concurrency: null,
+			enableThinking: null
+		});
+	});
+
+	it('round-trips through JSON', () => {
+		const settings = {
+			baseUrl: 'http://127.0.0.1:9931/v1',
+			model: 'qwen3.5-4b',
+			systemMessage: 'system',
+			userMessage: 'user',
+			concurrency: 2,
+			enableThinking: false
+		};
+		expect(parseLlmOcrSettings(serializeLlmOcrSettings(settings))).toEqual(settings);
+	});
+
+	it('accepts partial and legacy payloads', () => {
+		expect(parseLlmOcrSettings('{"model":"m"}')).toEqual({
+			baseUrl: null,
+			model: 'm',
+			systemMessage: null,
+			userMessage: null,
+			concurrency: null,
+			enableThinking: null
+		});
+	});
+
+	it('rejects malformed payloads', () => {
+		expect(parseLlmOcrSettings(null)).toBeNull();
+		expect(parseLlmOcrSettings('not-json')).toBeNull();
+		expect(parseLlmOcrSettings('[]')).toBeNull();
+		expect(parseLlmOcrSettings('{"baseUrl": 5}')).toBeNull();
+		expect(parseLlmOcrSettings('{"concurrency": -1}')).toBeNull();
+		expect(parseLlmOcrSettings('{"enableThinking": "yes"}')).toBeNull();
+	});
+
+	it('builds a snake-case payload and omits unset values', () => {
+		expect(buildLlmPayload(defaultLlmOcrSettings(), null)).toEqual({});
+		expect(
+			buildLlmPayload(
+				{
+					baseUrl: '  http://host/v1  ',
+					model: '  model  ',
+					systemMessage: 'sys',
+					userMessage: 'usr',
+					concurrency: 0,
+					enableThinking: false
+				},
+				'  secret  '
+			)
+		).toEqual({
+			base_url: 'http://host/v1',
+			api_key: 'secret',
+			model: 'model',
+			system_message: 'sys',
+			user_message: 'usr',
+			concurrency: 0,
+			enable_thinking: false
+		});
+	});
+
+	it('treats blank prompts as defaults', () => {
+		expect(
+			buildLlmPayload(
+				{
+					baseUrl: null,
+					model: null,
+					systemMessage: '   ',
+					userMessage: '',
+					concurrency: null,
+					enableThinking: null
+				},
+				''
+			)
+		).toEqual({});
 	});
 });
