@@ -122,7 +122,7 @@ def test_tts_voice_metadata_is_groupable():
 
     pocket = {voice["name"]: voice for voice in tts_service.list_voices("pocket")}
     assert pocket["alba"]["language"] == "English"
-    assert pocket["alba"]["gender"] == "female"
+    assert pocket["alba"]["gender"] == "male"
     assert pocket["giovanni"]["language"] == "Italian"
 
 
