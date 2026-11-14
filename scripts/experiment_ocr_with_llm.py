@@ -28,8 +28,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-LLAMA_CPP_BASE_URL: str = "http://127.0.0.1:8080/v1"
-DEFAULT_MODEL: str = "qwen3.5-4b"
+LLAMA_CPP_BASE_URL: str = "http://127.0.0.1:9931/v1"
+DEFAULT_MODEL: str = "lfm3-v1-2b"
 DEFAULT_SYSTEM_MESSAGE = (
     "Extract text from the page in reading order. Do not include any preamble like: "
     '"Here\'s the extracted text:";  instead, begin directly with the text from the page.'
