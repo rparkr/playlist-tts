@@ -59,6 +59,29 @@ describe('LiteParse integration', () => {
 		}
 	});
 
+	it('exposes a batching path for large documents', async () => {
+		const parser = createParser();
+		try {
+			const session = await parser.openBatchSession(bytes, 1);
+			try {
+				expect(session.totalPages).toBe(2);
+				const pages: string[] = [];
+				for (;;) {
+					const batch = await session.nextBatch();
+					if (!batch) break;
+					pages.push(...batch.result.pages.map((page) => page.markdown));
+				}
+				expect(pages).toHaveLength(2);
+				expect(pages[0]).toContain('Browser PDF Extraction');
+				expect(pages[1]).toContain('Second Page');
+			} finally {
+				session.free();
+			}
+		} finally {
+			parser.free();
+		}
+	});
+
 	it('joins pages with aligned markers and no page-break comments', async () => {
 		const parser = createParser();
 		let pages: string[] = [];
