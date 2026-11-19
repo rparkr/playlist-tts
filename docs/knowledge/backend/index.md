@@ -1,8 +1,12 @@
 # Backend
 
 ## Concepts
-- [API Contracts](api-contracts.md) - REST endpoints, schemas, and error handling for OCR, parse, and TTS.
-- [LLM OCR Service](llm-ocr-service.md) - Vision-LLM OCR with per-job credentials, model discovery, and editable prompts.
-- [OCR Service](ocr-service.md) - FastAPI OCR job lifecycle using docling granite-docling with progress and page mapping.
-- [Post-Processing Pipeline](postprocessing.md) - Composable Markdown post-processing for TTS readiness including reflow, uppercase, item-line separation, and page markers.
+- [API Contracts](api-contracts.md) - REST endpoints, schemas, and error handling for LLM OCR and TTS.
+- [LLM Service](llm-service.md) - Stateless vision-LLM page OCR, model discovery, and editable prompts.
 - [TTS Service](tts-service.md) - Engine-selected speech synthesis with Phonon streaming, Pocket legacy cloning, file jobs, and an in-browser WASM adapter.
+
+## Boundaries
+
+The backend does not parse PDFs, extract text, or maintain OCR jobs. PDF
+extraction and Markdown rendering happen in the browser; the backend only
+proxies page images to an OpenAI-compatible vision server.

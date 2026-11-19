@@ -142,4 +142,4 @@ Pocket and Phonon `.safetensors` files are **not** interchangeable:
 `convert_wav_to_safetensors` still uses Pocket's voice encoder (`get_state_for_audio_prompt` with
 `truncate=True`), and `_pocket_state` resolves cloned or built-in voices for streaming and jobs.
 Keep this path until cloned voices have a replacement, then remove `pocket-tts`; PyTorch remains a
-dependency of `granite-docling` regardless.
+dependency of the Pocket and Phonon speech runtimes.

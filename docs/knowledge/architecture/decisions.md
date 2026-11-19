@@ -22,17 +22,37 @@ generated:
 
 *Rejected:* Vanilla/HTMX — no component model for PDF sync.
 
-## 2. PDF Page Count: `pypdf` vs `pypdfium2`
+## 2. PDF Extraction: Browser LiteParse WASM vs Server `pypdf`/Docling
 
-`pypdf` pure Python ~200 kB vs `pypdfium2` C++ binary ~15 MB wheel. Both `<10 ms` for 50 pp. Choose `pypdf` for `get_page_count` (`src/ocr/__init__.py:13` replacement).
+**Chosen: LiteParse WASM in a browser worker.** It reads the PDF text layer in
+spatial reading order, reports per-page complexity, and runs with no backend
+dependency or GPU. pdf.js remains the preview renderer and provides page
+rasters for OCR. The committed fixture in `frontend/src/lib/pdf/fixtures/`
+covers the wasm path in Vitest.
 
-## 3. OCR: `docling` vs Direct `transformers` + `granite-docling`
+*Rejected:* `pypdf` server extraction (no reading order, duplicates the
+client parser), `pypdfium2` (large native wheel with no routing signal).
 
-Keep `docling`. Multi-column layouts are common in book PDFs; Docling supplies reading order, column detection, VLM grounding that raw `transformers` lacks. Heavy deps accepted; revisit only if pain exceeds benefit.
+## 3. OCR: Vision LLM Only vs Docling
 
-## 4. OCR Progress: Synchronous vs Job+SSE
+**Chosen: vision LLM as the only OCR engine.** Docling's `granite-docling`
+pipeline is slow without a GPU and pulls torch/transformers plus a job system.
+Modern small VLMs are at least as capable for page transcription, and the app
+already targets an OpenAI-compatible server. The browser sends only the pages
+that need OCR; accepted pages keep LiteParse's structure.
 
-Blocking `converter.convert` (`src/ocr/__init__.py:73`, `src/app.py:100`) yields 0→100% artifact. Adopt **Job + SSE**: `POST /api/ocr/jobs → {jobId}`, `GET /events` `text/event-stream`, `GET /jobs/{id}` poll fallback. Works for <50 pp without queue; upgrade to `arq` if 400 pp later.
+*Rejected:* Docling as a secondary engine (dependency weight, GPU requirement,
+duplicate postprocessing), browser Tesseract (quality and model size).
+
+## 4. OCR API: Stateless Page Proxy vs Job + SSE
+
+**Chosen: `POST /api/llm/ocr` with one page image.** The browser owns page
+order, concurrency, retries, and progress, so the server needs no job registry,
+temp PDFs, SSE, or ETA heuristics. This is compatible with free-tier serverless
+hosting and keeps the API surface small.
+
+*Rejected:* job + SSE (stateful, PDF uploads, duplicated processing),
+`pypdf`-extracted embedded images (misses page composition and annotations).
 
 ## 5. TTS Stream Handling
 

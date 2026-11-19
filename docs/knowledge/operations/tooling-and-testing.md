@@ -4,8 +4,8 @@ title: Tooling and Testing
 description: Package management, linting, type checking, and test strategy for backend and frontend.
 tags: [operations, tooling, testing, ruff, ty]
 generated:
-  by: muse-spark-1.2-contributor-free
-  at: 2026-08-31T07:58:30Z
+  by: opencode
+  at: 2026-11-18T00:00:00Z
 ---
 
 # Tooling and Testing
@@ -17,18 +17,26 @@ generated:
 
 ## Backend
 
-- Deps in `pyproject.toml`: add `fastapi`, `uvicorn`, `python-multipart`, `pydantic`, `pypdf`, `httpx2` (successor to `httpx` per 2026), `pyav` optional, `pytest`, `ty`, `ruff`.
+- Deps in `pyproject.toml`: `fastapi`, `uvicorn`, `python-multipart`, `pydantic`,
+  `httpx2` (successor to `httpx` per 2026), `pyav` optional, plus the TTS
+  runtimes. `pypdf`, `docling`, and `typer` are no longer dependencies.
 - Run `ty check` + `ruff check --fix` on edited files after each change.
-- **Tests (`httpx2`):** `pytest` + `httpx2` + `fastapi.testclient` for `POST /api/ocr/jobs` lifecycle, SSE progress, `postprocess` pure functions (fixtures for column reflow with quotes, uppercase, page markers), `/api/tts/stream` streaming header + `Range` download. No test copies without `httpx2`.
+- **Tests:** `pytest` + `httpx2` + `fastapi.testclient` for `/api/llm/*`
+  (config, vision detection, prompt forwarding, image validation, error
+  mapping), removed-route assertions, TTS streaming headers, and `Range`
+  downloads. No network calls: LLM clients are stubbed.
 
 ## Frontend
 
-- **Vitest browser mode** for component/unit tests (`@testing-library/svelte`) — uses `playwright` provider under the hood, simplifies DOM tests (parser, `library` store, editor `scrollTo` mocked).
-- **Playwright e2e** for true PDF sync: canvas pixel + `editor scrollTop` assertions, touch swipe, voice clone flow. Keep both: `vitest browser` for TDD fast (<2 s), `playwright` for nightly sync regression.
-
-## CLI
-
-`backend/app/cli/{ocr,tts}.py` `typer` wrappers tested via `typer.testing.CliRunner`.
+- **Vitest** for unit tests (`vitest --run`), Node environment by default.
+- `bun run check` (svelte-check) is the type gate for `.svelte` files.
+- `liteparse.integration.spec.ts` loads the real WASM from the installed
+  package and parses the committed two-page fixture in
+  `frontend/src/lib/pdf/fixtures/`. It needs no network and no `test-pdfs/`.
+- Routing and merge tests use synthetic `PageComplexityStats` and synthetic OCR
+  result maps, so they stay fast and cover only the decision logic.
+- **Playwright e2e** for true PDF sync: canvas pixel + `scrollTop` assertions,
+  touch swipe, voice clone flow.
 
 ## Docs
 

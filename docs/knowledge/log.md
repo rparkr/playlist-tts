@@ -1,5 +1,24 @@
 # Knowledge Log
 
+## 2026-11-18
+
+- Replaced server-side PDF extraction (docling/`granite-docling`, `pypdf`) with
+  LiteParse WASM running in a browser module worker. Pages are stored as
+  `rawPages`, rendered by `applyPostprocessingPages`, and `<!-- page break -->`
+  is retired (legacy docs migrate once on read).
+- Added reason-aware OCR routing: only `scanned`, `garbled`, `vector-text`, and
+  `annotation-text` pages trigger an offer; `embedded-images`, `no-text`, and
+  `sparse-text` do not. The offer dialog lets the user run LLM OCR or keep the
+  browser text.
+- Replaced OCR jobs/SSE/temp PDFs with the stateless `POST /api/llm/ocr` proxy
+  (one page image → Markdown). pdf.js renders pages client-side at ~2× scale
+  with bounded concurrency and one retry per page.
+- Simplified engines to `auto`, `browser only`, and `OCR: LLM`; removed Docling,
+  the CLI, backend postprocessing, and text-extraction services.
+- Workbox now precaches the ~7 MB LiteParse WASM; Phonon runtimes remain
+  first-use cached. Added a committed two-page PDF fixture (with HTML source) so
+  integration tests run without `test-pdfs/` or network access.
+
 ## 2026-11-07
 
 - Voice pickers now group Device, Pocket, and Phonon voices by language → dialect → gender →

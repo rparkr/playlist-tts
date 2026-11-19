@@ -2,6 +2,7 @@
 
 ## Concepts
 - [Frontend Architecture](architecture.md) - SvelteKit static SPA structure, routing, and responsive layout for editor and player.
+- [PDF Extraction](pdf-extraction.md) - LiteParse WASM worker, per-page complexity routing, pdf.js rasterization, and LLM OCR merge.
 - [Player and Editor](player-and-editor.md) - Markdown editor with PDF sync and dual-engine TTS player controls.
 - [Storage and PWA](storage-and-pwa.md) - IndexedDB and LocalStorage persistence, versioning, and progressive web app caching.
 - [UI Redesign Plan — Desktop Wireframes](ui-redesign-plan.md) - Plan to update the frontend to match low-fidelity desktop wireframes, incorporating Q&A decisions from 2026-09-05.

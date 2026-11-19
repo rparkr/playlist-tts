@@ -4,8 +4,8 @@ title: Deployment
 description: Local LAN and stateless Cloud Run deployment with CORS and GitHub Pages frontend.
 tags: [operations, deployment, cors, cloud-run, pwa]
 generated:
-  by: muse-spark-1.2-contributor-free
-  at: 2026-08-31T07:58:30Z
+  by: opencode
+  at: 2026-11-18T00:00:00Z
 ---
 
 # Deployment
@@ -14,10 +14,12 @@ generated:
 
 | Env | Frontend | Backend | Persistence |
 |-----|----------|---------|-------------|
-| **Dev/LAN** | `bun run dev` `localhost:5173` | `uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload` (`get_local_ip` `src/app.py:138`) | `storage/` gitignored on laptop |
-| **Pages+Cloud Run** | `https://<user>.github.io/ocr-tts/` (`adapter-static` `base:/ocr-tts/` `fallback:index.html`) | `https://api.example.com` Cloud Run (stateless) | None — docs/voices in browser IndexedDB |
+| **Dev/LAN** | `bun run dev` `localhost:5173` | `uv run app` (`0.0.0.0:8000`) | `storage/` gitignored on laptop |
+| **Pages+Cloud Run** | `https://<user>.github.io/ocr-tts/` (`adapter-static` `base:/ocr-tts/` `fallback:index.html`) | `https://api.example.com` Cloud Run (stateless) | None — docs/voices/PDFs in browser IndexedDB |
 
-No auth/multi-user/storage (9.1); in-memory `dict[jobId, Job]` suffices for <50 pp (9.2).
+No auth/multi-user/storage. The backend keeps no OCR state: PDF parsing runs in
+the browser, and `/api/llm/ocr` handles one page image per request. Only TTS
+file jobs keep short-lived in-memory state and a `storage/{id}.wav`.
 
 ## CORS
 
@@ -26,8 +28,13 @@ No auth/multi-user/storage (9.1); in-memory `dict[jobId, Job]` suffices for <50 
 ## Build
 
 - Frontend `bun run build` → `build/` (static shell + `manifest.json` + `sw.js`).
-- Backend Docker multi-stage: `python:3.14 + torch CPU + docling + pocket-tts`; `pyav` optional layer only if `webm/mp3` downloads enabled. `uv` layer cached.
+  The LiteParse WASM (~7 MB) is emitted under `_app/immutable/workers/assets/`
+  and precached by Workbox; Phonon runtime WASMs are excluded from precache.
+- Backend Docker multi-stage: `python:3.14 + torch CPU + pocket-tts`; `pyav`
+  optional layer only if `webm/mp3` downloads are enabled. No docling or GPU
+  stack in the image.
 
 ## Git
 
-`pyproject.toml` `uv.lock`, `docs/knowledge/log.md` tracked; `storage/`, `.venv/`, `build/` ignored.
+`pyproject.toml` `uv.lock`, `docs/knowledge/log.md` tracked; `storage/`, `.venv/`,
+`build/` ignored.

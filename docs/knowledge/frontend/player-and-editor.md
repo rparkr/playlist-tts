@@ -14,7 +14,7 @@ generated:
 
 - **Markdown field:** `textarea` MVP or `CodeMirror 6` (markdown syntax). Debounced save to `IndexedDB` `docs` on input.
 - **PdfPane** (`pdfjs-dist` + worker) renders one page `<canvas>` at a time. Controls: prev/next buttons, swipe `on:touch`/`on:swipe`, keyboard arrows, page number input. No continuous scroll — intentional per requirements.
-- **Sync (one-way):** `GET /api/ocr/jobs/result.pageMap` → `pageMap[{page, charStart, charEnd, startLine}]`. On `pdfPageChange`, `editorRef.setScrollTop(markdown.slice(0, charStart).split('\n').length * lineHeight)` or `scrollIntoView(anchorSpan)`. Not bidirectional. Rendered markdown preview toggle via `marked` + `DOMPurify`.
+- **Sync (bidirectional, page-aligned):** `pageMap[{page, char_start, char_end, start_line}]` comes from local postprocessing over `rawPages`, not from a server. On `pdfPageChange`, scroll the editor to `pageMap[page].char_start`; when playback or editor position crosses a page boundary, switch the PDF to that page. Rendered markdown preview toggle via `marked` + `DOMPurify`.
 - **Visibility:** `{#if doc.pageMap} <SplitPane> {:else} <EditorOnly> {/if}` — paste/upload docs show no PDF pane.
 
 ## Player View
