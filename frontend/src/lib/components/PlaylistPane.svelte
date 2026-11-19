@@ -35,12 +35,11 @@ export interface PlaylistOfflineState {
 	bytes: number;
 }
 
-export type ReprocessEngine = 'auto' | 'text' | 'docling' | 'llm';
+export type ReprocessEngine = 'auto' | 'liteparse' | 'llm';
 
 const ENGINES: { value: ReprocessEngine; label: string }[] = [
-	{ value: 'auto', label: 'auto' },
-	{ value: 'text', label: 'text extraction' },
-	{ value: 'docling', label: 'OCR: docling' },
+	{ value: 'auto', label: 'auto (browser + OCR prompt)' },
+	{ value: 'liteparse', label: 'browser only' },
 	{ value: 'llm', label: 'OCR: LLM' }
 ];
 
@@ -60,7 +59,7 @@ interface Props {
 	onShowPdf: (id: string) => void;
 	onClearItemPdf: (id: string) => void;
 	onReprocessItem: (id: string, engine: ReprocessEngine) => void;
-	/** Open the shared LLM OCR settings modal without starting a job. */
+	/** Open the shared LLM OCR settings modal without starting extraction. */
 	onConfigureLlm: () => void;
 	onOpenLibrary: () => void;
 	offline: Record<string, PlaylistOfflineState>;

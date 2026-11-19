@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-	fallbackEtaSeconds,
-	formatEta,
-	formatRemaining,
-	resolveAnchoredEta,
-	tickDownEta
-} from './ocrEta';
+import { formatEta, formatRemaining, measureEtaSeconds, tickDownEta } from './ocrEta';
 
 describe('ocrEta countdown', () => {
 	it('ticks down 1s per second between steps and never counts up', () => {
@@ -25,22 +19,16 @@ describe('ocrEta countdown', () => {
 		expect(tickDownEta(0, 0, 1000)).toBe(0);
 	});
 
-	it('prefers the server eta for the anchor (steps may revise up or down)', () => {
-		expect(resolveAnchoredEta(14, 11, 16, 31)).toBe(14);
-		expect(resolveAnchoredEta(20, 11, 16, 31)).toBe(20);
+	it('estimates remaining time from measured throughput', () => {
+		// 10 of 16 pages in 30s => 3s/page => 18s left
+		expect(measureEtaSeconds(10, 16, 30)).toBe(18);
+		expect(measureEtaSeconds(16, 16, 48)).toBe(0);
 	});
 
-	it('falls back to a countdown estimate when the step has no eta', () => {
-		// 16 pages * 2.6 + 8 = 49.6s total; 30s elapsed -> ~19.6s left
-		const eta = resolveAnchoredEta(undefined, 10, 16, 30);
-		expect(eta).not.toBeNull();
-		expect(eta!).toBeGreaterThan(19);
-		expect(eta!).toBeLessThan(20);
-	});
-
-	it('returns null fallback while nothing is done yet', () => {
-		expect(fallbackEtaSeconds(0, 16, 5)).toBeNull();
-		expect(fallbackEtaSeconds(10, 0, 5)).toBeNull();
+	it('returns null before the first completed page', () => {
+		expect(measureEtaSeconds(0, 16, 5)).toBeNull();
+		expect(measureEtaSeconds(10, 0, 5)).toBeNull();
+		expect(measureEtaSeconds(Number.NaN, 16, 5)).toBeNull();
 	});
 
 	it('formats as m:ss', () => {

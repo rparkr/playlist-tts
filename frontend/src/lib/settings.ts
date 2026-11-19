@@ -4,7 +4,7 @@
  * state for deep links. LocalStorage carries the last-set state across reloads
  * when no query param overrides it. Per-document postprocessing options live in
  * IndexedDB on the doc; `tts_postprocess` only stores the last-set defaults
- * used for new OCR jobs and for the pre-doc UI.
+ * used for new extractions and for the pre-doc UI.
  */
 
 /** Playback engines. `phonon-browser` runs the WASM model locally; the

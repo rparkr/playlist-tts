@@ -46,7 +46,7 @@ describe('fetchLlmModels', () => {
 
 		expect(result).toEqual(body);
 		expect(fetchMock).toHaveBeenCalledWith(
-			'/api/ocr/llm/models',
+			'/api/llm/models',
 			expect.objectContaining({
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },

@@ -2,6 +2,7 @@
 	import { onMount, tick } from 'svelte';
 	import {
 		createDoc,
+		createDocFromPages,
 		getAllDocs,
 		getDoc,
 		getDocBySlugOrId,
@@ -108,11 +109,25 @@
 	import TtsSettingsModal from '$lib/components/TtsSettingsModal.svelte';
 	import PostprocessingModal from '$lib/components/PostprocessingModal.svelte';
 	import LlmOcrSettingsModal from '$lib/components/LlmOcrSettingsModal.svelte';
+	import OcrOfferModal from '$lib/components/OcrOfferModal.svelte';
 	import MarkdownPane from '$lib/components/MarkdownPane.svelte';
 	import PdfPane from '$lib/components/PdfPane.svelte';
 	import OcrProgressPane from '$lib/components/OcrProgressPane.svelte';
-	import { formatEta, formatRemaining, resolveAnchoredEta, tickDownEta } from '$lib/ocrEta';
-	import { applyPostprocessing } from '$lib/markdown/postprocess';
+	import { formatEta, formatRemaining, measureEtaSeconds, tickDownEta } from '$lib/ocrEta';
+	import { applyPostprocessing, applyPostprocessingPages } from '$lib/markdown/postprocess';
+	import {
+		analyzePdf,
+		countReasons,
+		extractPdfPages,
+		ocrWorthyPages,
+		type ComplexityPage
+	} from '$lib/pdf/liteparse';
+	import {
+		mergeOcrResults,
+		ocrPdfPages,
+		ocrWholePdf,
+		type OcrPagesResult
+	} from '$lib/pdf/extract';
 	import { domainOf, isEpubUrl, isPdfUrl, sourceLabel } from '$lib/playlists/model';
 	import {
 		LS_KEYS,
@@ -142,7 +157,8 @@
 		ALL_TTS_ENGINES,
 		type TtsEngine,
 		type VoiceByEngine,
-		type LlmOcrSettings
+		type LlmOcrSettings,
+		type LlmOcrPayload
 	} from '$lib/settings';
 	import { inspectVoiceFile } from '$lib/tts/voiceFile';
 	import { fetchLlmDefaults, type LlmOcrDefaults } from '$lib/ocr/llm';
@@ -188,12 +204,21 @@
 	let panel: 'pdf' | 'playlist' | 'library' | null = $state(null);
 	let isOcrRunning: boolean = $state(false);
 	let ocrProgress: { done: number; total: number } | null = $state(null);
+	let ocrPhase: string = $state('Extracting text');
 	let ocrStartAt: number | null = $state(null);
 	// Anchored countdown ETA: each progress step sets a new anchor; the
 	// per-second ticker only ever counts that anchor down.
 	let ocrEtaSeconds: number | null = $state(null);
 	let ocrEtaAnchoredAt: number | null = $state(null);
 	let ocrNow: number = $state(Date.now());
+	// Partial-OCR prompt: analysis found pages browser extraction cannot read.
+	let ocrOffer: {
+		totalPages: number;
+		pages: number[];
+		reasons: Record<string, number>;
+		failure?: boolean;
+	} | null = $state(null);
+	let ocrOfferResolve: ((run: boolean) => void) | null = null;
 
 	let globalIdx: number = $state(0);
 	let isPlaying: boolean = $state(false);
@@ -210,9 +235,10 @@
 	let optPageMarkers: boolean = $state(true);
 	let optFirstPageMarker: boolean = $state(true);
 	let optFirstPageNumber: number = $state(1);
-	/** Extraction engine for the staging bar: auto routes text-vs-OCR, `llm`
-	 * posts to the vision-LLM endpoint instead of `/api/ocr/jobs`. */
-	let optEngine: 'auto' | 'text' | 'docling' | 'llm' = $state('auto');
+	/** Extraction engine for the staging bar.
+	 * `auto` parses in-browser and offers LLM OCR for unreadable pages;
+	 * `liteparse` is browser-only; `llm` OCRs every page. */
+	let optEngine: 'auto' | 'liteparse' | 'llm' = $state('auto');
 	// Guard persistence writes until onMount has restored last-set state, so
 	// default initial values never clobber localStorage on first render.
 	let settingsHydrated: boolean = $state(false);
@@ -240,8 +266,6 @@
 			insert_page_markers: optPageMarkers,
 			first_page_marker: optFirstPageMarker,
 			first_page_number: optFirstPageNumber,
-			// The LLM endpoint shares the schema; it ignores `engine`.
-			engine: optEngine === 'llm' ? 'auto' : optEngine,
 			page_overrides: Object.keys(pageOverrides).length > 0 ? { ...pageOverrides } : null
 		};
 	}
@@ -732,10 +756,10 @@
 		return () => clearInterval(id);
 	});
 
-	function anchorOcrEta(done: number, total: number, eventEta: unknown) {
+	function anchorOcrEta(done: number, total: number, _eventEta?: unknown) {
 		if (!isOcrRunning || ocrStartAt === null) return;
 		const elapsed = (Date.now() - ocrStartAt) / 1000;
-		const next = resolveAnchoredEta(eventEta, done, total, elapsed);
+		const next = measureEtaSeconds(done, total, elapsed);
 		if (next === null) return;
 		ocrEtaSeconds = next;
 		ocrEtaAnchoredAt = Date.now();
@@ -1107,13 +1131,9 @@
 		return text;
 	}
 
-	/** OCR endpoint base for an engine choice (`llm` has its own router). */
-	function ocrJobBase(engine: string): string {
-		return engine === 'llm' ? `${API_BASE}/api/ocr/llm/jobs` : `${API_BASE}/api/ocr/jobs`;
-	}
-
-	function beginOcrProgress() {
+	function beginOcrProgress(phase = 'Extracting text') {
 		isOcrRunning = true;
+		ocrPhase = phase;
 		ocrProgress = { done: 0, total: 0 };
 		ocrStartAt = Date.now();
 		ocrEtaSeconds = null;
@@ -1151,68 +1171,164 @@
 		showToast('LLM OCR settings saved');
 	}
 
-	/** JSON for the `llm` form field, or null when another engine is active. */
-	function llmPayloadJson(): string | null {
-		if (optEngine !== 'llm') return null;
-		return JSON.stringify(buildLlmPayload(llmSettings, llmApiKey));
+	/** LLM overrides for `/api/llm/ocr` (empty object means server defaults). */
+	function llmPayload(): LlmOcrPayload {
+		return buildLlmPayload(llmSettings, llmApiKey);
 	}
 
-	/** Submit a PDF OCR job and wait for its result (SSE with polling fallback).
-	 *
-	 * Updates the shared progress state so the progress pane animates.
-	 * Returns the job `result` payload (`markdown`, `raw_markdown`, …).
-	 */
-	async function runOcrJobToResult(
-		file: Blob,
-		filename: string,
-		postprocessJson: string,
-		base: string,
-		llmJson: string | null = null
-	): Promise<any> {
-		const fd = new FormData();
-		// Pass filename explicitly so the backend always sees it,
-		// even if the File object was wrapped/proxied by state.
-		fd.append('file', file, filename);
-		fd.append('postprocess', postprocessJson);
-		if (llmJson) fd.append('llm', llmJson);
-		const resp = await fetch(base, { method: 'POST', body: fd });
-		if (!resp.ok) throw new Error(await parseErrorResponse(resp));
-		const { job_id } = await resp.json();
-		const es = new EventSource(`${base}/${job_id}/events`);
-		await new Promise<any>((resolve, reject) => {
-			es.onmessage = (ev) => {
-				try {
-					const data = JSON.parse(ev.data);
-					if (data.type === 'progress' || data.type === 'keepalive') {
-						ocrProgress = { done: data.done ?? 0, total: data.total ?? 0 };
-						anchorOcrEta(data.done ?? 0, data.total ?? 0, data.eta);
-					} else if (data.type === 'done') {
-						es.close();
-						resolve(data);
-					} else if (data.type === 'error') {
-						es.close();
-						reject(new Error(data.error));
-					}
-				} catch {}
-			};
-			es.onerror = () => {};
-		}).catch(async () => {
-			for (let i = 0; i < 120; i++) {
-				await new Promise((r) => setTimeout(r, 2000));
-				const r = await fetch(`${base}/${job_id}`);
-				if (!r.ok) continue;
-				const j = await r.json();
-				ocrProgress = { done: j.progress.done, total: j.progress.total };
-				anchorOcrEta(j.progress.done, j.progress.total, j.progress.eta);
-				if (j.status === 'done') return j;
-				if (j.status === 'error') throw new Error(j.error);
-			}
-			throw new Error('OCR poll timeout');
+	/** In-flight page render/OCR requests; keep a local cap even when unbounded. */
+	function ocrConcurrency(): number {
+		const n = llmSettings.concurrency ?? llmDefaults?.concurrency ?? 2;
+		return n > 0 ? Math.min(n, 8) : 2;
+	}
+
+	/** Ask whether to OCR pages the browser cannot read. Resolves to run/skip. */
+	function askOcrOffer(offer: {
+		totalPages: number;
+		pages: number[];
+		reasons: Record<string, number>;
+		failure?: boolean;
+	}): Promise<boolean> {
+		ocrOffer = offer;
+		return new Promise<boolean>((resolve) => {
+			ocrOfferResolve = resolve;
 		});
-		const r = await fetch(`${base}/${job_id}`);
-		const job = await r.json();
-		if (job.status !== 'done') throw new Error(job.error ?? 'OCR failed');
-		return job.result;
+	}
+
+	function resolveOcrOffer(run: boolean) {
+		const resolve = ocrOfferResolve;
+		ocrOfferResolve = null;
+		ocrOffer = null;
+		resolve?.(run);
+	}
+
+	function handleOcrOfferRun() {
+		resolveOcrOffer(true);
+	}
+
+	function handleOcrOfferKeep() {
+		resolveOcrOffer(false);
+	}
+
+	function handleOcrOfferConfigure() {
+		resolveOcrOffer(false);
+		void openLlmSettings();
+	}
+
+	/** OCR selected pages with the shared progress bar. */
+	async function runPageOcr(bytes: Uint8Array, pages: number[]): Promise<OcrPagesResult> {
+		ocrProgress = { done: 0, total: pages.length };
+		const result = await ocrPdfPages(bytes, pages, {
+			apiBase: API_BASE,
+			llm: llmPayload(),
+			concurrency: ocrConcurrency(),
+			onProgress: (done, total) => {
+				ocrProgress = { done, total };
+				ocrPhase = `OCR page ${Math.min(done + 1, total)}/${total}`;
+				anchorOcrEta(done, total, undefined);
+			}
+		});
+		if (result.failed.length > 0) {
+			showToast(`${result.failed.length}/${pages.length} pages failed OCR`);
+		}
+		return result;
+	}
+
+	/** OCR the entire document and return its page array. */
+	async function ocrWholeDocument(bytes: Uint8Array) {
+		const { totalPages, result } = await ocrWholePdf(bytes, {
+			apiBase: API_BASE,
+			llm: llmPayload(),
+			concurrency: ocrConcurrency(),
+			onProgress: (done, total) => {
+				ocrProgress = { done, total };
+				ocrPhase = `OCR page ${Math.min(done + 1, total)}/${total}`;
+				anchorOcrEta(done, total, undefined);
+			}
+		});
+		const pages = new Array<string>(totalPages).fill('');
+		mergeOcrResults(pages, result);
+		if (result.failed.length > 0) {
+			showToast(`${result.failed.length}/${totalPages} pages failed OCR`);
+		}
+		return { pages, totalPages };
+	}
+
+	/** Browser extraction with optional LLM OCR for unreadable pages. */
+	async function extractPdf(
+		bytes: Uint8Array,
+		engine: 'auto' | 'liteparse' | 'llm',
+		options: { offerOcr: boolean }
+	): Promise<{ pages: string[]; totalPages: number }> {
+		if (engine === 'llm') {
+			return ocrWholeDocument(bytes);
+		}
+
+		ocrPhase = 'Analyzing pages…';
+		let analysis;
+		try {
+			analysis = await analyzePdf(bytes);
+		} catch (e) {
+			if (engine === 'auto' && options.offerOcr) {
+				const run = await askOcrOffer({
+					totalPages: 0,
+					pages: [],
+					reasons: {},
+					failure: true
+				});
+				if (run) return ocrWholeDocument(bytes);
+			}
+			throw e;
+		}
+
+		const flagged = ocrWorthyPages(analysis.pages);
+		ocrPhase = `Extracting page 1/${analysis.totalPages}`;
+		const parsedPromise = extractPdfPages(
+			bytes,
+			analysis.totalPages,
+			(done, total) => {
+				ocrProgress = { done, total };
+				ocrPhase = `Extracting page ${Math.min(done + 1, total)}/${total}`;
+				anchorOcrEta(done, total, undefined);
+			}
+		);
+
+		let ocrPages: number[] = [];
+		if (flagged.length > 0) {
+			if (engine === 'auto' && options.offerOcr) {
+				const run = await askOcrOffer({
+					totalPages: analysis.totalPages,
+					pages: flagged.map((p: ComplexityPage) => p.pageNumber).sort((a, b) => a - b),
+					reasons: countReasons(flagged)
+				});
+				if (run) ocrPages = flagged.map((p: ComplexityPage) => p.pageNumber);
+			} else {
+				showToast(`${flagged.length}/${analysis.totalPages} pages may need OCR`);
+			}
+		}
+
+		let parsed;
+		try {
+			parsed = await parsedPromise;
+		} catch (e) {
+			if (engine === 'auto' && options.offerOcr) {
+				const run = await askOcrOffer({
+					totalPages: analysis.totalPages,
+					pages: [],
+					reasons: {},
+					failure: true
+				});
+				if (run) return ocrWholeDocument(bytes);
+			}
+			throw e;
+		}
+
+		const pages = parsed.pages;
+		if (ocrPages.length > 0) {
+			const result = await runPageOcr(bytes, ocrPages);
+			mergeOcrResults(pages, result);
+		}
+		return { pages, totalPages: parsed.totalPages };
 	}
 
 	async function runOcr() {
@@ -1229,28 +1345,19 @@
 			showToast('Extraction already running');
 			return;
 		}
-		beginOcrProgress();
+		beginOcrProgress('Loading PDF engine…');
 		let ocrSucceeded = false;
 		try {
-			const result = await runOcrJobToResult(
-				fileToUpload,
-				fileToUpload.name || 'upload.pdf',
-				JSON.stringify(currentPostprocessOpts()),
-				ocrJobBase(optEngine),
-				llmPayloadJson()
-			);
+			const bytes = new Uint8Array(await fileToUpload.arrayBuffer());
+			const { pages } = await extractPdf(bytes, optEngine, { offerOcr: true });
 			const title = fileToUpload.name.replace(/\.pdf$/i, '') || 'Untitled';
-			// Prefer raw backend output so re-render stays client-side/offline.
-			// Fall back to processed markdown for older backends.
-			const rawMarkdown = result.raw_markdown ?? result.markdown;
-			const rawPageMap = result.raw_page_map ?? result.page_map;
-			const doc = await createDoc(title, rawMarkdown, rawPageMap, currentPostprocessOpts());
+			const doc = await createDocFromPages(title, pages, currentPostprocessOpts());
 			// Cache the uploaded PDF so the viewer can reload it after
 			// reloads and doc switches. Storage failures must not fail OCR.
 			try {
 				await savePdf(doc.id, fileToUpload, fileToUpload.name || 'upload.pdf');
 			} catch (e: any) {
-				showToast(`OCR completed, but PDF caching failed: ${e?.message ?? e}`);
+				showToast(`Extraction completed, but PDF caching failed: ${e?.message ?? e}`);
 			}
 			docs = await getAllDocs();
 			try {
@@ -1281,10 +1388,10 @@
 				// (Playlist branch already refreshes via attach/openPlaylistItem.)
 				await refreshPlaylistData();
 			}
-			showToast('OCR completed');
+			showToast(pages.some((page) => page.trim()) ? 'Extraction completed' : 'No text extracted');
 			ocrSucceeded = true;
 		} catch (e: any) {
-			showToast(`OCR failed: ${e.message}`);
+			showToast(`Extraction failed: ${e?.message ?? e}`);
 		} finally {
 			clearOcrProgress();
 		}
@@ -1299,13 +1406,12 @@
 
 	/** Re-extract a playlist item's cached PDF with a chosen engine.
 	 *
-	 * Runs the same job flow as initial OCR, then swaps the doc's text in
-	 * place (title, playlist items, and cached PDF are kept). Progress
-	 * reuses the OCR progress pane.
+	 * Runs the same extraction flow as initial import, then swaps the doc's
+	 * text in place (title, playlist items, and cached PDF are kept).
 	 */
 	async function handleReprocessItem(
 		itemId: string,
-		engine: 'auto' | 'text' | 'docling' | 'llm'
+		engine: 'auto' | 'liteparse' | 'llm'
 	) {
 		const item = playlistItems.find((i) => i.id === itemId);
 		if (!item) return;
@@ -1331,29 +1437,24 @@
 		sentencePlayer?.stop();
 		stopOffline();
 		isPlaying = false;
-		beginOcrProgress();
+		beginOcrProgress('Loading PDF engine…');
 		try {
-			const opts = { ...currentPostprocessOpts(), engine: engine === 'llm' ? 'auto' : engine };
-			const result = await runOcrJobToResult(
-				pdf.blob,
-				pdf.name || 'document.pdf',
-				JSON.stringify(opts),
-				ocrJobBase(engine),
-				engine === 'llm' ? JSON.stringify(buildLlmPayload(llmSettings, llmApiKey)) : null
-			);
-			const rawMarkdown = result.raw_markdown ?? result.markdown;
-			const rawPageMap = result.raw_page_map ?? result.page_map;
-			const rendered = applyPostprocessing(rawMarkdown, opts, rawPageMap ?? null);
+			const bytes = new Uint8Array(await pdf.blob.arrayBuffer());
+			const { pages } = await extractPdf(bytes, engine, { offerOcr: true });
+			const opts = currentPostprocessOpts();
+			const rendered = applyPostprocessingPages(pages, opts);
 			const updated: Doc = {
 				...doc,
 				markdown: rendered.markdown,
 				sections: rendered.sections,
 				pageMap: rendered.pageMap,
-				rawMarkdown,
-				rawPageMap,
+				rawPages: pages,
+				pageCount: pages.length,
 				postprocess: opts,
 				updatedAt: Date.now()
 			};
+			delete (updated as Partial<Doc>).rawMarkdown;
+			delete (updated as Partial<Doc>).rawPageMap;
 			await saveDoc(updated);
 			docs = await getAllDocs();
 			const total = getGlobalSentences(rendered.sections).length;
@@ -2700,6 +2801,18 @@
 		<div class="fixed top-16 right-4 bg-slate-800 border border-sky-500 text-slate-100 px-4 py-2 rounded-lg shadow z-50">{toast}</div>
 	{/if}
 
+	<OcrOfferModal
+		open={ocrOffer !== null}
+		totalPages={ocrOffer?.totalPages ?? 0}
+		pages={ocrOffer?.pages ?? []}
+		reasons={ocrOffer?.reasons ?? {}}
+		failure={ocrOffer?.failure ?? false}
+		onRun={handleOcrOfferRun}
+		onKeep={handleOcrOfferKeep}
+		onConfigure={handleOcrOfferConfigure}
+		onClose={handleOcrOfferKeep}
+	/>
+
 	<main class="flex-1 min-h-0 flex flex-col mx-auto w-full px-4 py-4 gap-4 {view === 'reader' && activeDoc && panel && !isOcrRunning && !pdfPendingOcr ? 'max-w-none md:px-6' : 'max-w-6xl'}">
 		{#if view === 'overview'}
 			<Overview
@@ -2722,7 +2835,7 @@
 				onPasteText={() => (pasteDialogOpen = true)}
 			/>
 		{:else if isOcrRunning}
-			<OcrProgressPane {ocrProgress} {ocrEta} />
+			<OcrProgressPane {ocrProgress} {ocrEta} phase={ocrPhase} />
 		{:else if pdfPendingOcr && pdfUrl}
 			<div class="bg-slate-800 border border-sky-500/40 rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center gap-3">
 				<div class="flex-1 min-w-0">
@@ -2748,16 +2861,15 @@
 					<select
 						bind:value={optEngine}
 						aria-label="Extraction engine"
-						title="auto tries text extraction first, then OCR"
+						title="auto extracts in the browser and offers LLM OCR for scans"
 						class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
 					>
 						<option value="auto">auto</option>
-						<option value="text">text extraction</option>
-						<option value="docling">OCR: docling</option>
+						<option value="liteparse">browser only</option>
 						<option value="llm">OCR: LLM</option>
 					</select>
 				</label>
-				{#if optEngine === 'llm'}
+				{#if optEngine !== 'liteparse'}
 					<div class="flex items-center gap-2">
 						<button
 							onclick={openLlmSettings}

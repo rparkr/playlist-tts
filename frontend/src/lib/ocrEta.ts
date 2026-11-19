@@ -1,49 +1,29 @@
-/** Anchored countdown ETA for OCR progress.
+/** Anchored countdown ETA for local page OCR.
 
-The backend emits a fresh `eta` (seconds) about once per second via SSE
-`progress` / `keepalive` events. Between those steps the UI must tick the
-displayed value *down* by 1s every second — never recompute an ETA from
-`elapsed / done`, which counts *up* while `done` is stalled.
+The browser reports one completion per OCR page. Each step anchors a
+countdown (`anchorEtaSeconds` at `anchorAtMs`); rendering computes
+`max(0, anchor - (now - anchorAt) / 1000)`. A later step re-anchors (up or
+down); the per-second ticks always decrement.
 
-Model: each incoming step anchors a countdown (`anchorEtaSeconds` at
-`anchorAtMs`). Rendering computes `max(0, anchor - (now - anchorAt) / 1000)`.
-A later step re-anchors (up or down); the per-second ticks always decrement.
+The per-page estimate comes from measured throughput, not a fixed per-page
+budget: LLM OCR speed depends heavily on the model, image size, and server.
 */
 
-/** Seconds of VLM time budgeted per page — mirrors backend `OCR_SECONDS_PER_PAGE`. */
-export const OCR_SECONDS_PER_PAGE = 2.6;
-/** Fixed per-job overhead — mirrors backend `OCR_FIXED_OVERHEAD_S`. */
-export const OCR_FIXED_OVERHEAD_S = 8.0;
-
-/** Estimate whole-job seconds from page count. */
-export function estimateTotalSeconds(totalPages: number): number {
-	return Math.max(0, totalPages) * OCR_SECONDS_PER_PAGE + OCR_FIXED_OVERHEAD_S;
-}
-
 /**
- * Fallback ETA when a step carries no server `eta` (initial SSE event,
- * polling fallback). Countdown-style: total estimate minus elapsed.
+ * Estimate the remaining seconds from measured per-page throughput.
  *
- * Return `null` when no meaningful estimate exists yet.
+ * Returns `null` until at least one page has completed, since there is no
+ * basis for an estimate before that.
  */
-export function fallbackEtaSeconds(done: number, total: number, elapsedS: number): number | null {
-	if (!Number.isFinite(done) || !Number.isFinite(total) || !Number.isFinite(elapsedS)) return null;
-	if (total <= 0 || done <= 0 || elapsedS < 0) return null;
-	return Math.max(0, estimateTotalSeconds(total) - elapsedS);
-}
-
-/**
- * Pick the anchor for a newly arrived progress step: prefer the server
- * `eta` when present, otherwise fall back to the countdown estimate.
- */
-export function resolveAnchoredEta(
-	eventEta: unknown,
+export function measureEtaSeconds(
 	done: number,
 	total: number,
 	elapsedS: number
 ): number | null {
-	if (typeof eventEta === 'number' && Number.isFinite(eventEta)) return Math.max(0, eventEta);
-	return fallbackEtaSeconds(done, total, elapsedS);
+	if (!Number.isFinite(done) || !Number.isFinite(total) || !Number.isFinite(elapsedS)) return null;
+	if (total <= 0 || done <= 0 || elapsedS < 0) return null;
+	const perPage = elapsedS / done;
+	return Math.max(0, perPage * Math.max(0, total - done));
 }
 
 /** Apply countdown ticks to an anchor. Always non-increasing in `nowMs`. */

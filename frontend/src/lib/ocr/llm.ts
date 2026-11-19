@@ -64,7 +64,7 @@ export function visionLabel(model: LlmModelInfo): string {
 
 /** Fetch server-side defaults for the settings modal. */
 export async function fetchLlmDefaults(apiBase: string): Promise<LlmOcrDefaults> {
-	const resp = await fetch(`${apiBase}/api/ocr/llm/options`);
+	const resp = await fetch(`${apiBase}/api/llm/options`);
 	if (!resp.ok) throw new Error(await parseError(resp));
 	return resp.json();
 }
@@ -78,7 +78,7 @@ export async function fetchLlmModels(
 	const body: Record<string, string> = {};
 	if (baseUrl?.trim()) body.base_url = baseUrl.trim();
 	if (apiKey?.trim()) body.api_key = apiKey.trim();
-	const resp = await fetch(`${apiBase}/api/ocr/llm/models`, {
+	const resp = await fetch(`${apiBase}/api/llm/models`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
@@ -92,7 +92,7 @@ export async function testLlmConnection(
 	apiBase: string,
 	payload: LlmOcrPayload
 ): Promise<LlmTestResponse> {
-	const resp = await fetch(`${apiBase}/api/ocr/llm/test`, {
+	const resp = await fetch(`${apiBase}/api/llm/test`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(payload)
