@@ -7,7 +7,8 @@ import { SvelteKitPWA } from '@vite-pwa/sveltekit';
 export default defineConfig({
 	// phonon-tts resolves its worker and WASM files with `new URL(...,
 	// import.meta.url)`; pre-bundling would rewrite those paths wrongly.
-	optimizeDeps: { exclude: ['phonon-tts'] },
+	// LiteParse ships a wasm asset referenced the same way.
+	optimizeDeps: { exclude: ['phonon-tts', '@llamaindex/liteparse-wasm'] },
 	plugins: [
 		tailwindcss(),
 		sveltekit({
@@ -32,11 +33,12 @@ export default defineConfig({
 				]
 			},
 			workbox: {
-				// WASM stays out of the precache: phonon-tts keeps model and
-				// runtime files in the Cache API after the first use, and
-				// shipping them in the service-worker install would be costly.
-				globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-				maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
+				// Precache app chunks plus the LiteParse wasm so PDF extraction
+				// works offline right after install. Phonon's ~18 MB runtime is
+				// deliberately excluded: it caches models after first use.
+				globPatterns: ['**/*.{js,css,html,svg,png,woff2,wasm}'],
+				globIgnores: ['**/phonon_tts*'],
+				maximumFileSizeToCacheInBytes: 8 * 1024 * 1024
 			}
 		})
 	],
