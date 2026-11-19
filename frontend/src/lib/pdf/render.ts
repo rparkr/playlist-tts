@@ -9,7 +9,8 @@ export interface PdfRenderer {
 	numPages: number;
 	/** Render one 1-indexed page as a JPEG blob. */
 	renderPage(pageNumber: number): Promise<Blob>;
-	destroy(): void;
+	/** Clean up the underlying PDF document and worker resources. */
+	destroy(): Promise<void>;
 }
 
 let pdfjsPromise: Promise<any> | null = null;
@@ -63,8 +64,8 @@ export async function openPdfRenderer(bytes: Uint8Array): Promise<PdfRenderer> {
 				);
 			});
 		},
-		destroy(): void {
-			void doc.destroy();
+		async destroy(): Promise<void> {
+			await task.destroy();
 		}
 	};
 }

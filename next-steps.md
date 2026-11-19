@@ -100,6 +100,8 @@
 ### PDF text extraction
 
 - [x] **More OCR options for LLM generation.** The OCR options should include a way to specify the base URL and API key for an OpenAI-compatible server that can be used for OCR; we should then use those credentials to query the server, list available LLMs (with vision support) for the user to choose, and also provide options for the user to change the system and user prompts that are sent to the LLM for each page of the PDF.
+- [x] **Replace PDF text extraction (`granite-docling` and `pypdf`) with [`LiteParse`](https://github.com/run-llama/liteparse/tree/main):** `LiteParse` is a robust Rust library from LlamaIndex that is fantastic at extracting structured Markdown from PDF documents. It is much faster than `granite-docling` and much more accurate than both `granite-docling` and `pypdf`. It also has TypeScript and WASM bindings, so we could run it directly in the browser rather than on the server. I recommend cloning the source to a temp directory and reviewing its documentation to learn how to integrate it into our application. Here's the [source code](https://github.com/run-llama/liteparse/tree/main).
+- [x] **PDF text extraction: hybrid per-page routing:** route each page independently between direct text extraction and OCR instead of one whole-document decision, so mixed vector/scan documents use text where dense and OCR where not. `LiteParse` has a built-in `is_complex()` method to detect when a page needs OCR; we can rely on that to determine when to apply OCR.
 
 ---
 
@@ -140,10 +142,7 @@
 
 ### PDF text extraction
 
-- [x] **Replace PDF text extraction (`granite-docling` and `pypdf`) with [`LiteParse`](https://github.com/run-llama/liteparse/tree/main):** `LiteParse` is a robust Rust library from LlamaIndex that is fantastic at extracting structured Markdown from PDF documents. It is much faster than `granite-docling` and much more accurate than both `granite-docling` and `pypdf`. It also has TypeScript and WASM bindings, so we could run it directly in the browser rather than on the server. I recommend cloning the source to a temp directory and reviewing its documentation to learn how to integrate it into our application. Here's the [source code](https://github.com/run-llama/liteparse/tree/main).
-- [x] **PDF text extraction: hybrid per-page routing:** route each page independently between direct text extraction and OCR instead of one whole-document decision, so mixed vector/scan documents use text where dense and OCR where not. `LiteParse` has a built-in `is_complex()` method to detect when a page needs OCR; we can rely on that to determine when to apply OCR.
 - [ ] **We need a "back" button on the PDF viewer/playlist viewer pane that moves back to view one-level up:** for the PDF viewer, that would be the Playlist, for the Playlist, that would be the Library, for the Library, that would be the Overview. Otherwise, it is very difficult to get back to the Playlist view if the PDF viewer is active (I have to go back to the library overview and then select the playlist from there to get to it).
-- [ ] **Stream the LLM's OCR content to disk (or browser memory/cache)** to enable resume in the event the OCR server crashes. For the LLM-based OCR, that would mean capturing the LLM's output and appending to the output file each time another page is completed, rather than holding everything in memory and writing to a file all at once after all pages are complete.
 
 ### Markdown parsing
 

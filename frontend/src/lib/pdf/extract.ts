@@ -68,7 +68,7 @@ export async function ocrPdfPages(
 	try {
 		return await ocrRenderedPages(renderer, pages, options);
 	} finally {
-		renderer.destroy();
+		await renderer.destroy();
 	}
 }
 
@@ -85,7 +85,7 @@ export async function ocrWholePdf(
 			result: await ocrRenderedPages(renderer, pages, options)
 		};
 	} finally {
-		renderer.destroy();
+		await renderer.destroy();
 	}
 }
 
