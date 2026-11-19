@@ -114,7 +114,7 @@ def get_local_ip() -> str:
 
 
 def main():
-    """Application entry point for running the web app in development mode"""
+    """Run the web app in development mode on the LAN."""
     ip = get_local_ip()
     port = 8000
     console.print("\n[bold green]🚀 OCR-TTS Reader Running![/bold green]")

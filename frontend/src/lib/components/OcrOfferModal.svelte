@@ -110,7 +110,7 @@
 						class="text-xs px-3 py-2 rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
 						onclick={onKeep}
 					>
-						Keep current text
+						{failure ? 'Cancel' : 'Keep current text'}
 					</button>
 					<button
 						type="button"

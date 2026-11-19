@@ -756,7 +756,7 @@
 		return () => clearInterval(id);
 	});
 
-	function anchorOcrEta(done: number, total: number, _eventEta?: unknown) {
+	function anchorOcrEta(done: number, total: number) {
 		if (!isOcrRunning || ocrStartAt === null) return;
 		const elapsed = (Date.now() - ocrStartAt) / 1000;
 		const next = measureEtaSeconds(done, total, elapsed);
@@ -1225,7 +1225,7 @@
 			onProgress: (done, total) => {
 				ocrProgress = { done, total };
 				ocrPhase = `OCR page ${Math.min(done + 1, total)}/${total}`;
-				anchorOcrEta(done, total, undefined);
+				anchorOcrEta(done, total);
 			}
 		});
 		if (result.failed.length > 0) {
@@ -1243,7 +1243,7 @@
 			onProgress: (done, total) => {
 				ocrProgress = { done, total };
 				ocrPhase = `OCR page ${Math.min(done + 1, total)}/${total}`;
-				anchorOcrEta(done, total, undefined);
+				anchorOcrEta(done, total);
 			}
 		});
 		const pages = new Array<string>(totalPages).fill('');
@@ -1289,7 +1289,7 @@
 			(done, total) => {
 				ocrProgress = { done, total };
 				ocrPhase = `Extracting page ${Math.min(done + 1, total)}/${total}`;
-				anchorOcrEta(done, total, undefined);
+				anchorOcrEta(done, total);
 			}
 		);
 
