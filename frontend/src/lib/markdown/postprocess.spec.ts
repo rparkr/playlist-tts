@@ -211,3 +211,48 @@ describe('page offsets', () => {
 		expect(pageMap.map((p) => p.page)).toEqual([5, 6]);
 	});
 });
+
+describe('applyPostprocessingPages', () => {
+	it('keeps one pageMap entry per physical page, including blanks', async () => {
+		const { applyPostprocessingPages } = await import('./postprocess');
+		const rendered = applyPostprocessingPages(['First page.', '', 'Third page.'], {
+			...DEFAULT_POSTPROCESS,
+			insert_page_markers: true
+		});
+		expect(rendered.markdown).toContain('Page 1.');
+		expect(rendered.markdown).toContain('Page 3.');
+		expect(rendered.pageMap.map((p) => p.page)).toEqual([1, 2, 3]);
+	});
+
+	it('applies first-page offsets and page overrides', async () => {
+		const { applyPostprocessingPages } = await import('./postprocess');
+		const rendered = applyPostprocessingPages(['One.', 'Two.', 'Three.'], {
+			...DEFAULT_POSTPROCESS,
+			first_page_number: 5,
+			page_overrides: { 2: 9 }
+		});
+		expect(rendered.markdown).toContain('Page 5.');
+		expect(rendered.markdown).toContain('Page 9.');
+		expect(rendered.pageMap.map((p) => p.page)).toEqual([5, 9, 7]);
+	});
+
+	it('omits markers when disabled but still maps pages', async () => {
+		const { applyPostprocessingPages } = await import('./postprocess');
+		const rendered = applyPostprocessingPages(['One.', 'Two.'], {
+			...DEFAULT_POSTPROCESS,
+			insert_page_markers: false
+		});
+		expect(rendered.markdown).not.toContain('Page 2.');
+		expect(rendered.pageMap).toHaveLength(2);
+	});
+
+	it('reflows and dehyphenates each page before joining', async () => {
+		const { applyPostprocessingPages } = await import('./postprocess');
+		const rendered = applyPostprocessingPages(['A hyphen-\nated word.', 'Second.'], {
+			...DEFAULT_POSTPROCESS,
+			combine_columns: true,
+			insert_page_markers: false
+		});
+		expect(rendered.markdown).toContain('hyphenated');
+	});
+});

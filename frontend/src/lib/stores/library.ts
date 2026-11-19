@@ -2,7 +2,10 @@ import { openDB, type DBSchema } from 'idb';
 import { parseMarkdownStructure, type Section, type PageMapItem } from '$lib/markdown/parse';
 import {
 	applyPostprocessing,
+	applyPostprocessingPages,
 	DEFAULT_POSTPROCESS,
+	hasPageBreaks,
+	splitOnPageBreaks,
 	stripPageMarkers,
 	type PostprocessOptions
 } from '$lib/markdown/postprocess';
@@ -15,11 +18,15 @@ export interface Doc {
 	slug?: string;
 	/** Rendered Markdown after post-processing (what the reader shows). */
 	markdown: string;
-	/** Raw OCR Markdown before post-processing (source for offline re-render). */
+	/** Raw per-page Markdown in physical PDF order (browser extraction). */
+	rawPages?: string[];
+	/** Cached physical page count for the source PDF. */
+	pageCount?: number;
+	/** Legacy: pageless raw Markdown (imports and pre-`rawPages` docs). */
 	rawMarkdown?: string;
-	/** Page map aligned to `rawMarkdown` (source for marker insertion). */
+	/** Legacy: page map aligned to `rawMarkdown`. */
 	rawPageMap?: PageMapItem[];
-	/** Options used to render `markdown` from `rawMarkdown`. */
+	/** Options used to render `markdown` from the raw source. */
 	postprocess?: PostprocessOptions;
 	sections: Section[];
 	pageMap?: PageMapItem[];
@@ -312,17 +319,17 @@ function uniqueSlug(base: string, existing: Set<string>): string {
 export async function getDoc(id: string): Promise<Doc | undefined> {
 	const db = await getDB();
 	const doc = await db.get('docs', id);
-	if (doc) return ensureDocDefaults(doc);
+	if (doc) return migrateDocPages(doc);
 	return undefined;
 }
 
 export async function getDocBySlugOrId(idOrSlug: string): Promise<Doc | undefined> {
 	const db = await getDB();
 	const byId = await db.get('docs', idOrSlug);
-	if (byId) return ensureDocDefaults(byId);
+	if (byId) return migrateDocPages(byId);
 	const all = await db.getAll('docs');
 	const match = all.find((d) => d.slug === idOrSlug);
-	if (match) return ensureDocDefaults(match);
+	if (match) return migrateDocPages(match);
 	return undefined;
 }
 
@@ -338,7 +345,7 @@ export async function ensureAllDocSlugs(): Promise<void> {
 			taken.add(doc.slug);
 			changed = true;
 		}
-		if (doc.rawMarkdown === undefined) {
+		if (doc.rawMarkdown === undefined && doc.rawPages === undefined) {
 			doc.rawMarkdown = doc.markdown;
 			changed = true;
 		}
@@ -346,6 +353,7 @@ export async function ensureAllDocSlugs(): Promise<void> {
 			doc.postprocess = { ...DEFAULT_POSTPROCESS };
 			changed = true;
 		}
+		if (migrateLegacyPageBreaks(doc)) changed = true;
 		if (changed) {
 			doc.updatedAt = Date.now();
 			await db.put('docs', doc);
@@ -363,15 +371,47 @@ function ensureDocSlug<T extends Doc>(doc: T): T {
 /** Backfill raw source fields for docs created before raw storage existed. */
 export function ensureDocDefaults<T extends Doc>(doc: T): T {
 	ensureDocSlug(doc);
-	if (doc.rawMarkdown === undefined) doc.rawMarkdown = doc.markdown;
+	if (doc.rawMarkdown === undefined && doc.rawPages === undefined) doc.rawMarkdown = doc.markdown;
 	if (doc.postprocess === undefined) doc.postprocess = { ...DEFAULT_POSTPROCESS };
+	migrateLegacyPageBreaks(doc);
+	return doc;
+}
+
+/** Split legacy `<!-- page break -->` Markdown into `rawPages` in place.
+ *
+ * Returns true when the doc changed and needs saving.
+ */
+function migrateLegacyPageBreaks(doc: Doc): boolean {
+	if (doc.rawPages !== undefined) return false;
+	const raw = doc.rawMarkdown;
+	if (!raw || !hasPageBreaks(raw)) return false;
+	doc.rawPages = splitOnPageBreaks(raw);
+	doc.pageCount = doc.rawPages.length;
+	delete doc.rawMarkdown;
+	delete doc.rawPageMap;
+	return true;
+}
+
+/** Ensure defaults, migrate legacy page breaks, and persist the migration. */
+async function migrateDocPages(doc: Doc): Promise<Doc> {
+	ensureDocDefaults(doc);
+	if (migrateLegacyPageBreaks(doc)) {
+		doc.updatedAt = Date.now();
+		await saveDoc(doc);
+	}
 	return doc;
 }
 
 export async function getAllDocs(): Promise<Doc[]> {
 	const db = await getDB();
 	const docs = await db.getAll('docs');
-	for (const d of docs) ensureDocDefaults(d);
+	for (const d of docs) {
+		ensureDocDefaults(d);
+		if (migrateLegacyPageBreaks(d)) {
+			d.updatedAt = Date.now();
+			await saveDoc(d);
+		}
+	}
 	return docs.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
@@ -401,25 +441,49 @@ export async function createDoc(
 ): Promise<Doc> {
 	const postprocess = opts ?? { ...DEFAULT_POSTPROCESS };
 	const rendered = applyPostprocessing(rawMarkdown, postprocess, rawPageMap ?? null);
+	const doc = await buildDoc(title, rendered, postprocess);
+	doc.rawMarkdown = rawMarkdown;
+	if (rawPageMap) doc.rawPageMap = rawPageMap;
+	await saveDoc(doc);
+	return doc;
+}
+
+/** Create a PDF doc from page-aligned raw Markdown (LiteParse + optional OCR). */
+export async function createDocFromPages(
+	title: string,
+	rawPages: string[],
+	opts?: PostprocessOptions
+): Promise<Doc> {
+	const postprocess = opts ?? { ...DEFAULT_POSTPROCESS };
+	const rendered = applyPostprocessingPages(rawPages, postprocess);
+	const doc = await buildDoc(title, rendered, postprocess);
+	doc.rawPages = [...rawPages];
+	doc.pageCount = rawPages.length;
+	await saveDoc(doc);
+	return doc;
+}
+
+/** Assemble the shared doc fields (id, unique slug, timestamps). */
+async function buildDoc(
+	title: string,
+	rendered: { markdown: string; sections: Section[]; pageMap: PageMapItem[] },
+	postprocess: PostprocessOptions
+): Promise<Doc> {
 	const cleanTitle = title.trim() || 'Untitled';
 	const db = await getDB();
 	const existing = await db.getAll('docs');
 	const taken = new Set(existing.map((d) => d.slug).filter(Boolean) as string[]);
-	const doc: Doc = {
+	return {
 		id: 'doc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
 		title: cleanTitle,
 		slug: uniqueSlug(slugify(cleanTitle), taken),
 		markdown: rendered.markdown,
-		rawMarkdown,
-		rawPageMap,
 		postprocess,
 		sections: rendered.sections,
 		pageMap: rendered.pageMap,
 		createdAt: Date.now(),
 		updatedAt: Date.now()
 	};
-	await saveDoc(doc);
-	return doc;
 }
 
 /** Re-render a doc from its stored raw Markdown with new options (offline).
@@ -437,37 +501,38 @@ export async function reapplyPostprocessing(
 	editedSource?: string
 ): Promise<Doc> {
 	const useEdited = editedSource !== undefined;
-	let source: string;
-	let rawMap: PageMapItem[] | null;
+	let rendered: { markdown: string; sections: Section[]; pageMap: PageMapItem[] };
+	let nextRawPages: string[] | undefined;
 	let nextRawMarkdown: string | undefined;
 	let nextRawPageMap: PageMapItem[] | undefined;
 
 	if (useEdited) {
-		// The draft may already equal the auto-saved doc text; it still counts
-		// as edited when the caller passes it (draft differs from last render).
+		// Edits are a pageless draft: page alignment is intentionally dropped.
 		const clean = stripPageMarkers(editedSource as string);
-		source = clean;
-		rawMap = null;
+		rendered = applyPostprocessing(clean, opts, null);
 		nextRawMarkdown = clean;
-		nextRawPageMap = undefined;
+	} else if (doc.rawPages !== undefined) {
+		rendered = applyPostprocessingPages(doc.rawPages, opts);
+		nextRawPages = doc.rawPages;
 	} else {
-		source = doc.rawMarkdown ?? doc.markdown;
-		rawMap = doc.rawPageMap ?? doc.pageMap ?? null;
+		const source = doc.rawMarkdown ?? doc.markdown;
+		const rawMap = doc.rawPageMap ?? doc.pageMap ?? null;
+		rendered = applyPostprocessing(source, opts, rawMap);
 		// Preserve raw source on first re-render of legacy docs.
 		nextRawMarkdown = doc.rawMarkdown === undefined ? doc.markdown : doc.rawMarkdown;
-		nextRawPageMap =
-			doc.rawPageMap === undefined && doc.pageMap ? doc.pageMap : doc.rawPageMap;
+		nextRawPageMap = doc.rawPageMap === undefined && doc.pageMap ? doc.pageMap : doc.rawPageMap;
 	}
-	const rendered = applyPostprocessing(source, opts, rawMap);
 	const updated: Doc = {
 		...JSON.parse(JSON.stringify(doc)) as Doc,
 		markdown: rendered.markdown,
 		sections: rendered.sections,
 		pageMap: rendered.pageMap,
 		postprocess: { ...opts },
+		rawPages: nextRawPages,
 		rawMarkdown: nextRawMarkdown,
 		rawPageMap: nextRawPageMap
 	};
+	if (updated.rawPages === undefined) delete (updated as Partial<Doc>).rawPages;
 	if (updated.rawMarkdown === undefined) delete (updated as Partial<Doc>).rawMarkdown;
 	if (updated.rawPageMap === undefined) delete (updated as Partial<Doc>).rawPageMap;
 	await saveDoc(updated);

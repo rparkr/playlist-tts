@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Browser PDF Extraction — LiteParse Fixture</title>
+		<style>
+			@page {
+				size: Letter;
+				margin: 1in;
+			}
+			body {
+				font-family: Georgia, 'Times New Roman', serif;
+				font-size: 11pt;
+				line-height: 1.5;
+				color: #111;
+			}
+			h1 {
+				font-family: Helvetica, Arial, sans-serif;
+				font-size: 24pt;
+				margin: 0 0 0.4em;
+			}
+			h2 {
+				font-family: Helvetica, Arial, sans-serif;
+				font-size: 15pt;
+				margin: 1.2em 0 0.4em;
+			}
+			p {
+				margin: 0 0 0.8em;
+			}
+			ul {
+				margin: 0 0 0.8em 1.2em;
+				padding: 0;
+			}
+			table {
+				border-collapse: collapse;
+				width: 100%;
+				margin: 0.8em 0;
+				font-size: 10pt;
+			}
+			th,
+			td {
+				border: 1px solid #555;
+				padding: 0.35em 0.5em;
+				text-align: left;
+			}
+			code {
+				font-family: 'Courier New', monospace;
+				font-size: 9.5pt;
+			}
+			pre {
+				background: #f2f2f2;
+				border: 1px solid #ccc;
+				padding: 0.7em;
+				font-size: 9pt;
+				white-space: pre-wrap;
+			}
+			.page-break {
+				break-before: page;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Browser PDF Extraction</h1>
+		<p>
+			This two-page fixture is original documentation for the OCR-TTS Reader test suite. It is
+			not copied from another project, so the repository can commit it without a third-party
+			license question.
+		</p>
+		<p>
+			LiteParse reads the PDF text layer in spatial reading order. It turns paragraphs into
+			Markdown, keeps headings as headings, and leaves the original page boundaries to the
+			caller. “Curly quotes” and other typographic punctuation should survive extraction.
+		</p>
+
+		<h2>What the extractor should preserve</h2>
+		<ul>
+			<li>Headings and their hierarchy.</li>
+			<li>Paragraphs with ordinary punctuation.</li>
+			<li>Lists such as this one.</li>
+			<li>Tables with a header row and body rows.</li>
+			<li>Inline code and fenced code blocks.</li>
+			<li>Hyperlinks when link extraction is enabled.</li>
+		</ul>
+
+		<table>
+			<thead>
+				<tr>
+					<th>Layer</th>
+					<th>Runs in</th>
+					<th>Purpose</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td>LiteParse</td>
+					<td>Browser</td>
+					<td>Text-layer extraction</td>
+				</tr>
+				<tr>
+					<td>LLM OCR</td>
+					<td>Server proxy</td>
+					<td>Scanned page images</td>
+				</tr>
+			</tbody>
+		</table>
+
+		<h2>Fixture provenance</h2>
+		<p>
+			The HTML source beside this PDF is the canonical content. Regenerate the PDF with headless
+			Chrome, then commit both files. See <code>README.md</code> in this directory for the exact
+			command. Project documentation for this repository is licensed under the same MIT license
+			as the code.
+		</p>
+
+		<div class="page-break"></div>
+
+		<h1>Second Page</h1>
+		<p>
+			The second page exists so integration tests can verify that page arrays stay aligned with
+			physical PDF pages. It also gives the parser a chance to reset headers, spacing, and list
+			state across a page boundary.
+		</p>
+
+		<h2>Example pipeline</h2>
+		<pre><code>const analysis = await parser.isComplex(bytes);
+const flagged = analysis.filter((page) =&gt; page.needsOcr);
+const result = await parser.parse(bytes);
+const pages = result.pages.map((page) =&gt; page.markdown);</code></pre>
+
+		<h2>Reading-order checks</h2>
+		<p>
+			A reader should see the heading above before this paragraph. Following the list below, the
+			closing sentence should remain last.
+		</p>
+		<ul>
+			<li>First item on page two.</li>
+			<li>Second item on page two.</li>
+			<li>Third item on page two.</li>
+		</ul>
+		<p>
+			End of fixture. For more about the parser, visit
+			<a href="https://github.com/run-llama/liteparse">the LiteParse repository</a>.
+		</p>
+	</body>
+</html>

@@ -1,42 +1,33 @@
-/** Client-side post-processing pipeline — mirrors `backend/app/services/postprocess.py`.
+/** Client-side post-processing pipeline.
  *
- * Stores raw OCR Markdown in IndexedDB and re-renders offline when the user
- * changes post-processing settings. Keep logic in parity with the backend;
- * the backend remains the initial OCR source, the frontend is the re-render
- * source of truth afterwards.
+ * Stores raw per-page Markdown in IndexedDB and re-renders offline when the
+ * user changes post-processing settings. The frontend is the single owner of
+ * Markdown rendering; the backend only proxies page images to the LLM.
  */
 
 import { parseMarkdownStructure, type PageMapItem, type Section } from './parse';
 import { isBareItemLine } from './parse';
 
-/** User-configurable post-processing flags (snake_case to match backend JSON). */
+/** User-configurable post-processing flags (snake_case to match stored JSON). */
 export interface PostprocessOptions {
 	combine_columns: boolean;
 	normalize_uppercase: boolean;
 	insert_page_markers: boolean;
 	first_page_marker?: boolean;
-	/** Extraction engine override for `/api/ocr/jobs` (`llm` routes to `/api/ocr/llm`). */
-	engine?: 'auto' | 'text' | 'docling' | 'llm';
 	/** Logical number of physical PDF page 1 (chapter scans). */
 	first_page_number?: number;
 	/** Physical (1-indexed) → logical page overrides (skipped illustrations). */
 	page_overrides?: Record<number, number> | null;
-	use_text_extract?: boolean;
-	text_min_chars?: number;
-	text_coverage_min?: number;
 }
 
-/** Default options for new documents (match backend defaults). */
+/** Default options for new documents. */
 export const DEFAULT_POSTPROCESS: PostprocessOptions = {
 	combine_columns: true,
 	normalize_uppercase: false,
 	insert_page_markers: true,
 	first_page_marker: true,
 	first_page_number: 1,
-	page_overrides: null,
-	use_text_extract: true,
-	text_min_chars: 200,
-	text_coverage_min: 0.6
+	page_overrides: null
 };
 
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
@@ -459,14 +450,23 @@ function firstSentenceEnd(text: string): number | null {
 export function joinPagesWithMarkers(
 	pages: string[],
 	insertMarkers: boolean,
-	joinOpts?: { firstPageNumber?: number; pageOverrides?: Record<number | string, number> | null; firstPageMarker?: boolean }
+	joinOpts?: {
+		firstPageNumber?: number;
+		pageOverrides?: Record<number | string, number> | null;
+		firstPageMarker?: boolean;
+		/** Keep one pageMap entry per input page, even when pages are empty. */
+		keepAlignment?: boolean;
+	}
 ): { markdown: string; pageMap: PageMapItem[] } {
 	const firstPageNumber = joinOpts?.firstPageNumber ?? 1;
 	const pageOverrides = joinOpts?.pageOverrides ?? null;
 	const firstPageMarker = joinOpts?.firstPageMarker ?? true;
 	const overrides = normalizePageOverrides(pageOverrides);
 	const keepAlignment =
-		Object.keys(overrides).length > 0 || firstPageNumber !== 1 || firstPageMarker;
+		joinOpts?.keepAlignment === true ||
+		Object.keys(overrides).length > 0 ||
+		firstPageNumber !== 1 ||
+		firstPageMarker;
 	const logical = (physical: number) => resolveLogicalPage(physical, firstPageNumber, overrides);
 	let effective: string[];
 	let physicalNos: number[];
@@ -617,8 +617,7 @@ export function applyPostprocessing(
 	rawMarkdown: string,
 	opts: PostprocessOptions,
 	rawPageMap?: PageMapItem[] | null
-): { markdown: string; sections: Section[]; pageMap: PageMapItem[] } {
-	let md = stripImageArtifacts(rawMarkdown);
+): { markdown: string; sections: Section[]; pageMap: PageMapItem[] } {	let md = stripImageArtifacts(rawMarkdown);
 	const firstPageNumber = opts.first_page_number ?? 1;
 	const pageOverrides = opts.page_overrides ?? null;
 	const firstPageMarker = opts.first_page_marker ?? false;
@@ -660,4 +659,37 @@ export function applyPostprocessing(
 		newMap = buildPageMap(md, rawPageMap.length, firstPageNumber, pageOverrides);
 	}
 	return { markdown: md, sections, pageMap: newMap };
+}
+
+/** Process one raw page (dehyphenate, reflow, uppercase). */
+function processRawPage(page: string, opts: PostprocessOptions): string {
+	let out = page;
+	if (opts.combine_columns) {
+		out = dehyphenate(out);
+		out = reflowColumns(out);
+	}
+	if (opts.normalize_uppercase) out = normalizeUppercase(out);
+	return out;
+}
+
+/** Render page-aligned raw Markdown (`rawPages` from LiteParse or LLM OCR). */
+export function applyPostprocessingPages(
+	rawPages: string[],
+	opts: PostprocessOptions
+): { markdown: string; sections: Section[]; pageMap: PageMapItem[] } {
+	const firstPageNumber = opts.first_page_number ?? 1;
+	const pageOverrides = opts.page_overrides ?? null;
+	const firstPageMarker = opts.first_page_marker ?? true;
+	const processed = rawPages.map((page) => processRawPage(page ?? '', opts));
+	// Page arrays are physical PDF order: never drop empty pages, or page
+	// markers and the pageMap stop matching the PDF.
+	const joined = joinPagesWithMarkers(processed, opts.insert_page_markers, {
+		firstPageNumber,
+		pageOverrides,
+		firstPageMarker,
+		keepAlignment: true
+	});
+	let out = joined.markdown;
+	if (opts.combine_columns) out = dehyphenate(out);
+	return { markdown: out, sections: parseMarkdownStructure(out), pageMap: joined.pageMap };
 }
