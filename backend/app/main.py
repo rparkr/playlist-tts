@@ -13,9 +13,7 @@ from rich.console import Console
 from backend.app.api.compat import router as compat_router
 from backend.app.api.convert import router as convert_router
 from backend.app.api.fetch import router as fetch_router
-from backend.app.api.ocr import router as ocr_router
-from backend.app.api.ocr_llm import router as ocr_llm_router
-from backend.app.api.parse import router as parse_router
+from backend.app.api.llm import router as llm_router
 from backend.app.api.tts import router as tts_router
 
 console = Console()
@@ -39,12 +37,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(ocr_router)
-app.include_router(ocr_llm_router)
+app.include_router(llm_router)
 app.include_router(compat_router)
 app.include_router(convert_router)
 app.include_router(fetch_router)
-app.include_router(parse_router)
 app.include_router(tts_router)
 
 

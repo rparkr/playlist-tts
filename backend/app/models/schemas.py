@@ -1,7 +1,6 @@
-"""Pydantic schemas for OCR, parse, and TTS contracts."""
+"""Pydantic schemas for LLM OCR, TTS, fetch, and conversion contracts."""
 
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -26,7 +25,7 @@ class _BaseUrlModel(BaseModel):
 
 
 class LLMOcrConfig(_BaseUrlModel):
-    """Optional overrides for one LLM OCR job.
+    """Optional overrides for one LLM page OCR call.
 
     Every field is optional: omitted/empty values fall back to the server's
     environment defaults (`LLM_OCR_*`) and then to the built-in defaults.
@@ -83,109 +82,20 @@ class LLMTestResponse(BaseModel):
     latency_ms: int
 
 
-class PostprocessOptions(BaseModel):
-    """User-configurable post-processing flags."""
+class LLMPageOcrResponse(BaseModel):
+    """Markdown extracted from one page image."""
 
-    combine_columns: bool = True
-    normalize_uppercase: bool = False
-    insert_page_markers: bool = True
-    # Emit a `Page N.` marker for the first page too (default on: the PDF
-    # viewer needs it for back-navigation to page 1).
-    first_page_marker: bool = True
-    # Extraction engine override for `/api/ocr/jobs`: `auto` keeps the
-    # text-fast-path/Docling routing, `text` forces `pypdf` extraction,
-    # `docling` forces Docling OCR. The LLM engine lives on `/api/ocr/llm`.
-    engine: Literal["auto", "text", "docling"] = "auto"
-    # Logical number of physical PDF page 1 (chapter-by-chapter scans).
-    first_page_number: int = Field(default=1, ge=1)
-    # Physical (1-indexed) → logical page overrides (skipped illustrations).
-    page_overrides: dict[int, int] | None = Field(default=None)
-    # Digital-native text fast path (pypdf) tuning.
-    use_text_extract: bool = True
-    text_min_chars: int = Field(default=200, ge=0)
-    text_coverage_min: float = Field(default=0.6, ge=0.0, le=1.0)
-
-    @field_validator("normalize_uppercase", mode="before")
-    @classmethod
-    def _coerce_uppercase(cls, v: object) -> bool:
-        """Accept legacy string modes for backward compatibility."""
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str):
-            return v.lower() not in ("off", "false", "0", "")
-        return bool(v)
+    page: int = Field(ge=1, description="1-indexed physical PDF page number")
+    markdown: str
 
 
 class JobStatus(StrEnum):
-    """Background job status."""
+    """Background job status (used by TTS jobs)."""
 
     queued = "queued"
     running = "running"
     done = "done"
     error = "error"
-
-
-class PageMapItem(BaseModel):
-    """Mapping from PDF page to markdown offsets."""
-
-    page: int = Field(description="1-indexed page number")
-    char_start: int = Field(description="Inclusive char offset in markdown")
-    char_end: int = Field(description="Exclusive char offset in markdown")
-    start_line: int = Field(description="1-indexed line number")
-
-
-class Section(BaseModel):
-    """Markdown section with sentence-level chunks."""
-
-    id: int
-    titles: list[str] = Field(description="Hierarchical breadcrumb titles")
-    level: int = Field(ge=1, le=6, description="Header level (1-6)")
-    chunks: list[str] = Field(description="Sentence-level chunks for TTS")
-    paragraphs: list[list[str]] | None = Field(
-        default=None,
-        description="Sentence groups per paragraph; [0] holds heading sentences",
-    )
-    heading: str | None = Field(
-        default=None, description="Own heading text for this section, if any"
-    )
-
-
-class OCRJobCreateResponse(BaseModel):
-    """Response for POST /api/ocr/jobs."""
-
-    job_id: str
-
-
-class OCRJobStatusResponse(BaseModel):
-    """Response for GET /api/ocr/jobs/{id}."""
-
-    status: JobStatus
-    progress: dict[str, int] = Field(default_factory=lambda: {"done": 0, "total": 0})
-    result: dict | None = None
-    error: str | None = None
-
-
-class OCRDirectResponse(BaseModel):
-    """Response for synchronous OCR (alias)."""
-
-    filename: str
-    markdown: str
-    sections: list[Section]
-    page_map: list[PageMapItem]
-    meta: dict
-    raw_markdown: str | None = Field(
-        default=None, description="Unprocessed OCR markdown for client-side re-render"
-    )
-    raw_page_map: list[PageMapItem] | None = Field(
-        default=None, description="Page map aligned to raw_markdown"
-    )
-
-
-class ParseMarkdownResponse(BaseModel):
-    """Response for markdown parsing."""
-
-    markdown: str
-    sections: list[Section]
 
 
 class TTSVoicesResponse(BaseModel):

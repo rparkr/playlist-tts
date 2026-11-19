@@ -1,12 +1,11 @@
 [project]
 name = "ocr-tts"
 version = "0.1.0"
-description = "OCR to audiobook application — FastAPI backend with granite-docling and pocket-tts"
+description = "OCR to audiobook web app — browser PDF extraction, LLM OCR, and TTS"
 readme = "README.md"
 authors = [{ name = "Ryan Parker" }]
 requires-python = ">=3.12"
 dependencies = [
-    "docling>=2.120.1",
     "fastapi>=0.141.1",
     "httpx2>=2.12.0",
     # Required by the vision-LLM OCR engine (OpenAI-compatible API, e.g. llama.cpp).
@@ -15,12 +14,10 @@ dependencies = [
     "pocket-tts>=2.1.0",
     "ptts>=0.6.0",
     "pydantic>=2.0.0",
-    "pypdf>=6.0.0",
     # python-multipart is required for file upload in FastAPI
     "python-multipart>=0.0.9",
     "readability-lxml>=0.9",
     "rich>=15.0.0",
-    "typer>=0.26.8",
     "uvicorn[standard]>=0.34.0",
 ]
 
@@ -30,8 +27,6 @@ dependencies = [
 av = ["av>=14.0.0"]
 
 [project.scripts]
-ocr = "backend.app.cli.ocr:main"
-tts = "backend.app.cli.tts:main"
 app = "backend.app.main:main"
 
 [dependency-groups]
@@ -60,11 +55,10 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
 
 # B008 (function call in default argument) is idiomatic for FastAPI's
-# File(...)/Form(...) and Typer's Argument(...)/Option(...) declarations,
-# which require these calls in parameter defaults.
+# File(...)/Form(...) declarations, which require these calls in parameter
+# defaults.
 [tool.ruff.lint.per-file-ignores]
 "backend/app/api/*.py" = ["B008"]
-"backend/app/cli/*.py" = ["B008"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

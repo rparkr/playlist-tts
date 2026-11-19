@@ -1,42 +1,37 @@
-"""LLM OCR endpoints — job + SSE + sync alias.
+"""Stateless LLM endpoints — connection settings plus one-page OCR.
 
-Same contract as the Docling `/api/ocr` endpoints but backed by the vision-LLM
-engine (`llm_ocr_service`), which often extracts text Docling cannot. Kept as a
-separate router so the Docling path is untouched.
+`POST /api/llm/ocr` accepts a single page image rendered by the browser and
+returns its Markdown. There is no job registry, PDF upload, or server-side
+Markdown processing.
 """
 
-import asyncio
-import json
 import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from backend.app.api.ocr import _parse_postprocess, _validate_pdf_upload
 from backend.app.models.schemas import (
-    JobStatus,
     LLMModelInfo,
     LLMModelsRequest,
     LLMModelsResponse,
     LLMOcrConfig,
     LLMOcrDefaults,
+    LLMPageOcrResponse,
     LLMTestResponse,
-    OCRDirectResponse,
-    OCRJobCreateResponse,
-    OCRJobStatusResponse,
 )
-from backend.app.services.llm_ocr_service import (
-    LLM_SYNC_TIMEOUT_S,
+from backend.app.services.llm_logging import configure_llm_logging
+from backend.app.services.llm_service import (
     LLMConfig,
     create_llm_client,
-    create_llm_ocr_job,
-    get_llm_job,
-    llm_sse_events,
     model_supports_vision,
+    ocr_page_image,
     probe_llm,
 )
 
-router = APIRouter(prefix="/api/ocr/llm", tags=["ocr-llm"])
+router = APIRouter(prefix="/api/llm", tags=["llm"])
+
+#: Upper bound for one rendered page image. A 300-DPI Letter page as PNG is
+#: comfortably below this; anything larger is a client bug or abuse.
+MAX_IMAGE_BYTES: int = 25 * 1024 * 1024
 
 
 def _config_from_payload(payload: LLMOcrConfig) -> LLMConfig:
@@ -84,9 +79,27 @@ def _llm_error_detail(exc: Exception, config: LLMConfig) -> str:
     return detail[:1000]
 
 
+def _guess_image_mime(data: bytes) -> str | None:
+    """Resolve an image MIME type from its magic bytes.
+
+    The upload header is not trusted: mobile clients often send
+    `application/octet-stream`, and a mislabelled body must not reach the
+    vision model as a broken data URL.
+    """
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    return None
+
+
 @router.get("/options", response_model=LLMOcrDefaults)
 async def llm_options() -> LLMOcrDefaults:
-    """Return server-side LLM OCR defaults for the settings UI."""
+    """Return server-side LLM defaults for the settings UI."""
     config = LLMConfig.from_env()
     return LLMOcrDefaults(
         base_url=config.base_url,
@@ -143,94 +156,44 @@ async def test_llm_connection(payload: LLMOcrConfig) -> LLMTestResponse:
     return LLMTestResponse(ok=True, model=config.model, latency_ms=elapsed_ms)
 
 
-@router.post("/jobs", response_model=OCRJobCreateResponse, status_code=202)
-async def create_llm_job(
-    file: UploadFile = File(...),
-    postprocess: str | None = Form(None),
+@router.post("/ocr", response_model=LLMPageOcrResponse)
+async def ocr_page(
+    image: UploadFile = File(...),
+    page: int = Form(..., ge=1),
     llm: str | None = Form(None),
-) -> OCRJobCreateResponse:
-    """Create an LLM OCR job from an uploaded PDF."""
-    opts = _parse_postprocess(postprocess)
+) -> LLMPageOcrResponse:
+    """OCR one rendered page image and return its Markdown.
+
+    Args:
+        image: page raster, PNG/JPEG/WebP/GIF.
+        page: 1-indexed physical PDF page number, echoed back for merging.
+        llm: optional JSON-encoded `LLMOcrConfig` overrides.
+
+    Returns:
+        `{page, markdown}` with blank pages as an empty string.
+    """
     config = _config_from_form(llm)
-    pdf_bytes = await file.read()
 
-    _validate_pdf_upload(file, pdf_bytes)
+    if image.size is not None and image.size > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Page image is too large (max 25 MB).")
 
-    job_id = create_llm_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts, config)
-    return OCRJobCreateResponse(job_id=job_id)
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty page image.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Page image is too large (max 25 MB).")
 
+    mime_type = _guess_image_mime(data)
+    if mime_type is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported image type. Use PNG, JPEG, WebP, or GIF.",
+        )
 
-@router.get("/jobs/{job_id}", response_model=OCRJobStatusResponse)
-async def llm_job_status(job_id: str) -> OCRJobStatusResponse:
-    """Return LLM job status, progress, and result if done."""
-    job = get_llm_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
+    configure_llm_logging()
+    try:
+        markdown = await ocr_page_image(data, mime_type, config, page=page)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=_llm_error_detail(e, config)) from e
 
-    return OCRJobStatusResponse(
-        status=job.status,
-        progress={"done": job.progress_done, "total": job.progress_total},
-        result=job.result,
-        error=job.error,
-    )
-
-
-@router.get("/jobs/{job_id}/events")
-async def llm_job_events(job_id: str) -> StreamingResponse:
-    """SSE stream for LLM job progress (progress, keepalive, done, error)."""
-    job = get_llm_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    async def event_gen():
-        async for event in llm_sse_events(job_id):
-            data = json.dumps(event)
-            yield f"data: {data}\n\n"
-            if event.get("type") in ("done", "error"):
-                break
-            await asyncio.sleep(0)
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@router.get("/jobs/{job_id}/markdown")
-async def llm_job_markdown(job_id: str) -> PlainTextResponse:
-    """Download LLM markdown result as text/markdown."""
-    job = get_llm_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    if job.status != JobStatus.done or job.result is None:
-        raise HTTPException(status_code=409, detail="Job not completed.")
-    return PlainTextResponse(job.result["markdown"], media_type="text/markdown")
-
-
-@router.post("", response_model=OCRDirectResponse)
-async def llm_ocr_sync(
-    file: UploadFile = File(...),
-    postprocess: str | None = Form(None),
-    llm: str | None = Form(None),
-) -> OCRDirectResponse:
-    """Synchronous LLM OCR alias — creates job and polls until done."""
-    opts = _parse_postprocess(postprocess)
-    config = _config_from_form(llm)
-    pdf_bytes = await file.read()
-
-    _validate_pdf_upload(file, pdf_bytes)
-
-    job_id = create_llm_ocr_job(file.filename or "upload.pdf", pdf_bytes, opts, config)
-
-    for _ in range(LLM_SYNC_TIMEOUT_S):
-        await asyncio.sleep(1)
-        job = get_llm_job(job_id)
-        if job is None:
-            raise HTTPException(status_code=500, detail="Job disappeared.")
-        if job.status == JobStatus.done and job.result is not None:
-            return OCRDirectResponse.model_validate(job.result)
-        if job.status == JobStatus.error:
-            raise HTTPException(status_code=500, detail=job.error or "LLM OCR failed.")
-
-    raise HTTPException(status_code=504, detail="LLM OCR timed out.")
+    return LLMPageOcrResponse(page=page, markdown=markdown)
