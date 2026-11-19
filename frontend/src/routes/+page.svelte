@@ -847,6 +847,7 @@
 		pageOverrides = {};
 		pdfPendingOcr = true;
 		panel = 'pdf';
+		view = 'reader';
 		// Stage the PDF for preview + options — do NOT POST yet. The user
 		// presses "Extract text" (staging bar) to kick off OCR (#6).
 		await loadPdf();
